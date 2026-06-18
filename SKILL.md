@@ -10,7 +10,7 @@ contains the router instructions, both internal workflows, wrapper scripts, and
 a bundled backend source tree under `backend/ptagent`.
 
 Users should be able to install this one skill directory from
-`PhenoPack/Ptagent` and then invoke `$ptagent`; they should not need to clone the
+`PhenoPack/PTagent` and then invoke `$ptagent`; they should not need to clone the
 repository or run `pip install ptagent` / `pip install -e .`.
 
 ## What Is Bundled

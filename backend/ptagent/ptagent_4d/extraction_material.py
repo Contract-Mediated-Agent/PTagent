@@ -1847,7 +1847,7 @@ def _default_value_from_text(value: str, *, seed_key: str) -> tuple[float | None
             f"Midpoint of reviewed scan range [{low}, {high}].",
         )
     range_match = re.search(
-        r"([-+]?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][-+]?\d+)?)\s*(?:--|-|to|~|,|/|每)\s*([-+]?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][-+]?\d+)?)",
+        r"([-+]?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][-+]?\d+)?)\s*(?:--|-|to|~|,|/|per)\s*([-+]?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][-+]?\d+)?)",
         text,
         flags=re.IGNORECASE,
     )
