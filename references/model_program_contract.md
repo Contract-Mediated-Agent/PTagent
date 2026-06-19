@@ -139,6 +139,10 @@ previous artifacts.
   implementations subtract explicit species internally. Ask the user to confirm the totals.
   Use SM baseline 28/90, add reviewed BSM d.o.f. beyond the one SM Higgs scalar
   already in that baseline, and report the additions to the user.
+  If no enabled `masses.fermions` rows are reviewed, keep the explicit fermion
+  spectrum empty. Do not add placeholder fermion species to work around
+  CosmoTransitions smoke failures; `num_fermion_dof` remains only total
+  radiation metadata in that case.
 
 ## Expression Rules
 
@@ -206,6 +210,13 @@ Generated CosmoTransitions code should keep standard public method names:
 `V0`, `V1`, `V1T_from_X`, `Vtot`, `boson_massSq`, and `fermion_massSq`. For
 OS-like one-loop prescriptions, override `V1(self, bosons, fermions)` rather
 than creating ad hoc names.
+
+For standard CosmoTransitions thermal integrals, generated code may override
+`V1T(self, bosons, fermions, T, include_radiation=True)` only to preserve the
+standard formula while avoiding backend empty-spectrum spline calls. If the
+reviewed contract has no enabled fermion rows, `fermion_massSq` must return an
+empty spectrum, explicit fermion thermal integrals must be skipped, and
+`num_fermion_dof` must still contribute only through the total radiation d.o.f.
 
 Generated PhaseTracer C++ code should keep standard native hook names such as
 `V0`, `V1`, `V1T`, `V`, `get_*_masses_sq`, `get_*_dofs`, `get_raddof`,

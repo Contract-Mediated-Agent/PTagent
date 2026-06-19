@@ -477,6 +477,9 @@ truth. Derived JSON must not be hand-edited:
   baseline, and tell the user what was added. If Goldstones or photons are
   explicitly included/excluded, keep the total d.o.f. and explicit species list
   consistent.
+  If there are no reviewed enabled fermion mass rows, keep `fermion_massSq`
+  empty. Do not add unreviewed placeholder fermions to repair CosmoTransitions
+  smoke failures; `num_fermion_dof` remains total radiation metadata.
 
 Markdown tables should keep review metadata, d.o.f., policies, and status
 fields readable. Keep long prose notes out of table cells: put compact note
@@ -603,6 +606,11 @@ For Parwani, do not generate a separate `Vdaisy`; `V1T_from_X` must include the
 temperature-dependent one-loop route implied by the reviewed thermal-mass
 replacement. Never merge these two routes into one generic implementation.
 
+Do not repair CosmoTransitions thermal smoke failures by adding unreviewed
+fermion species. For a reviewed no-fermion model, preserve the empty fermion
+spectrum and use a backend-safe standard `V1T` path that skips explicit fermion
+thermal integrals while retaining total radiation d.o.f.
+
 When Section 6 provides reviewed per-particle Daisy rows with `zeroT_mass_sq`,
 `thermal_mass_sq`, and `dof`, generated code should prefer named mass terms and
 a small contract-driven cubic helper over a monolithic `custom_expr`. If the
@@ -634,6 +642,9 @@ when a less capable coding model edits the file:
 - Do not replace reviewed field-dependent matrices with vacuum mass relations.
 - Do not add, remove, or guess Goldstone, photon, Daisy, counterterm,
   phase-filter, or PhaseTracer symmetry conventions.
+- Do not add unreviewed fermion species just to avoid a CosmoTransitions
+  empty-spectrum thermal edge case. Keep the explicit spectrum empty and rely on
+  the generated safe standard `V1T` hook.
 - Preserve intentional blank lines between physical blocks in long generated
   methods such as `boson_massSq`, `Vtot`, `V1T_from_X`, and `Vdaisy`. Cleanup may
   remove unused code, but should not collapse readable block structure into a

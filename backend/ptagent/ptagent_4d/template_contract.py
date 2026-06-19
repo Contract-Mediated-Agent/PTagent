@@ -2579,6 +2579,11 @@ def _render_cosmotransitions_source(
     thermal = _dict(loops.get("thermal"))
     daisy = _dict(loops.get("daisy"))
     counterterm_mode = str(model_card.get("counterterm", "none")).strip() or "none"
+    cosmotransitions_import = (
+        "from cosmoTransitions import finiteT, generic_potential"
+        if thermal.get("mode") == "standard_thermal_integrals"
+        else "from cosmoTransitions import generic_potential"
+    )
     input_names = [str(row["name"]) for row in public_inputs]
     init_args = ", ".join(f"{name}={_float_literal(row.get('default'))}" for name, row in zip(input_names, public_inputs))
     init_signature = f", {init_args}" if init_args else ""
@@ -2655,6 +2660,7 @@ def _render_cosmotransitions_source(
         derived,
         parwani_zero_loop=resummation_scheme == "Parwani",
     )
+    v1t_method = _render_safe_v1t_method(thermal)
     v1_method = _render_v1_method(zero, counterterm_mode=counterterm_mode)
     os_like_helper = _render_os_like_helper(enabled=bool(v1_method.strip()))
     daisy_method = _render_daisy_method(
@@ -2726,7 +2732,7 @@ def _render_cosmotransitions_source(
 from __future__ import annotations
 
 import numpy as np
-from cosmoTransitions import generic_potential
+{cosmotransitions_import}
 
 
 MODEL_METADATA = {json.dumps(metadata, ensure_ascii=False, indent=2)}
@@ -2842,6 +2848,7 @@ class GeneratedPotential(generic_potential.generic_potential):
 
 {daisy_method}
 {os_like_helper}
+{v1t_method}
 {v1_method}
 {counterterm_methods}
 
@@ -3639,6 +3646,40 @@ def _render_v1_method(zero: dict[str, Any], *, counterterm_mode: str = "none") -
                 y = self._os_like_species_sum(bosons[0], bosons[1], bosons_vac[0])
                 y = y - self._os_like_species_sum(fermions[0], fermions[1], fermions_vac[0])
                 return y/(64.0*np.pi*np.pi)
+
+            """
+        ).strip("\n"),
+        "    ",
+    )
+
+
+def _render_safe_v1t_method(thermal: dict[str, Any]) -> str:
+    if thermal.get("mode") != "standard_thermal_integrals":
+        return ""
+    return textwrap.indent(
+        textwrap.dedent(
+            """
+            def V1T(self, bosons, fermions, T, include_radiation=True):
+                T = np.asanyarray(T, dtype=float)
+                T2 = (T*T)[..., np.newaxis] + 1e-100
+                T4 = T*T*T*T
+                boson_m2, boson_dof, _c = bosons
+                y = np.zeros(np.shape(T), dtype=float)
+                if boson_m2.shape[-1] > 0:
+                    y = y + np.sum(boson_dof*finiteT.Jb_spline(boson_m2/T2), axis=-1)
+                fermion_m2, fermion_dof = fermions
+                if fermion_m2.shape[-1] > 0:
+                    y = y + np.sum(fermion_dof*finiteT.Jf_spline(fermion_m2/T2), axis=-1)
+                if include_radiation:
+                    if self.num_boson_dof is not None:
+                        explicit_boson_dof = np.sum(boson_dof) if boson_dof.size else 0.0
+                        radiation_bosons = self.num_boson_dof - explicit_boson_dof
+                        y = y - radiation_bosons * np.pi**4 / 45.0
+                    if self.num_fermion_dof is not None:
+                        explicit_fermion_dof = np.sum(fermion_dof) if fermion_dof.size else 0.0
+                        radiation_fermions = self.num_fermion_dof - explicit_fermion_dof
+                        y = y - radiation_fermions * 7.0*np.pi**4 / 360.0
+                return y*T4/(2.0*np.pi*np.pi)
 
             """
         ).strip("\n"),
