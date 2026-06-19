@@ -244,6 +244,13 @@ backend context:
 - ask the public input basis question only when the final user-facing input list
   is not explicit in the source, user request, or reviewed contract. Otherwise
   fill it and cite the evidence in the contract/proof files;
+- when `standard_CW_V1` is used, or explicit counterterms differentiate a
+  Coleman-Weinberg source, identify the reviewed renormalization scale before
+  compilation. If the source gives a scale such as `Q`, `Qren`, or `mu_R`, add
+  it as a public input, fixed constant, or derived quantity and describe it as
+  the Coleman-Weinberg/renormalization scale. If no such source evidence exists,
+  ask the user; do not allow CosmoTransitions or PhaseTracer to fall back to a
+  hidden default scale;
 - before generating a full contract, ask for the model branch when the
   pre-contract scan finds multiple candidate model potentials and the user has
   not specified one, or when the user-specified model does not overlap with the
@@ -368,6 +375,10 @@ Compilation must block and enter question mode whenever any of these are true:
   terms, or regulated replacements;
 - photon or neutral gauge-boson branch handling is unclear, especially when a
   massless photon-like eigenvalue and a massive Z-like eigenvalue both appear;
+- standard Coleman-Weinberg `V1` is used but the reviewed renormalization scale
+  is missing or ambiguous. The generated CosmoTransitions code must set
+  `self.renormScaleSq` from the reviewed scale, and PhaseTracer must use the
+  same scale in its native CW route;
 - Daisy route is unclear between none, Parwani, Arnold-Espinosa, and custom;
 - counterterm status, CT basis, CT equations, or the CW source used in CT
   finite differences is unclear.
@@ -401,6 +412,13 @@ truth. Derived JSON must not be hand-edited:
   and solved parameters must be moved out of this table.
 - `parameters.constants`: fixed conventions such as `vh=246`.
 - `parameters.derived`: formulas solved from inputs/constants, in dependency order.
+- renormalization scale: when the zero-temperature loop route is
+  `standard_CW_V1`, or when explicit counterterms use a CW source, exactly one
+  reviewed parameter/constant/derived row must identify the scale. Common names
+  include `Qren`, `Q`, and `mu_R`; for ambiguous names like `Q`, the row's
+  description must say it is the Coleman-Weinberg/renormalization scale. The
+  CosmoTransitions compiler writes `self.renormScaleSq = scale**2` from this
+  row. If the paper gives no scale, ask the user before code generation.
 - potential pieces: V0, VCW, VCT, thermal, Daisy, and full-potential reference.
 - potential assembly: choose `none`, standard backend-native loop pieces, or a
   reviewed custom expression assembled from named pieces.

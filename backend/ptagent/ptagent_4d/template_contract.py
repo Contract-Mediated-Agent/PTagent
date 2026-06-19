@@ -120,6 +120,28 @@ THERMAL_BASIS_MIXING_REVIEW_MARKERS = (
     "reviewed final eigenvalue",
     "reviewed final eigenvalues",
 )
+RENORMALIZATION_SCALE_EXACT_NAMES = {
+    "mur",
+    "qren",
+    "qrenorm",
+    "renormscale",
+    "renormalizationscale",
+    "renormalisationscale",
+}
+RENORMALIZATION_SCALE_TEXT_MARKERS = (
+    "renormalization scale",
+    "renormalisation scale",
+    "renormalization-scale",
+    "renormalisation-scale",
+    "renorm scale",
+    "coleman-weinberg scale",
+    "coleman weinberg scale",
+    "cw scale",
+    "ms-bar scale",
+    "msbar scale",
+    "renormalization point",
+    "renormalisation point",
+)
 PARTIAL_THERMAL_SELF_ENERGY_MARKERS = (
     "delta pi",
     "deltapi",
@@ -1681,6 +1703,7 @@ def validate_contract(
         _require_expression(daisy.get("custom_expr"), runtime_allowed, "loops.daisy.custom_expr", issues)
     if zero.get("mode") in {"standard_CW_V1", "paper_os_like_V1"} and not (bosons or fermions or boson_matrices):
         issues.append(_error("loops.zero_temperature.mode", "missing_species", "Zero-temperature loop mode requires reviewed boson or fermion species."))
+    _validate_renormalization_scale(contract, zero, _dict(contract.get("model_card")), issues)
     if thermal.get("mode") == "standard_thermal_integrals" and not (bosons or fermions or boson_matrices):
         issues.append(_error("loops.thermal.mode", "missing_species", "standard_thermal_integrals requires reviewed boson or fermion species."))
     if thermal.get("mode") == "standard_thermal_integrals":
@@ -1702,6 +1725,87 @@ def validate_contract(
         compile_backend=compile_backend,
     )
     return ContractValidation(contract=contract, issues=issues)
+
+
+def reviewed_renormalization_scale_name(contract: dict[str, Any]) -> str:
+    name, candidates = _resolve_renormalization_scale_name(contract)
+    if name:
+        return name
+    if candidates:
+        raise CompileBlocked(
+            "Reviewed renormalization scale is ambiguous: "
+            + ", ".join(sorted({candidate["name"] for candidate in candidates}))
+        )
+    raise CompileBlocked("Reviewed renormalization scale is missing.")
+
+
+def _validate_renormalization_scale(
+    contract: dict[str, Any],
+    zero_loop: dict[str, Any],
+    model_card: dict[str, Any],
+    issues: list[ValidationIssue],
+) -> None:
+    zero_mode = str(zero_loop.get("mode", "")).strip()
+    counterterm_mode = str(model_card.get("counterterm", "")).strip()
+    if zero_mode != "standard_CW_V1" and counterterm_mode != "explicit_linear_system":
+        return
+    name, candidates = _resolve_renormalization_scale_name(contract)
+    if name:
+        return
+    if candidates:
+        issues.append(
+            _error(
+                "parameters.renormalization_scale",
+                "ambiguous_renormalization_scale",
+                "Standard Coleman-Weinberg V1 found multiple possible renormalization-scale parameters.",
+                "Keep exactly one reviewed renormalization-scale row, or rename the intended scale to Qren. The generated CosmoTransitions code will set self.renormScaleSq from that value.",
+            )
+        )
+        return
+    issues.append(
+        _error(
+            "parameters.renormalization_scale",
+            "missing_renormalization_scale",
+            "Standard Coleman-Weinberg V1 requires a reviewed renormalization scale for CosmoTransitions self.renormScaleSq.",
+            "If the paper provides a scale such as Q, mu_R, or Qren, add it as a reviewed public input, fixed constant, or derived quantity and describe it as the Coleman-Weinberg/renormalization scale. If the paper does not provide it, ask the user before compiling.",
+        )
+    )
+
+
+def _resolve_renormalization_scale_name(contract: dict[str, Any]) -> tuple[str, list[dict[str, str]]]:
+    candidates = _renormalization_scale_candidates(contract)
+    if not candidates:
+        return "", []
+    exact = [candidate for candidate in candidates if candidate["kind"] == "exact_name"]
+    selected = exact or candidates
+    names = sorted({candidate["name"] for candidate in selected})
+    if len(names) == 1:
+        return names[0], candidates
+    return "", candidates
+
+
+def _renormalization_scale_candidates(contract: dict[str, Any]) -> list[dict[str, str]]:
+    params = _dict(contract.get("parameters"))
+    rows: list[dict[str, Any]] = []
+    rows.extend(_list(params.get("public_inputs")))
+    rows.extend(_list(params.get("constants")))
+    rows.extend(_list(params.get("derived")))
+    candidates: list[dict[str, str]] = []
+    for row in rows:
+        name = str(row.get("name", "")).strip()
+        if not name:
+            continue
+        normalized_name = re.sub(r"[^a-z0-9]", "", name.lower())
+        if normalized_name in RENORMALIZATION_SCALE_EXACT_NAMES:
+            candidates.append({"name": name, "kind": "exact_name"})
+            continue
+        text = " ".join(
+            str(row.get(key, ""))
+            for key in ("name", "latex", "description", "source_type")
+        ).lower()
+        if any(marker in text for marker in RENORMALIZATION_SCALE_TEXT_MARKERS):
+            candidates.append({"name": name, "kind": "semantic_text"})
+    return candidates
 
 
 def _validate_model_card_and_implementation(
@@ -2655,7 +2759,13 @@ def _render_cosmotransitions_source(
     fermion_mass_body = _render_fermion_mass_body(fermions)
     implementation_phase_filter = _dict(implementation.get("phase_filter"))
     resummation_scheme = str(implementation_daisy.get("scheme") or model_card.get("resummation_scheme") or "")
-    runtime_assignments = _render_runtime_assignments(public_inputs, constants, derived)
+    renormalization_scale_name = _resolve_renormalization_scale_name(contract)[0]
+    runtime_assignments = _render_runtime_assignments(
+        public_inputs,
+        constants,
+        derived,
+        renormalization_scale_name=renormalization_scale_name,
+    )
     vtot_lines = _render_vtot_lines(
         zero,
         thermal,
@@ -2717,6 +2827,7 @@ def _render_cosmotransitions_source(
         "implementation_contract": implementation,
         "phase_filter": implementation_phase_filter,
         "loop_modes": loops,
+        "renormalization_scale": renormalization_scale_name,
         "excluded_species": excluded_species,
         "species_metadata": {
             "bosons": [
@@ -3020,11 +3131,13 @@ def _render_runtime_assignments(
     public_inputs: list[dict[str, Any]],
     constants: list[dict[str, Any]],
     derived: list[dict[str, Any]],
+    *,
+    renormalization_scale_name: str = "",
 ) -> str:
     names = {str(row.get("name", "")) for row in [*public_inputs, *constants, *derived]}
     lines: list[str] = []
-    if "Qren" in names:
-        lines.append("        self.renormScaleSq = float(self.Qren**2)")
+    if renormalization_scale_name:
+        lines.append(f"        self.renormScaleSq = float(self.{renormalization_scale_name}**2)")
     for name in ("num_boson_dof", "num_fermion_dof"):
         if name in names:
             lines.append(f"        self.{name} = int(round(float(self.{name})))")

@@ -95,6 +95,14 @@ previous artifacts.
 - `masses.fermions`: field-dependent fermionic mass squared expressions and d.o.f.
 - `loops.zero_temperature`: `none`, `standard_CW_V1`, or
   `custom_expr`.
+- Renormalization scale: `standard_CW_V1` and explicit counterterm systems that
+  differentiate a CW source require one reviewed scale row in public inputs,
+  fixed constants, or derived quantities. Use paper/source information such as
+  `Q`, `Qren`, or `mu_R` when available and describe ambiguous names as the
+  Coleman-Weinberg/renormalization scale. If the paper does not provide a
+  scale, ask the user before compile. Generated CosmoTransitions code must set
+  `self.renormScaleSq = scale**2`; generated PhaseTracer code must use the same
+  reviewed scale for native CW sums.
 - `loops.thermal`: `none`, `standard_thermal_integrals`, or `custom_expr`.
 - `loops.daisy`: `none` or `custom_expr`. Use `custom_expr` for an explicit
   Arnold-Espinosa Daisy term; Parwani must keep this as `none`.

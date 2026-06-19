@@ -24,14 +24,13 @@ from .phasetracer_expr import (
 )
 from .phasetracer_runner import run_phasetracer_smoke
 from .smoke_output import parse_detailed_smoke_output as _parse_detailed_smoke_output
-from .template_contract import validate_contract_template
+from .template_contract import reviewed_renormalization_scale_name, validate_contract_template
 
 
 PHASETRACER_SMOKE_ABS_TOL = 1e-8
 PHASETRACER_SMOKE_REL_TOL = 1e-10
 PHASETRACER_LOOP_SMOKE_ABS_TOL = 1e-7
 PHASETRACER_LOOP_SMOKE_REL_TOL = 1e-9
-PTAGENT_DEFAULT_RENORM_SCALE = 1000.0
 
 
 def compile_phasetracer_template(
@@ -1888,10 +1887,11 @@ def _ct_apply_operator_vector(func: Any, point: np.ndarray, axes: tuple[int, ...
 
 
 def _renorm_scale_sq(contract: dict[str, Any]) -> float:
-    values = _parameter_values(contract)
-    if "Qren" in values:
-        return float(values["Qren"]) ** 2
-    return PTAGENT_DEFAULT_RENORM_SCALE * PTAGENT_DEFAULT_RENORM_SCALE
+    name = reviewed_renormalization_scale_name(contract)
+    values = _parameter_reference_environment(contract)
+    if name not in values:
+        raise CompileBlocked(f"Reviewed renormalization scale {name!r} could not be evaluated.")
+    return float(values[name]) ** 2
 
 
 def _radiation_dof(contract: dict[str, Any]) -> float:
