@@ -31,9 +31,37 @@ backend/ptagent/
 requirements.txt
 ```
 
-Python dependencies are still external. On the first run, use the environment
-gate to report missing third-party packages/tools and stop before installing or
-downloading anything without explicit user approval.
+Python dependencies are still external.
+
+## Required First Step: Environment Gate
+
+The agent MUST run the environment gate before routing.
+
+For every new `$ptagent` task or conversation, the first action MUST run the
+environment gate before routing to 4D or 3DEFT work:
+
+```bash
+python <skill-dir>/scripts/check_environment.py
+```
+
+Use the installed skill directory as `<skill-dir>`. If the user provides a
+repository checkout, pass `--project-root <PTagent-repo-root>`. If the user
+provides an existing PhaseTracer source path, pass
+`--phasetracer-root <PhaseTracer-source-root>`.
+
+Read the JSON output before doing anything else. If `ready` is false, ask the
+user the listed environment question(s) and stop. CosmoTransitions must be
+available in either the current Python or configured runtime Python before
+continuing with 4D CosmoTransitions work. PhaseTracer must be found or
+configured before PhaseTracer compilation or comparison work.
+
+Do not continue to extraction, question mode, compilation, or code generation
+while the gate is blocked. Do not install Python packages, download
+PhaseTracer, or modify persistent config until the user explicitly approves.
+When PhaseTracer is missing and the user approves a download, use the
+`phasetracer_download_command` reported by the gate; it pins PhaseTracer release
+tag `2.2.2`. If the user already has PhaseTracer or provides a path, validate
+that path only; do not check or enforce its version.
 
 ## Routing
 
