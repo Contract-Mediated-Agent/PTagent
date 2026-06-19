@@ -66,11 +66,11 @@ When the gate reports that PhaseTracer is not found under the selected backend
 or project directory and no valid PhaseTracer root is configured, stop and ask
 whether to download PhaseTracer into the reported `phasetracer_download_dir` or
 whether the user wants to provide an existing PhaseTracer source path. Use the
-pinned release tag `2.2.2` only when PhaseTracer must be downloaded because no
-usable local/source path exists:
+latest PhaseTracer `main` branch only when PhaseTracer must be downloaded
+because no usable local/source path exists:
 
 ```bash
-git clone --branch 2.2.2 --depth 1 https://github.com/PhaseTracer/PhaseTracer.git <environment-gate-phasetracer_download_dir>
+git clone --branch main --depth 1 https://github.com/PhaseTracer/PhaseTracer.git <environment-gate-phasetracer_download_dir>
 ```
 
 Do not download or clone anything until the user explicitly approves. If the

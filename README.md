@@ -49,8 +49,8 @@ or downloading anything. In particular:
 - CosmoTransitions must be available in the Python runtime used for 4D
   CosmoTransitions smoke checks.
 - PhaseTracer is optional until PhaseTracer compilation is requested. If it is
-  missing, PTagent can ask whether to download PhaseTracer release tag `2.2.2`
-  or use a user-provided path.
+  missing, PTagent can ask whether to download the latest PhaseTracer `main`
+  branch or use a user-provided path.
 - 3DEFT workflows require a local Wolfram/Mathematica runtime and DRalgo setup.
 
 Python dependencies are listed in `requirements.txt`. If your Python allows

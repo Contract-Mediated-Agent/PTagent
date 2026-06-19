@@ -10,7 +10,7 @@ from typing import Any
 
 sys.dont_write_bytecode = True
 
-PHASETRACER_DOWNLOAD_TAG = "2.2.2"
+PHASETRACER_DOWNLOAD_BRANCH = "main"
 PHASETRACER_DOWNLOAD_URL = "https://github.com/PhaseTracer/PhaseTracer.git"
 
 
@@ -55,7 +55,7 @@ def main() -> int:
         questions.append(
             "No usable PhaseTracer source tree was found under the selected PTagent backend/project directory "
             "and none is configured. "
-            f"Ask the user whether to download PhaseTracer tag {PHASETRACER_DOWNLOAD_TAG} "
+            f"Ask the user whether to download the latest PhaseTracer `{PHASETRACER_DOWNLOAD_BRANCH}` branch "
             "into phasetracer_download_dir or provide an existing path."
         )
 
@@ -75,7 +75,7 @@ def main() -> int:
         "phasetracer_root_check_message": configured_phase_message,
         "project_phasetracer_candidates": [str(path) for path in project_phase_candidates],
         "phasetracer_existing_version_check": "not_checked",
-        "phasetracer_download_tag": PHASETRACER_DOWNLOAD_TAG,
+        "phasetracer_download_branch": PHASETRACER_DOWNLOAD_BRANCH,
         "phasetracer_download_url": PHASETRACER_DOWNLOAD_URL,
         "phasetracer_download_dir": str(phasetracer_download_dir),
         "phasetracer_download_command": _phasetracer_download_command(project_root),
@@ -124,7 +124,7 @@ def _phasetracer_download_command(project_root: Path) -> str:
         "git",
         "clone",
         "--branch",
-        PHASETRACER_DOWNLOAD_TAG,
+        PHASETRACER_DOWNLOAD_BRANCH,
         "--depth",
         "1",
         PHASETRACER_DOWNLOAD_URL,

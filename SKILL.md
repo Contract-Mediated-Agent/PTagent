@@ -59,9 +59,9 @@ Do not continue to extraction, question mode, compilation, or code generation
 while the gate is blocked. Do not install Python packages, download
 PhaseTracer, or modify persistent config until the user explicitly approves.
 When PhaseTracer is missing and the user approves a download, use the
-`phasetracer_download_command` reported by the gate; it pins PhaseTracer release
-tag `2.2.2`. If the user already has PhaseTracer or provides a path, validate
-that path only; do not check or enforce its version.
+`phasetracer_download_command` reported by the gate; it downloads the latest
+PhaseTracer `main` branch. If the user already has PhaseTracer or provides a
+path, validate that path only; do not check or enforce its version.
 
 ## Routing
 
