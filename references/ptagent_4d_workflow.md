@@ -151,8 +151,11 @@ or pass it to PhaseTracer compile commands as `--phasetracer-root`.
      identify reviewed symmetry-equivalent field points and avoid duplicate
      phase counting. Recommend `mode=none` unless the user confirms a reviewed
      Z2/sign-flip equivalence; if enabled, ask for the sign-flip field groups
-     used by `apply_symmetry` / `get_symmetry_axes`. Show reference-code/paper
-     hints, such as xSM-style `field < -5.0`, only as suggestions.
+     used by `apply_symmetry` / `get_symmetry_axes`. One contract row creates
+     one generated symmetry partner: `h,s` means `h -> -h and s -> -s`, while
+     two separate rows `h` and `s` mean `h -> -h or s -> -s`. Do not encode
+     independent alternatives as `h,s`. Show reference-code/paper hints, such
+     as xSM-style `field < -5.0`, only as suggestions.
    - Compile approval: after the Markdown template has no blockers, stop and
      ask the user to review the rendered `contract_template.md` and explicitly
      approve backend code generation/compilation. Do not treat a request like
@@ -427,7 +430,10 @@ truth. Derived JSON must not be hand-edited:
   `PhaseTracer Symmetry`. If enabled, list the field or simultaneous field
   groups whose sign is flipped. The generated C++ maps this to
   `apply_symmetry(phi)` and `get_symmetry_axes()` to identify equivalent field
-  points. This does not create new physical vacua.
+  points. This does not create new physical vacua. One contract row creates one
+  generated symmetry partner: `h,s` means `h -> -h and s -> -s`, while two
+  separate rows `h` and `s` mean `h -> -h or s -> -s`. Do not encode independent
+  alternatives as `h,s`.
 - Daisy resummation has two standard routes:
   - Parwani: replace one-loop finite-temperature mass eigenvalues by reviewed
     lowest-order thermal mass eigenvalues and add no separate `V_daisy`.

@@ -1182,7 +1182,7 @@ def _render_symmetry_methods(contract: dict[str, Any], fields: list[dict[str, An
 
 
 def _split_symmetry_fields(fields_text: str) -> list[str]:
-    return [item.strip() for item in re.split(r"[,;]", fields_text) if item.strip()]
+    return [item.strip() for item in fields_text.split(",") if item.strip()]
 
 
 def _render_method_prelude(

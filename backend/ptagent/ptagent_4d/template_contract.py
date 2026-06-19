@@ -391,7 +391,7 @@ def _render_human_contract_template(
             "1. If no compile backend has been specified, stop and ask the user to choose exactly one supported backend: `cosmotransitions` or `phasetracer`. Any other backend is not supported yet.",
             "2. Ask one fused question packet at a time. State how many packets and underlying backend-specific blockers remain, explain the current issue in plain language, and give Codex/PTagent's current leaning as reviewable guidance.",
             "3. Resolve the public-input gate from source/user/proof evidence: record the final public input list and one numeric `test_value` for every public input. Ask the user only when candidate inputs or test values cannot be safely determined.",
-            "4. Answer backend-specific phase handling: this is a mandatory user-confirmed gate. `cosmotransitions` uses phase filtering / `forbidPhaseCrit`; recommended default is `mode=none` unless the paper/reference code explicitly removes a traced phase branch. `phasetracer` uses `apply_symmetry(phi)` and `get_symmetry_axes()` to identify reviewed symmetry-equivalent field points; recommended default is `mode=none` unless the user confirms a Z2/sign-flip equivalence. The agent must present its recommendation and reason before patching these rows.",
+            "4. Answer backend-specific phase handling: this is a mandatory user-confirmed gate. `cosmotransitions` uses phase filtering / `forbidPhaseCrit`; recommended default is `mode=none` unless the paper/reference code explicitly removes a traced phase branch. `phasetracer` uses `apply_symmetry(phi)` and `get_symmetry_axes()` to identify reviewed symmetry-equivalent field points; recommended default is `mode=none` unless the user confirms a Z2/sign-flip equivalence. For PhaseTracer symmetry rows, one row creates one generated symmetry partner: `h,s` means `h -> -h and s -> -s`, while two separate rows `h` and `s` mean `h -> -h or s -> -s`. Do not encode independent alternatives as `h,s`. The agent must present its recommendation and reason before patching these rows.",
             "5. Fill the remaining `ASK_USER` cells and review the physics choices below.",
             "6. When the reviewed model is complete, stop and ask the user to review this rendered Markdown. Set `approved` to `true` only after explicit user approval to generate/compile backend code.",
             "7. Run `python -m ptagent compile --template contract_template.md --backend cosmotransitions` or `python -m ptagent compile --template contract_template.md --backend phasetracer`; this regenerates `proof_materials/contract_resolved.json` first.",
@@ -663,14 +663,14 @@ def _render_human_contract_template(
                 ["key", "value", "notes"],
                 [
                     {"key": "mode", "value": "ASK_USER", "notes": "Mandatory user-confirmed choice. Choices: none, z2_reflection. Recommendation: none unless the user confirms that PhaseTracer should merge reviewed field-reflection-equivalent points."},
-                    {"key": "notes", "value": "ASK_USER", "notes": "State the recommendation and reason. If mode=none, explain that no apply_symmetry equivalence is applied. If enabled, state the reviewed symmetry, e.g. xSM-like h -> -h and/or s -> -s."},
+                    {"key": "notes", "value": "ASK_USER", "notes": "State the recommendation and reason. If mode=none, explain that no apply_symmetry equivalence is applied. If enabled, state the reviewed symmetry and whether the sign flips are simultaneous (`and`) or independent alternatives (`or`)."},
                 ],
                 id_key="key",
             ),
             "",
             "### PhaseTracer Symmetry Rules",
             "",
-            "Use rows when `mode=z2_reflection`. Each row lists one simultaneous field-sign reflection. Example: `s` means `s -> -s`; `h,s` means `(h,s) -> (-h,-s)` as one combined symmetry operation.",
+            "Use rows when `mode=z2_reflection`. Each row lists one simultaneous field-sign reflection and creates one generated symmetry partner. Example: `s` means `s -> -s`; `h,s` means `h -> -h and s -> -s`, i.e. `(h,s) -> (-h,-s)` as one combined symmetry operation. Two separate rows `h` and `s` mean `h -> -h or s -> -s` and generate two separate partners. Do not encode independent alternatives as `h,s`; use separate rows.",
             "",
             _render_table(
                 ["enabled", "fields", "transformation", "reason", "source_reference"],
@@ -2348,7 +2348,7 @@ def _validate_phasetracer_symmetry(
                 "implementation.symmetry.rules",
                 "missing_value",
                 "PhaseTracer z2_reflection mode requires at least one reviewed symmetry rule.",
-                "List the field or simultaneous fields flipped by each Z2 symmetry, for example `s` or `h,s`.",
+                "List the field or simultaneous fields flipped by each Z2 symmetry, for example `s` or `h,s`. Use separate rows for independent alternatives.",
             )
         )
         return
@@ -2362,6 +2362,15 @@ def _validate_phasetracer_symmetry(
         if _placeholder(fields_text):
             issues.append(_error(f"implementation.symmetry.rules[{index}].fields", "placeholder_value", "PhaseTracer symmetry fields are unresolved."))
         else:
+            if _symmetry_fields_uses_alternative_separator(fields_text):
+                issues.append(
+                    _error(
+                        f"implementation.symmetry.rules[{index}].fields",
+                        "invalid_mode",
+                        "PhaseTracer symmetry alternatives must be encoded as separate rows.",
+                        "Use comma only for simultaneous flips such as `h,s`. If the reviewed symmetry is `h -> -h or s -> -s`, write two rows: one with `h` and one with `s`.",
+                    )
+                )
             for field in _split_symmetry_fields(fields_text):
                 if field not in field_names:
                     issues.append(
@@ -2391,7 +2400,11 @@ def _validate_phasetracer_symmetry(
 
 
 def _split_symmetry_fields(fields_text: str) -> list[str]:
-    return [item.strip() for item in re.split(r"[,;]", fields_text) if item.strip()]
+    return [item.strip() for item in fields_text.split(",") if item.strip()]
+
+
+def _symmetry_fields_uses_alternative_separator(fields_text: str) -> bool:
+    return bool(re.search(r"(?i)(;|\||\bor\b)", fields_text))
 
 
 def _validate_contract_choice(

@@ -133,7 +133,9 @@ previous artifacts.
     symmetry-equivalent field points so they are not counted as distinct phases;
     it does not create new physical vacua. For a Z2 reflection, list each field
     or simultaneous field group whose sign is flipped, for example `s` for
-    `s -> -s` or `h,s` for `(h,s) -> (-h,-s)`.
+    `s -> -s` or `h,s` for `h -> -h and s -> -s`. One row creates one generated
+    symmetry partner; two separate rows `h` and `s` mean `h -> -h or s -> -s`.
+    Do not encode independent alternatives as `h,s`.
 - `num_boson_dof` and `num_fermion_dof` whenever standard thermal integrals
   are used. These are total thermal-radiation d.o.f.; backend `V1T`
   implementations subtract explicit species internally. Ask the user to confirm the totals.
