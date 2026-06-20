@@ -10,8 +10,9 @@ contains the router instructions, both internal workflows, wrapper scripts, and
 a bundled backend source tree under `backend/ptagent`.
 
 Users should be able to install this one skill directory from
-`PhenoPack/PTagent` and then invoke `$ptagent`; they should not need to clone the
-repository or run `pip install ptagent` / `pip install -e .`.
+`PhenoPack/PTagent` and then invoke it through their agent's skill mechanism
+(for example `$ptagent` in Codex); they should not need to clone the repository
+or run `pip install ptagent` / `pip install -e .`.
 
 ## What Is Bundled
 
@@ -37,8 +38,8 @@ Python dependencies are still external.
 
 The agent MUST run the environment gate before routing.
 
-For every new `$ptagent` task or conversation, the first action MUST run the
-environment gate before routing to 4D or 3DEFT work:
+For every new PTagent skill task or conversation, the first action MUST run
+the environment gate before routing to 4D or 3DEFT work:
 
 ```bash
 python <skill-dir>/scripts/check_environment.py

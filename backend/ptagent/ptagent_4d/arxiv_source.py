@@ -93,7 +93,7 @@ def read_arxiv_source(
     )
 
     if prepared.bundled_tex_path and prepared.bundled_tex_path.exists():
-        _emit_progress(progress, "Reading arXiv TeX source with Codex parser", 0.52)
+        _emit_progress(progress, "Reading arXiv TeX source with the local TeX parser", 0.52)
         tex_text = prepared.bundled_tex_path.read_text(encoding="utf-8", errors="replace")
         spans.extend(_tex_context_spans(prepared.metadata.paper_id, tex_text, settings.source_span_limit * 3))
         paper_markdown_parts.append(_tex_material_markdown(prepared, tex_text))
@@ -188,7 +188,7 @@ def read_arxiv_archive_source(
         diagnostics["main_tex"] = str(main_tex_path)
         diagnostics["bundled_tex"] = str(bundled_tex_path)
 
-        _emit_progress(progress, "Reading uploaded arXiv TeX source with Codex parser", 0.52)
+        _emit_progress(progress, "Reading uploaded arXiv TeX source with the local TeX parser", 0.52)
         spans = _tex_context_spans(paper_id, tex_text, settings.source_span_limit * 3)
         if spans:
             paper_markdown = _archive_tex_material_markdown(paper_id, source_archive_path, main_tex_path, tex_text)

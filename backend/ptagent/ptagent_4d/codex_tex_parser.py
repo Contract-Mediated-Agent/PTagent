@@ -44,7 +44,7 @@ def parse_tex_formula_records(
 ) -> list[FormulaRecord]:
     """Parse TeX into clean formula records for human-review evidence.
 
-    This parser is not a full TeX engine. It is a Codex-authored, local
+    This parser is not a full TeX engine. It is a local
     extraction layer for PTagent review templates: expand simple macros, ignore
     prose/preamble noise, and emit renderable Markdown math snippets.
     """

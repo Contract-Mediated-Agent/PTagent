@@ -48,7 +48,7 @@ def extract_formula_records(spans: list[SourceSpan]) -> list[FormulaRecord]:
     """Extract clean formula evidence from non-TeX spans.
 
     TeX source files use `codex_tex_parser` directly. This span parser handles
-    PDF/Markdown projected text with the same Codex-authored display rules:
+    PDF/Markdown projected text with the same local display rules:
     avoid prose in math blocks, keep evidence renderable, and prefer concise
     formula candidates over maximal recall.
     """

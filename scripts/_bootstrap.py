@@ -40,7 +40,7 @@ def ensure_ptagent_backend(project_root: str = "") -> Path | None:
 
     raise RuntimeError(
         "Could not locate the PTagent backend. Install the self-contained "
-        "Codex skill bundle, run from the cloned repository, pass "
+        "PTagent skill package, run from the cloned repository, pass "
         "--project-root, set PTAGENT_PROJECT_ROOT, or install the backend "
         "Python package."
     )

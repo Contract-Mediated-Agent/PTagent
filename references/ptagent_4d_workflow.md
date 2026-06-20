@@ -45,7 +45,7 @@ fallback.
 
 ## First-Use Environment Gate
 
-At the first `$ptagent` invocation for a task or conversation, run the local
+At the first PTagent skill invocation for a task or conversation, run the local
 environment gate before extraction, question mode, or compilation:
 
 ```bash
@@ -167,7 +167,7 @@ or pass it to PhaseTracer compile commands as `--phasetracer-root`.
    If the source contains multiple candidate model potentials, ask which model
    branch/potential is being implemented before asking parameters specific to
    any one model.
-   For concrete model-construction questions, include Codex/PTagent's current
+   For concrete model-construction questions, include the agent's current
    leaning in parentheses or a `My current leaning` note when the source evidence
    supports one, and explain the reason briefly. This note is reviewable guidance,
    not a replacement for the user's answer. If the uncertainty does not affect
@@ -316,7 +316,7 @@ contract only when its role is clear and it passes physics checks:
 
 - Highest priority: user-provided reference code for the same paper/model,
   source-exact TeX equations, and explicit paper prose near those equations.
-- Medium priority: Codex-cleaned formulas with nearby source context and
+- Medium priority: agent-cleaned formulas with nearby source context and
   consistent symbols.
 - Low priority: PDF/OCR fragments, isolated formula candidates, section headers,
   relic-density formulas, cross sections, or labels that merely contain symbols
@@ -549,7 +549,7 @@ Compiler-expression status columns such as `expr_status`, `mass_sq_status`,
 block has a fixed review state. Allowed values are `needs_review`,
 `agent_reviewed`, and `human_modified`; compilation requires `agent_reviewed`.
 Use `human_modified` when a user edits a previously reviewed block so continue
-mode can quickly find the changed expressions, then Codex/PTagent must recheck
+mode can quickly find the changed expressions, then the agent must recheck
 the expression and set it back to `agent_reviewed` only after review. The
 status is no longer tied to a separate display-formula column.
 

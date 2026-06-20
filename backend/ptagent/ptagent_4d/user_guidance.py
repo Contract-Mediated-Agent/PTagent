@@ -118,8 +118,8 @@ def build_user_guidance_markdown(
         "- `contract_template.md` is the only file users should edit.",
         "- Files under `proof_materials/` and `generated_models/` are derived and will be overwritten.",
         "- Related blockers are fused into one question packet, and packets are asked one at a time in dependency order.",
-        "- Codex/PTagent should patch source-evident fields itself before asking; only uncertain physics choices should reach the user.",
-        "- Codex/PTagent should patch the Markdown, rerun this guide, and then ask the next question.",
+        "- The agent should patch source-evident fields itself before asking; only uncertain physics choices should reach the user.",
+        "- The agent should patch the Markdown, rerun this guide, and then ask the next question.",
         "",
         "```powershell",
         f"python -m ptagent resolve --template \"{template_label}\"",
@@ -158,7 +158,7 @@ def build_user_guidance_markdown(
         [
             "## How To Answer In Chat",
             "",
-            "Answer only the current question packet. Codex can then edit `contract_template.md`, rerun `resolve`, and ask the next packet if one remains.",
+            "Answer only the current question packet. The agent can then edit `contract_template.md`, rerun `resolve`, and ask the next packet if one remains.",
             "",
             "```text",
             "Q1: ...",
@@ -276,7 +276,7 @@ def _render_issue_question(
         f"- Accepted format: {target['format']}",
         f"- Ask the user: {prompt}",
         f"- My current thought (reviewable): {recommendation or _default_recommendation(issue, target)}",
-        "- If you accept my recommendation: Codex/PTagent will patch the edit target, rerun `resolve`, and continue with the next blocker if one remains.",
+        "- If you accept my recommendation: the agent will patch the edit target, rerun `resolve`, and continue with the next blocker if one remains.",
     ]
     if target.get("notes"):
         lines.append(f"- Notes: {target['notes']}")
@@ -326,8 +326,8 @@ def _render_question_packet(
         f"- Accepted format: {_packet_format(packet, target)}",
         f"- Ask the user: {_packet_prompt(packet, target)}",
         f"- My current thought (reviewable): {_packet_recommendation(packet, target, memory)}",
-        f"- Codex/PTagent should handle first: {agent_action}",
-        f"- If you accept my recommendation: Codex/PTagent will {agent_action} Then it will patch the Markdown, rerun `resolve`, and ask the next packet only if blockers remain.",
+        f"- The agent should handle first: {agent_action}",
+        f"- If you accept my recommendation: the agent will {agent_action} Then it will patch the Markdown, rerun `resolve`, and ask the next packet only if blockers remain.",
     ]
     notes = _packet_notes(packet, target)
     if notes:
@@ -462,7 +462,7 @@ def _packet_prompt(packet: QuestionPacket, target: dict[str, str]) -> str:
     if packet.key.startswith("masses."):
         return "Please provide the complete reviewed mass row or matrix route for this species, instead of answering name, mass, d.o.f., and constants separately."
     if len(packet.issues) > 1:
-        return f"Please answer these {len(packet.issues)} related fields together so Codex/PTagent can patch them in one pass."
+        return f"Please answer these {len(packet.issues)} related fields together so the agent can patch them in one pass."
     return _question_prompt(packet.representative, target)
 
 
@@ -490,7 +490,7 @@ def _packet_recommendation(packet: QuestionPacket, target: dict[str, str], memor
     if packet.key == "implementation.symmetry":
         return "recommend `mode=none` unless the user confirms PhaseTracer should merge reviewed symmetry-equivalent field points. Use `z2_reflection` only for an explicitly reviewed sign-flip invariance and list the field group(s)."
     if packet.key.startswith("masses."):
-        return "Codex/PTagent should fill source-exact mass expressions and standard CW constants itself, then ask only for conflicting or missing physics metadata."
+        return "The agent should fill source-exact mass expressions and standard CW constants itself, then ask only for conflicting or missing physics metadata."
     if packet.key == "symbols.unknown":
         return "classify obvious fixed constants and derived aliases locally from source context; ask the user only for genuinely ambiguous symbols."
     recommendations = [

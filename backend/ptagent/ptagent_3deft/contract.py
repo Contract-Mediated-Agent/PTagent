@@ -671,7 +671,7 @@ def build_user_questions(report: ValidationReport) -> str:
 
     if agent_backfill:
         lines.extend(["", "## Agent Backfill Queue", ""])
-        lines.append("These are not user questions yet. Codex/PTagent should first try to fill them from the reviewed DRalgo source, marked DRalgo output, or generated contract context.")
+        lines.append("These are not user questions yet. The agent should first try to fill them from the reviewed DRalgo source, marked DRalgo output, or generated contract context.")
         lines.append("")
         for issue in agent_backfill:
             lines.append(f"- `{issue.field_key}`: {issue.message}")
@@ -1868,8 +1868,8 @@ def _render_question_packet(packet: QuestionPacket, *, number: int, total: int) 
         f"- Accepted format: {_packet_format(packet)}",
         f"- Ask the user: {_packet_prompt(packet)}",
         f"- My current thought (reviewable): {_packet_recommendation(packet)}",
-        f"- Codex/PTagent should handle first: {agent_action}",
-        f"- If you accept my recommendation: Codex/PTagent will {agent_action} Then it will patch the Markdown, rerun `resolve`, and ask the next packet only if blockers remain.",
+        f"- The agent should handle first: {agent_action}",
+        f"- If you accept my recommendation: the agent will {agent_action} Then it will patch the Markdown, rerun `resolve`, and ask the next packet only if blockers remain.",
     ]
     notes = _packet_notes(packet)
     if notes:
@@ -2500,5 +2500,4 @@ def _write_json(path: Path, data: Any) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
     return path
-
 

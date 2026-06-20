@@ -349,7 +349,7 @@ def build_contract_template(memory: PaperMemory) -> str:
         if matrix_verified
         else (
             "Enabled by default because mixed scalar sectors must use matrix eigenvalues. "
-            "Codex/PTagent may derive a Hessian candidate from V0 for discussion, but must not mark it reviewed or compile it until it is checked against the paper mass spectrum and user-confirmed when inconsistent."
+            "PTagent/the agent may derive a Hessian candidate from V0 for discussion, but must not mark it reviewed or compile it until it is checked against the paper mass spectrum and user-confirmed when inconsistent."
         )
     )
     goldstone_defaults = _auto_goldstone_defaults(formulas)
@@ -411,7 +411,7 @@ def _render_human_contract_template(
             "Mode note: this template is created in `fresh` mode. If a later generated program is wrong, switch to `continue` mode by editing this same Markdown file and resolving/compiling from it; do not re-extract the paper unless you want a new independent run.",
             "",
             "1. If no compile backend has been specified, stop and ask the user to choose exactly one supported backend: `cosmotransitions` or `phasetracer`. Any other backend is not supported yet.",
-            "2. Ask one fused question packet at a time. State how many packets and underlying backend-specific blockers remain, explain the current issue in plain language, and give Codex/PTagent's current leaning as reviewable guidance.",
+            "2. Ask one fused question packet at a time. State how many packets and underlying backend-specific blockers remain, explain the current issue in plain language, and give the agent's current leaning as reviewable guidance.",
             "3. Resolve the public-input gate from source/user/proof evidence: record the final public input list and one numeric `test_value` for every public input. Ask the user only when candidate inputs or test values cannot be safely determined.",
             "4. Answer backend-specific phase handling: this is a mandatory user-confirmed gate. `cosmotransitions` uses phase filtering / `forbidPhaseCrit`; recommended default is `mode=none` unless the paper/reference code explicitly removes a traced phase branch. `phasetracer` uses `apply_symmetry(phi)` and `get_symmetry_axes()` to identify reviewed symmetry-equivalent field points; recommended default is `mode=none` unless the user confirms a Z2/sign-flip equivalence. For PhaseTracer symmetry rows, one row creates one generated symmetry partner: `h,s` means `h -> -h and s -> -s`, while two separate rows `h` and `s` mean `h -> -h or s -> -s`. Do not encode independent alternatives as `h,s`. The agent must present its recommendation and reason before patching these rows.",
             "5. Fill the remaining `ASK_USER` cells and review the physics choices below.",
@@ -472,7 +472,7 @@ def _render_human_contract_template(
             "## 4. Potential",
             "",
             "Long formulas are displayed outside tables so the Markdown preview remains readable.",
-            "The `Compiler expression` blocks are deterministic Python blocks that PTagent/Codex may maintain for you.",
+            "The `Compiler expression` blocks are deterministic Python blocks that PTagent and the agent may maintain for you.",
             "For loop/counterterm pieces, `0.0` can mean the block is not a custom-expression source; the actual implementation owner should be stated in Notes and in the Model Card route.",
             "Use simple assignments to name repeated pieces; the final line may be an expression or an assignment whose target is the compiled value.",
             "",
@@ -4869,7 +4869,7 @@ def _require_review_status(
                 field_key,
                 "invalid_review_status",
                 f"{subject} review status must be one of {sorted(REVIEW_STATUS_CHOICES)}.",
-                f"Use `{REVIEW_COMPILE_READY_STATUS}` only after Codex/PTagent has checked the Python block; use `human_modified` after manual edits.",
+                f"Use `{REVIEW_COMPILE_READY_STATUS}` only after the agent has checked the Python block; use `human_modified` after manual edits.",
             )
         )
         return
@@ -4885,7 +4885,7 @@ def _require_review_status(
         _error(
             field_key,
             code,
-            f"{subject} compiler expression needs Codex/PTagent review before compilation.",
+            f"{subject} compiler expression needs agent/PTagent review before compilation.",
             action,
         )
     )

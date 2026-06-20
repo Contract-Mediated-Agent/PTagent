@@ -1,15 +1,16 @@
 # PTagent
 
-PTagent is a self-contained Codex skill for finite-temperature phase-transition
-papers and reviewed DRalgo/3DEFT sources. Install this repository as one Codex
-skill, then use `$ptagent` in the Codex chat.
+PTagent is a self-contained agent skill package for finite-temperature
+phase-transition papers and reviewed DRalgo/3DEFT sources. Install this
+repository as one skill in a compatible agent environment, then invoke the
+PTagent skill through that environment's skill mechanism.
 
 The skill includes its own `backend/ptagent` source tree. Users do not need to
 clone a second repository, run `pip install ptagent`, or provide an API key.
 
 ## Install
 
-In Codex, ask:
+For example, in Codex you can ask:
 
 ```text
 Install the PTagent skill from https://github.com/PhenoPack/PTagent
@@ -24,7 +25,9 @@ python ~/.codex/skills/.system/skill-installer/scripts/install-skill-from-github
   --name ptagent
 ```
 
-After installation, the skill is available as `$ptagent`.
+After installation in Codex, the skill is available as `$ptagent`. Other
+skill-compatible agents may expose the same installed directory through their
+own invocation syntax.
 
 ## What The Skill Does
 
@@ -36,7 +39,7 @@ After installation, the skill is available as `$ptagent`.
   deterministic model contract.
 - Compiles reviewed contracts locally to CosmoTransitions or PhaseTracer
   artifacts.
-- Uses local code and the Codex agent review loop by default; it does not ask
+- Uses local code and the agent's review loop by default; it does not ask
   the user for an LLM API key.
 
 ## First Run
@@ -100,7 +103,7 @@ $ptagent compile /path/to/contract_template.md with PhaseTracer
 
 ```text
 SKILL.md                         skill entrypoint and router instructions
-agents/openai.yaml               Codex skill metadata
+agents/openai.yaml               OpenAI/Codex-compatible skill metadata
 references/                      workflow and contract reference documents
 scripts/                         wrapper scripts used by the skill
 backend/ptagent/                 bundled PTagent backend source

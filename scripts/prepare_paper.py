@@ -138,7 +138,7 @@ def _packet_markdown(
     warning_issues = [item for item in validation_issues if item.get("severity") == "warning"]
     material = bundle.material
     lines: list[str] = [
-        "# Codex PTagent Packet",
+        "# PTagent Agent Packet",
         "",
         f"- Workflow mode: `{workflow_mode}`",
         f"- Source of truth: `{_source_of_truth(workflow_mode)}`",
@@ -215,12 +215,12 @@ def _packet_markdown(
     lines.extend(
         [
             "",
-            "## Next Codex Steps",
+            "## Next Agent Steps",
             "",
             "1. Confirm the run mode. In `fresh`, do not copy old artifacts into the new contract; in `continue`, treat the named Markdown template as the source of truth.",
             "2. Read this packet and the fixed review worksheet `contract_template.md`.",
             "3. Read `user_questions.md` and ask the user concise physics/parameter questions if blockers remain.",
-            "4. Edit only the human Markdown source `contract_template.md`; let Codex/PTagent maintain compiler expressions when needed.",
+            "4. Edit only the human Markdown source `contract_template.md`; let PTagent and the agent maintain compiler expressions when needed.",
             "5. Do not edit `contract_resolved.json`; it is regenerated from the Markdown contract.",
             "6. When no blockers remain, stop and ask the user to review the rendered Markdown.",
             "7. Compile only after the user explicitly approves generating the model program.",
