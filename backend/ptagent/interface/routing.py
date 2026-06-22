@@ -109,12 +109,7 @@ def _option_value(args: list[str], option: str) -> str:
 
 
 def _is_3deft_input_file(path_text: str) -> bool:
-    path = Path(path_text)
-    lower_name = path.name.lower()
-    if path.suffix.lower() not in {".m", ".wl"}:
-        return False
-    return ("dralgo" in lower_name) or ("3deft" in lower_name)
-
+    return Path(path_text).suffix.lower() in {".m", ".wl"}
 
 def _is_3deft_contract_path(path_text: str) -> bool:
     path = Path(path_text)

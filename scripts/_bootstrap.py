@@ -71,6 +71,16 @@ def _valid_project_root(value: str | Path) -> Path | None:
     if not value:
         return None
     root = Path(value).expanduser().resolve()
+    backend_root = _valid_backend_root(root)
+    if backend_root is not None:
+        return backend_root
+    backend_root = _valid_backend_root(root / "backend")
+    if backend_root is not None:
+        return backend_root
+    return None
+
+
+def _valid_backend_root(root: Path) -> Path | None:
     if (
         (root / "ptagent").is_dir()
         and (root / "ptagent" / "__main__.py").exists()
@@ -79,12 +89,11 @@ def _valid_project_root(value: str | Path) -> Path | None:
         return root
     return None
 
-
 def _require_project_root(value: str | Path, source: str) -> Path:
     root = _valid_project_root(value)
     if root is None:
         raise FileNotFoundError(
-            f"{source} does not point to a PTagent repository root: {Path(value).expanduser()}"
+            f"{source} does not point to a PTagent repository or backend root: {Path(value).expanduser()}"
         )
     return root
 

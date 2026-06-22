@@ -162,6 +162,12 @@ def main(argv: list[str] | None = None) -> int:
             except ModelSelectionRequired as exc:
                 return _print_model_selection_required(exc)
         elif args.input:
+            if Path(args.input).suffix.lower() in {".m", ".wl"}:
+                raise SystemExit(
+                    "4D extraction does not accept Mathematica/Wolfram .m/.wl files. "
+                    "Use --ptagent-engine 3deft for DRalgo/3DEFT sources, "
+                    "or provide PDF/Markdown/TeX for 4D extraction."
+                )
             try:
                 bundle = agent.extract(args.input, model_focus=args.model)
             except ModelSelectionRequired as exc:

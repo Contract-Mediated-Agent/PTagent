@@ -16,7 +16,7 @@ from .contract import (
     validate_contract_template,
     write_resolved_artifacts,
 )
-from .environment import check_wolfram_and_dralgo, install_dralgo
+from .environment import check_wolfram_and_dralgo, find_wolframscript, install_dralgo
 from .extraction import EXTRACTION_REPORT_NAME, extract_source_to_template
 from .layout import CONTRACT_TEMPLATE_NAME, build_run_layout
 from .mathematica_compare import compare_mathematica_fixed_v3d
@@ -33,6 +33,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     extract = sub.add_parser("extract", help="Create a standalone 3DEFT contract template from a reviewed DRalgo source file.")
     extract.add_argument("--input", required=True, help="Reviewed DRalgo Mathematica .m/.wl source file.")
+    extract.add_argument("--wolframscript", default="", help="wolframscript executable path required for local .m/.wl extraction.")
     extract.add_argument("--run-dir", default="", help="Task directory. Default: <artifact_root>/<timestamp>_<input stem>.")
     extract.add_argument("--output-dir", dest="run_dir", help=argparse.SUPPRESS)
     extract.add_argument("--model-name", default="", help="Model name for the generated 3DEFT contract. Default: input file stem.")
@@ -139,6 +140,11 @@ def _cmd_extract(args: argparse.Namespace) -> int:
     source = Path(args.input)
     if not source.exists():
         raise ThreeDeftBlocked(f"input does not exist: {source}")
+    if not find_wolframscript(args.wolframscript or None):
+        raise ThreeDeftBlocked(
+            "wolframscript was not found; 3DEFT extract for local .m/.wl sources requires "
+            "Wolfram/WolframScript. Install Wolfram Engine/Mathematica or pass --wolframscript <path>."
+        )
     run_dir_arg = args.run_dir or None
     layout = build_run_layout(source, run_dir=run_dir_arg)
     layout.input_dir.mkdir(parents=True, exist_ok=True)

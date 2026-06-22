@@ -1530,7 +1530,7 @@ def _render_model_runner(contract: dict[str, Any], *, header_filename: str | Non
         "    if (options.print_phases) std::cout << phase_finder;",
         "    PhaseTracer::ActionCalculator action_calculator(model);",
         "    PhaseTracer::TransitionFinder transition_finder(phase_finder, action_calculator);",
-        "    transition_finder.set_fit_action_curve(true);",
+        "    transition_finder.set_fit_action_curve(false);",
         "    transition_finder.find_transitions();",
         "    const auto transitions = transition_finder.get_transitions();",
         '    std::cout << "PTAGENT_TRANSITION transitions " << transitions.size() << "\\n";',

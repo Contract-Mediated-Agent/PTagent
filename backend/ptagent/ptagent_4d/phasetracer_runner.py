@@ -43,7 +43,10 @@ def run_phasetracer_smoke(
     ]
     command = " && ".join(commands)
     if runner == "wsl":
-        args = ["wsl", "-d", wsl_distro or "Ubuntu", "--", "bash", "-lc", command]
+        if wsl_distro:
+            args = ["wsl", "-d", wsl_distro, "--", "bash", "-lc", command]
+        else:
+            args = ["wsl", "--", "bash", "-lc", command]
     else:
         args = ["bash", "-lc", command]
     try:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
 import sys
 import tomllib
@@ -204,9 +205,74 @@ def validate_phasetracer_root(phasetracer_root: str) -> tuple[bool, str]:
         if not (path / "CMakeLists.txt").exists():
             return False, f"PhaseTracer source root does not contain CMakeLists.txt: {path}"
         return True, "ok"
-    if os.name == "nt" and _looks_like_linux_shell_path(raw):
-        return True, "ok"
-    return False, f"PhaseTracer source root does not exist: {path}"
+    if os.name == "nt" and _looks_like_wsl_path(raw):
+        return _validate_wsl_phasetracer_root(raw)
+    return False, f"PhaseTracer source root does not exist: {raw}"
+
+
+def _looks_like_wsl_path(value: str) -> bool:
+    raw = value.strip()
+    return raw.startswith("/")
+
+
+def _validate_wsl_phasetracer_root(raw: str) -> tuple[bool, str]:
+    distros = _wsl_distros()
+    if not distros:
+        return False, f"PhaseTracer source root looks like a WSL/Linux path but no WSL distro was found: {raw}"
+    command = _wsl_phasetracer_test_command(raw)
+    failures: list[str] = []
+    for distro in distros:
+        try:
+            result = subprocess.run(
+                ["wsl", "-d", distro, "--", "bash", "-lc", command],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=20,
+                check=False,
+            )
+        except Exception as exc:
+            failures.append(f"{distro}: {type(exc).__name__}: {exc}")
+            continue
+        if result.returncode == 0:
+            return True, f"ok (validated in WSL distro {distro})"
+        failures.append(f"{distro}: missing directory or CMakeLists.txt")
+    preview = "; ".join(failures[:3])
+    suffix = f" ({preview})" if preview else ""
+    return False, f"PhaseTracer source root was not found in WSL or lacks CMakeLists.txt: {raw}{suffix}"
+
+
+def _wsl_phasetracer_test_command(raw: str) -> str:
+    root = raw.rstrip("/") if raw != "/" else raw
+    cmake_lists = root.rstrip("/") + "/CMakeLists.txt"
+    return f"test -d {shlex.quote(root)} && test -f {shlex.quote(cmake_lists)}"
+
+
+def _wsl_distros() -> list[str]:
+    try:
+        result = subprocess.run(["wsl", "--list", "--quiet"], capture_output=True, timeout=15, check=False)
+    except Exception:
+        return []
+    if result.returncode != 0:
+        return []
+    text = _decode_wsl_output(result.stdout)
+    distros: list[str] = []
+    for line in text.splitlines():
+        clean = line.strip().lstrip("*").strip()
+        if clean:
+            distros.append(clean)
+    return distros
+
+
+def _decode_wsl_output(data: bytes) -> str:
+    if not data:
+        return ""
+    if b"\x00" in data:
+        text = data.decode("utf-16le", errors="ignore")
+    else:
+        text = data.decode("utf-8", errors="ignore")
+    return text.replace("\x00", "").replace("\ufeff", "")
 
 
 def _path_setting(*, key: str, env_name: str, config: dict[str, object], default: Path | Callable[[], Path]) -> Path:
@@ -278,8 +344,3 @@ def _parse_bool(value: str) -> bool:
 
 def _toml_string(value: str) -> str:
     return json.dumps(value)
-
-
-def _looks_like_linux_shell_path(value: str) -> bool:
-    raw = value.strip()
-    return raw.startswith("~/") or raw.startswith("/") or raw.startswith("$")

@@ -182,7 +182,7 @@ def read_arxiv_archive_source(
 
     if main_tex_path:
         _emit_progress(progress, f"Expanding TeX include/input files from {main_tex_path.name}", 0.36)
-        tex_text = _expand_tex_file(main_tex_path)
+        tex_text = _expand_tex_file(main_tex_path, root=archive_root)
         bundled_tex_path.write_text(tex_text, encoding="utf-8")
         diagnostics["primary_reading_layer"] = "tex_source_archive"
         diagnostics["main_tex"] = str(main_tex_path)
@@ -301,7 +301,7 @@ def prepare_arxiv_source(
             if main_tex_path:
                 bundled_tex_path = input_dir / "source_expanded.tex"
                 _emit_progress(progress, f"Expanding TeX include/input files from {main_tex_path.name}", 0.48)
-                bundled_tex_path.write_text(_expand_tex_file(main_tex_path), encoding="utf-8")
+                bundled_tex_path.write_text(_expand_tex_file(main_tex_path, root=tex_root), encoding="utf-8")
                 diagnostics["main_tex"] = str(main_tex_path.relative_to(paper_root))
                 diagnostics["tex_status"] = "expanded"
             else:
@@ -802,9 +802,12 @@ def _read_archive_fallback_document(
     )
 
 
-def _expand_tex_file(path: Path, seen: set[Path] | None = None) -> str:
+def _expand_tex_file(path: Path, *, root: Path | None = None, seen: set[Path] | None = None) -> str:
+    root_path = (root or path.parent).resolve()
     seen = seen or set()
     resolved = path.resolve()
+    if not _is_relative_to(resolved, root_path):
+        return f"\n% PTAGENT skipped unsafe input outside source root: {path}\n"
     if resolved in seen:
         return f"\n% PTAGENT skipped recursive input: {path.name}\n"
     seen.add(resolved)
@@ -814,15 +817,17 @@ def _expand_tex_file(path: Path, seen: set[Path] | None = None) -> str:
         target = match.group(1).strip()
         if not target or target.startswith("|"):
             return match.group(0)
-        target_path = (path.parent / target)
+        target_path = path.parent / target
         if target_path.suffix == "":
             target_path = target_path.with_suffix(".tex")
-        if not target_path.exists():
+        target_resolved = target_path.resolve()
+        if not _is_relative_to(target_resolved, root_path):
+            return f"\n% PTAGENT skipped unsafe input outside source root: {target}\n"
+        if not target_resolved.exists():
             return match.group(0)
-        return "\n" + _expand_tex_file(target_path, seen) + "\n"
+        return "\n" + _expand_tex_file(target_resolved, root=root_path, seen=seen) + "\n"
 
     return re.sub(r"\\(?:input|include)\{([^}]+)\}", replace_include, text)
-
 
 def _tex_material_markdown(prepared: ArxivPreparedSource, tex_text: str) -> str:
     lines = [

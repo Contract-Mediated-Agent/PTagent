@@ -290,7 +290,6 @@ class PhaseTransitionAgent:
         from .phasetracer_backend import compile_phasetracer_template
 
         try:
-            require_configured_runtime_python(self.settings)
             resolved_phasetracer_root = require_configured_phasetracer_root(self.settings, phasetracer_root)
         except ConfigurationError as exc:
             raise CompileBlocked(str(exc)) from exc

@@ -45,16 +45,20 @@ own invocation syntax.
 ## First Run
 
 On first use, PTagent checks the local environment before doing heavy work.
+The check reports missing software as advisories and lists exactly which
+operations are blocked in `operation_blockers`.
 
-It reports missing Python packages or external tools and asks before installing
-or downloading anything. In particular:
+Python and CosmoTransitions are reported separately:
 
-- CosmoTransitions must be available in the Python runtime used for 4D
-  CosmoTransitions smoke checks.
-- PhaseTracer is optional until PhaseTracer compilation is requested. If it is
-  missing, PTagent can ask whether to download the latest PhaseTracer `main`
-  branch or use a user-provided path.
-- 3DEFT workflows require a local Wolfram/Mathematica runtime and DRalgo setup.
+- Python must be usable for the requested workflow.
+- CosmoTransitions is required for 4D CosmoTransitions compile/check/run
+  operations.
+- PhaseTracer is optional until PhaseTracer compilation, backend comparison, or
+  generated PhaseTracer model checks are requested.
+  On Windows, Linux-style roots such as `/home/user/src/PhaseTracer` are
+  validated inside installed WSL distributions.
+- 3DEFT `.m`/`.wl` extraction requires a local Wolfram/wolframscript runtime;
+  DRalgo is additionally required before running the marked DRalgo workflow.
 
 Python dependencies are listed in `requirements.txt`. If your Python allows
 normal package installation, install them with:

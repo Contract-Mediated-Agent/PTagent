@@ -50,19 +50,27 @@ repository checkout, pass `--project-root <PTagent-repo-root>`. If the user
 provides an existing PhaseTracer source path, pass
 `--phasetracer-root <PhaseTracer-source-root>`.
 
-Read the JSON output before doing anything else. If `ready` is false, ask the
-user the listed environment question(s) and stop. CosmoTransitions must be
-available in either the current Python or configured runtime Python before
-continuing with 4D CosmoTransitions work. PhaseTracer must be found or
-configured before PhaseTracer compilation or comparison work.
+Read the JSON output before doing anything else. Treat the environment gate as
+an advisory preflight plus per-operation blockers, not as one global stop/go
+flag. The `ready` field only means baseline 4D extraction can start; before any
+specific operation, inspect `operation_blockers[<operation>]` and continue only
+when that list is empty.
 
-Do not continue to extraction, question mode, compilation, or code generation
-while the gate is blocked. Do not install Python packages, download
-PhaseTracer, or modify persistent config until the user explicitly approves.
-When PhaseTracer is missing and the user approves a download, use the
-`phasetracer_download_command` reported by the gate; it downloads the latest
-PhaseTracer `main` branch. If the user already has PhaseTracer or provides a
-path, validate that path only; do not check or enforce its version.
+Python and CosmoTransitions are reported separately. CosmoTransitions must be
+available in the configured runtime Python before 4D CosmoTransitions compile,
+check, or run operations. PhaseTracer must be found or configured before
+PhaseTracer compilation, backend comparison, or generated PhaseTracer model
+checks. On Windows, Linux-style roots such as `/home/user/src/PhaseTracer`
+are validated inside installed WSL distributions. 3DEFT extraction of local
+Wolfram/wolframscript runtime; DRalgo itself is additionally required before
+running the marked DRalgo workflow.
+
+Do not install Python packages, download PhaseTracer, install DRalgo, or modify
+persistent config until the user explicitly approves. When PhaseTracer is
+missing and the user approves a download, use the `phasetracer_download_command`
+reported by the gate; it downloads the latest PhaseTracer `main` branch. If the
+user already has PhaseTracer or provides a path, validate that path only; do not
+check or enforce its version.
 
 ## Routing
 

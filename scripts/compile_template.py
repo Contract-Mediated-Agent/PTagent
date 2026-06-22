@@ -131,7 +131,6 @@ def main() -> int:
         if backend == "phasetracer":
             from ptagent.ptagent_4d.phasetracer_backend import compile_phasetracer_template
 
-            _runtime_python(settings)
             result = compile_phasetracer_template(
                 template,
                 settings,
