@@ -13,14 +13,14 @@ clone a second repository, run `pip install ptagent`, or provide an API key.
 For example, in Codex you can ask:
 
 ```text
-Install the PTagent skill from https://github.com/PhenoPack/PTagent
+Install the PTagent skill from https://github.com/Contract-Mediated-Agent/PTagent
 ```
 
 Or run the installer script directly:
 
 ```bash
 python ~/.codex/skills/.system/skill-installer/scripts/install-skill-from-github.py \
-  --repo PhenoPack/PTagent \
+  --repo Contract-Mediated-Agent/PTagent \
   --path . \
   --name ptagent
 ```
@@ -114,5 +114,5 @@ backend/ptagent/                 bundled PTagent backend source
 requirements.txt                 Python dependencies for normal use
 ```
 
-Heavy regression tests and CI live in `PhenoPack/Ptagent-test`; ordinary users
-do not need that repository.
+Heavy regression tests and CI live in Contract-Mediated-Agent/PTagent-test; ordinary users
+do not need the test repository.

@@ -10,7 +10,7 @@ contains the router instructions, both internal workflows, wrapper scripts, and
 a bundled backend source tree under `backend/ptagent`.
 
 Users should be able to install this one skill directory from
-`PhenoPack/PTagent` and then invoke it through their agent's skill mechanism
+`Contract-Mediated-Agent/PTagent` and then invoke it through their agent's skill mechanism
 (for example `$ptagent` in Codex); they should not need to clone the repository
 or run `pip install ptagent` / `pip install -e .`.
 
