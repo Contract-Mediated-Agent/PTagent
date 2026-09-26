@@ -125,6 +125,7 @@ RENORMALIZATION_SCALE_EXACT_NAMES = {
     "qren",
     "qrenorm",
     "renormscale",
+    "renormscalesq",
     "renormalizationscale",
     "renormalisationscale",
 }
@@ -162,8 +163,9 @@ TOTAL_THERMAL_MASS_MARKERS = (
     "baseline",
     "sm plus",
 )
-REVIEW_STATUS_CHOICES = {"needs_review", "agent_reviewed", "human_modified"}
+REVIEW_STATUS_CHOICES = {"needs_review", "agent_reviewed", "human_modified", "source_imported"}
 REVIEW_COMPILE_READY_STATUS = "agent_reviewed"
+REVIEW_COMPILE_READY_STATUSES = {"agent_reviewed", "source_imported"}
 REQUIRED_MODEL_CARD_KEYS = (
     "model_short_name",
     "counterterm",
@@ -391,6 +393,8 @@ def _render_human_contract_template(
     matrix_notes: str = "Enabled by default because mixed scalar sectors must use matrix eigenvalues. Ask the user if the paper instead gives direct eigenvalues.",
     goldstone_defaults: dict[str, str] | None = None,
     model_short_name: str = "ASK_USER",
+    scalar_thermal_derivation_notes: str = "State whether the source gives the final total scalar thermal masses directly or whether this block assembles zero-temperature matrices plus baseline/SM self-energies plus BSM increments. Record branch-sensitive details such as Yukawa type, tan(beta) factors, neglected off-diagonal self-energies, and source equation/prose references.",
+    gauge_thermal_derivation_notes: str = "State whether the source gives the final total gauge Debye masses/eigenvalues directly or whether this block assembles baseline/SM self-energies plus extra-field increments. Record longitudinal/transverse policy, neutral mixing basis, photon/Z branch convention, and source equation/prose references.",
 ) -> str:
     phase_filter_example_field = str(fields[0].get("name", "h")) if fields else "h"
     goldstone_defaults = goldstone_defaults or {}
@@ -616,7 +620,7 @@ def _render_human_contract_template(
             "scalar_thermal_masses_derivation_notes:",
             "",
             "```text",
-            "State whether the source gives the final total scalar thermal masses directly or whether this block assembles zero-temperature matrices plus baseline/SM self-energies plus BSM increments. Record branch-sensitive details such as Yukawa type, tan(beta) factors, neglected off-diagonal self-energies, and source equation/prose references.",
+            scalar_thermal_derivation_notes,
             "```",
             "",
             "gauge_thermal_masses:",
@@ -628,7 +632,7 @@ def _render_human_contract_template(
             "gauge_thermal_masses_derivation_notes:",
             "",
             "```text",
-            "State whether the source gives the final total gauge Debye masses/eigenvalues directly or whether this block assembles baseline/SM self-energies plus extra-field increments. Record longitudinal/transverse policy, neutral mixing basis, photon/Z branch convention, and source equation/prose references.",
+            gauge_thermal_derivation_notes,
             "```",
             "",
             "### Daisy Particle Terms",
@@ -838,7 +842,9 @@ def _parse_markdown_contract(markdown_text: str) -> dict[str, Any]:
         if _enabled(row)
     ]
     matrix_section = _subsection(mass_section, "Boson Mass Matrices")
-    boson_matrices = _parse_boson_matrices(matrix_section)
+    boson_matrices = _parse_mass_matrices(matrix_section)
+    fermion_matrix_section = _subsection(mass_section, "Fermion Mass Matrices")
+    fermion_matrices = _parse_mass_matrices(fermion_matrix_section)
     excluded_species = _parse_rows_by_subsection(mass_section, "Excluded Species")
     implementation_section = _section(markdown_text, "6. Counterterm, Goldstone, And Daisy Contracts")
     implementation = _parse_implementation_contracts(implementation_section, model_card)
@@ -872,6 +878,7 @@ def _parse_markdown_contract(markdown_text: str) -> dict[str, Any]:
             "bosons": bosons,
             "fermions": fermions,
             "boson_matrices": boson_matrices,
+            "fermion_matrices": fermion_matrices,
             "excluded_species": [_clean_excluded_species(row) for row in excluded_species if str(row.get("name", "")).strip()],
         },
         "loops": loops,
@@ -1411,7 +1418,7 @@ def _clean_symmetry_rule(row: dict[str, str]) -> dict[str, str]:
     }
 
 
-def _parse_boson_matrices(section_text: str) -> list[dict[str, Any]]:
+def _parse_mass_matrices(section_text: str) -> list[dict[str, Any]]:
     matrices: list[dict[str, Any]] = []
     pattern = re.compile(r"^####\s+Matrix:\s*(.*?)\s*$", flags=re.MULTILINE)
     matches = list(pattern.finditer(section_text))
@@ -1428,6 +1435,7 @@ def _parse_boson_matrices(section_text: str) -> list[dict[str, Any]]:
         headers, rows = tables[1]
         basis = [item.strip() for item in str(meta.get("basis", "")).split(",") if item.strip()]
         matrix, matrix_entry_statuses = _parse_matrix_entries(block, headers, rows, basis)
+        thermal_matrix, thermal_matrix_entry_statuses = _parse_optional_thermal_matrix(block, basis)
         if not basis:
             basis = headers[1:] if "row/col" in headers else []
         matrices.append(
@@ -1437,14 +1445,76 @@ def _parse_boson_matrices(section_text: str) -> list[dict[str, Any]]:
                 "basis": basis,
                 "matrix": matrix,
                 "matrix_entry_statuses": matrix_entry_statuses,
+                "thermal_matrix": thermal_matrix,
+                "thermal_matrix_entry_statuses": thermal_matrix_entry_statuses,
+                "thermal_matrix_mode": meta.get("thermal_matrix_mode", "none"),
                 "dof_per_eigenvalue": meta.get("dof_per_eigenvalue", "1"),
+                "transverse_dof_per_eigenvalue": meta.get("transverse_dof_per_eigenvalue", "0"),
+                "longitudinal_dof_per_eigenvalue": meta.get("longitudinal_dof_per_eigenvalue", "0"),
                 "c": meta.get("c", "1.5"),
                 "source_role": meta.get("source_role", "field_dependent"),
+                "source_location": meta.get("source_location", ""),
                 "source_latex": _code_block_after_label(block, "Source LaTeX", default=""),
                 "notes": meta.get("notes", ""),
             }
         )
     return matrices
+
+
+def _parse_optional_thermal_matrix(
+    matrix_block: str,
+    basis: list[str],
+) -> tuple[list[list[str]], list[list[str]]]:
+    marker = re.search(r"^Thermal matrix entries:\s*$", matrix_block, flags=re.MULTILINE)
+    if not marker:
+        return [], []
+    thermal_block = matrix_block[marker.end() :]
+    next_heading = re.search(r"^####\s+", thermal_block, flags=re.MULTILINE)
+    if next_heading:
+        thermal_block = thermal_block[: next_heading.start()]
+    tables = _parse_tables(thermal_block)
+    if not tables:
+        return [], []
+    headers, rows = tables[0]
+    block_map = _named_matrix_entry_block_map(thermal_block, "Thermal matrix entry")
+    matrix = [["" for _column in basis] for _row in basis]
+    statuses = [["" for _column in basis] for _row in basis]
+    for row in rows:
+        row_name = str(row.get("row", "")).strip()
+        col_name = str(row.get("col", "")).strip()
+        if row_name not in basis or col_name not in basis:
+            continue
+        row_index = basis.index(row_name)
+        col_index = basis.index(col_name)
+        key = _normalize_matrix_entry_key(f"{row_name},{col_name}")
+        matrix[row_index][col_index] = block_map.get(
+            key,
+            str(row.get("entry", "") or row.get("expr", "")).strip(),
+        )
+        statuses[row_index][col_index] = str(row.get("entry_status", "")).strip()
+    return matrix, statuses
+
+
+def _named_matrix_entry_block_map(matrix_block: str, heading_prefix: str) -> dict[str, str]:
+    pattern = re.compile(rf"^#{{5,6}}\s+{re.escape(heading_prefix)}:\s*(.*?)\s*$", flags=re.MULTILINE)
+    matches = list(pattern.finditer(matrix_block))
+    expressions: dict[str, str] = {}
+    for index, match in enumerate(matches):
+        key = _normalize_matrix_entry_key(match.group(1))
+        if not key:
+            continue
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(matrix_block)
+        block = matrix_block[match.end() : end].strip()
+        expression = _code_block_after_label(block, "entry", default="") or _first_code_block(block)
+        if expression:
+            expressions[key] = expression
+    return expressions
+
+
+def _parse_boson_matrices(section_text: str) -> list[dict[str, Any]]:
+    """Backward-compatible private alias used by older callers/tests."""
+
+    return _parse_mass_matrices(section_text)
 
 
 def _parse_matrix_entries(
@@ -1592,6 +1662,7 @@ def validate_contract(
     issues: list[ValidationIssue] = []
     if contract.get("schema") != CONTRACT_SCHEMA:
         issues.append(_error("schema", "schema_mismatch", f"Expected schema {CONTRACT_SCHEMA}."))
+    _validate_source_import_provenance(contract, issues)
     review = _dict(contract.get("review"))
     if review_required and review.get("approved") is not True:
         issues.append(
@@ -1681,10 +1752,11 @@ def validate_contract(
     bosons = _list(masses.get("bosons"))
     boson_matrices = _list(masses.get("boson_matrices"))
     fermions = _list(masses.get("fermions"))
-    boson_matrices = _list(masses.get("boson_matrices"))
+    fermion_matrices = _list(masses.get("fermion_matrices"))
     _validate_species(bosons, "masses.bosons", allowed, issues, require_c=True)
     _validate_species(fermions, "masses.fermions", allowed, issues, require_c=False)
     _validate_boson_matrices(boson_matrices, "masses.boson_matrices", set(allowed) | {"T"}, issues)
+    _validate_boson_matrices(fermion_matrices, "masses.fermion_matrices", set(allowed) | {"T"}, issues)
     _validate_source_basis_fidelity(contract, issues)
 
     loops = _dict(contract.get("loops"))
@@ -1701,10 +1773,10 @@ def validate_contract(
         _require_expression(thermal.get("custom_expr"), runtime_allowed, "loops.thermal.custom_expr", issues)
     if daisy.get("mode") == "custom_expr":
         _require_expression(daisy.get("custom_expr"), runtime_allowed, "loops.daisy.custom_expr", issues)
-    if zero.get("mode") in {"standard_CW_V1", "paper_os_like_V1"} and not (bosons or fermions or boson_matrices):
+    if zero.get("mode") in {"standard_CW_V1", "paper_os_like_V1"} and not (bosons or fermions or boson_matrices or fermion_matrices):
         issues.append(_error("loops.zero_temperature.mode", "missing_species", "Zero-temperature loop mode requires reviewed boson or fermion species."))
     _validate_renormalization_scale(contract, zero, _dict(contract.get("model_card")), issues)
-    if thermal.get("mode") == "standard_thermal_integrals" and not (bosons or fermions or boson_matrices):
+    if thermal.get("mode") == "standard_thermal_integrals" and not (bosons or fermions or boson_matrices or fermion_matrices):
         issues.append(_error("loops.thermal.mode", "missing_species", "standard_thermal_integrals requires reviewed boson or fermion species."))
     if thermal.get("mode") == "standard_thermal_integrals":
         for name in ("num_boson_dof", "num_fermion_dof"):
@@ -1725,6 +1797,100 @@ def validate_contract(
         compile_backend=compile_backend,
     )
     return ContractValidation(contract=contract, issues=issues)
+
+
+def _validate_source_import_provenance(
+    contract: dict[str, Any],
+    issues: list[ValidationIssue],
+) -> None:
+    if "source_imported" not in json.dumps(contract, ensure_ascii=False):
+        return
+    model_card = _dict(contract.get("model_card"))
+    source_kind = str(model_card.get("source_import_kind", "")).strip()
+    source_hash = str(model_card.get("source_import_sha256", "")).strip().lower()
+    parameter_map_hash = str(model_card.get("source_parameter_map_sha256", "")).strip().lower()
+    vin_path = str(model_card.get("source_vin_path", "")).strip()
+    parameter_map_path = str(model_card.get("source_parameter_map_path", "")).strip()
+    if source_kind != "sarah_vevacious_v2":
+        issues.append(
+            _error(
+                "model_card.source_import_kind",
+                "source_import_provenance_missing",
+                "source_imported review states are valid only for a SARAH Vevacious++ v2 import.",
+            )
+        )
+    if not re.fullmatch(r"[0-9a-f]{64}", source_hash):
+        issues.append(
+            _error(
+                "model_card.source_import_sha256",
+                "source_import_provenance_missing",
+                "source_imported review states require a 64-character source SHA256.",
+            )
+        )
+    if not re.fullmatch(r"[0-9a-f]{64}", parameter_map_hash):
+        issues.append(
+            _error(
+                "model_card.source_parameter_map_sha256",
+                "source_import_provenance_missing",
+                "source_imported review states require the ScaleAndBlock.xml SHA256.",
+            )
+        )
+    if not vin_path or not parameter_map_path:
+        issues.append(
+            _error(
+                "model_card.source_paths",
+                "source_import_provenance_missing",
+                "source_imported review states require both input file paths.",
+            )
+        )
+    else:
+        _validate_source_path_hash(
+            path_text=vin_path,
+            expected_hash=source_hash,
+            field_key="model_card.source_import_sha256",
+            subject="Vevacious++ model",
+            issues=issues,
+        )
+        _validate_source_path_hash(
+            path_text=parameter_map_path,
+            expected_hash=parameter_map_hash,
+            field_key="model_card.source_parameter_map_sha256",
+            subject="ScaleAndBlock.xml",
+            issues=issues,
+        )
+
+
+def _validate_source_path_hash(
+    *,
+    path_text: str,
+    expected_hash: str,
+    field_key: str,
+    subject: str,
+    issues: list[ValidationIssue],
+) -> None:
+    source = Path(path_text).expanduser()
+    if not source.is_file():
+        issues.append(
+            _error(
+                field_key,
+                "source_import_file_missing",
+                f"The imported {subject} source file is unavailable at {source}.",
+                "Restore the task input file or run import-sarah again before compiling.",
+            )
+        )
+        return
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_hash):
+        return
+    actual_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+    if actual_hash != expected_hash:
+        issues.append(
+            _error(
+                field_key,
+                "source_import_hash_mismatch",
+                f"The imported {subject} source file no longer matches the reviewed SHA256.",
+                "Run import-sarah again and review the regenerated contract.",
+            )
+        )
 
 
 def reviewed_renormalization_scale_name(contract: dict[str, Any]) -> str:
@@ -1751,6 +1917,27 @@ def _validate_renormalization_scale(
         return
     name, candidates = _resolve_renormalization_scale_name(contract)
     if name:
+        params = _dict(contract.get("parameters"))
+        unresolved_rows = [
+            row
+            for row in _list(params.get("public_inputs"))
+            if isinstance(row, dict)
+            and str(row.get("name", "")).strip() == name
+            and (
+                not _truthy(row.get("confirmed"))
+                or _placeholder(row.get("default"))
+                or _placeholder(row.get("test_value"))
+            )
+        ]
+        if unresolved_rows:
+            issues.append(
+                _error(
+                    "parameters.renormalization_scale",
+                    "missing_renormalization_scale",
+                    "Standard Coleman-Weinberg V1 requires a numerical, user-confirmed renormalization scale.",
+                    "Provide renormScaleSq directly, or provide a scale Q whose square should be used, then confirm the input before compiling.",
+                )
+            )
         return
     if candidates:
         issues.append(
@@ -1833,6 +2020,34 @@ def _validate_model_card_and_implementation(
     resummation_scheme = str(model_card.get("resummation_scheme", "")).strip()
     _validate_contract_choice("model_card.counterterm", counterterm_mode, COUNTERTERM_MODES, issues)
     _validate_contract_choice("model_card.resummation_scheme", resummation_scheme, RESUMMATION_SCHEMES, issues)
+    if (
+        str(model_card.get("source_import_kind", "")).strip() == "sarah_vevacious_v2"
+        and resummation_scheme in {"Parwani", "Arnold-Espinosa"}
+    ):
+        if not _truthy(model_card.get("thermal_ready")):
+            issues.append(
+                _error(
+                    "model_card.thermal_ready",
+                    "thermal_metadata_required",
+                    "SARAH imports need complete companion thermal metadata before resummed compilation.",
+                    "Run export-sarah with model thermal tensors or pass --thermal-metadata from the companion exporter; none remains available for an unresummed calculation.",
+                )
+            )
+        matrices = _list(_dict(contract.get("masses")).get("boson_matrices"))
+        missing = [
+            str(row.get("name", index))
+            for index, row in enumerate(matrices)
+            if str(row.get("kind", "")).strip().lower() in {"scalar", "gauge", "vector", "vector_boson"}
+            and str(row.get("thermal_matrix_mode", "none")).strip() == "none"
+        ]
+        if missing:
+            issues.append(
+                _error(
+                    "masses.boson_matrices",
+                    "thermal_matrix_missing",
+                    "Resummed SARAH compilation is missing aligned thermal matrices for: " + ", ".join(missing),
+                )
+            )
     zero_mode = str(_dict(loops.get("zero_temperature")).get("mode", "")).strip()
     if counterterm_mode == "explicit_linear_system" and zero_mode == "paper_os_like_V1":
         issues.append(
@@ -2024,7 +2239,12 @@ def _validate_model_card_and_implementation(
             )
         )
     daisy_particles = _list(daisy.get("particles"))
-    if not _unresolved_contract_choice(daisy_scheme) and daisy_scheme != "none" and not daisy_particles:
+    if (
+        not _unresolved_contract_choice(daisy_scheme)
+        and daisy_scheme != "none"
+        and not daisy_particles
+        and not _source_thermal_matrices_cover_bosons(contract)
+    ):
         issues.append(
             _error(
                 "implementation.daisy.particles",
@@ -2090,6 +2310,19 @@ def _validate_model_card_and_implementation(
         _validate_phasetracer_symmetry(symmetry, field_names, issues)
     else:
         _validate_phase_filter(phase_filter, field_names, allowed_names, issues)
+
+
+def _source_thermal_matrices_cover_bosons(contract: dict[str, Any]) -> bool:
+    matrices = [
+        _dict(row)
+        for row in _list(_dict(contract.get("masses")).get("boson_matrices"))
+        if _truthy(_dict(row).get("enabled", True))
+    ]
+    return bool(matrices) and all(
+        str(row.get("thermal_matrix_mode", "none")).strip() in {"source_imported", "reviewed"}
+        and bool(_list(row.get("thermal_matrix")))
+        for row in matrices
+    )
 
 
 def _validate_source_basis_fidelity(contract: dict[str, Any], issues: list[ValidationIssue]) -> None:
@@ -2598,7 +2831,13 @@ def contract_to_model_ir(contract: dict[str, Any], *, source_path: str = "") -> 
                 },
                 ensure_ascii=False,
             ),
-            "fermion": json.dumps(_list(masses.get("fermions")), ensure_ascii=False),
+            "fermion": json.dumps(
+                {
+                    "direct_species": _list(masses.get("fermions")),
+                    "matrices": _list(masses.get("fermion_matrices")),
+                },
+                ensure_ascii=False,
+            ),
             "vector": "",
         },
         potentials=PotentialPieces(
@@ -2684,6 +2923,7 @@ def _render_cosmotransitions_source(
     bosons = _list(masses.get("bosons"))
     boson_matrices = _list(masses.get("boson_matrices"))
     fermions = _list(masses.get("fermions"))
+    fermion_matrices = _list(masses.get("fermion_matrices"))
     excluded_species = _list(masses.get("excluded_species"))
     potential = _dict(contract.get("potential"))
     model_card = _dict(contract.get("model_card"))
@@ -2713,7 +2953,13 @@ def _render_cosmotransitions_source(
     )
     zero_t_point_expr = _render_zero_t_point(fields)
     fermion_mass_exprs = [str(row.get("mass_sq", "0.0")) for row in fermions]
-    matrix_entry_exprs = _matrix_entry_expressions(boson_matrices)
+    fermion_matrix_entry_exprs = _matrix_entry_expressions(fermion_matrices)
+    resummation_scheme = str(implementation_daisy.get("scheme") or model_card.get("resummation_scheme") or "")
+    boson_matrices_for_mass = _cosmotransitions_boson_matrices_for_mass(
+        boson_matrices,
+        resummation_scheme,
+    )
+    matrix_entry_exprs = _matrix_entry_expressions(boson_matrices_for_mass)
     bosons_for_mass = _cosmotransitions_bosons_for_mass(bosons, implementation_daisy, model_card)
     direct_boson_exprs = [str(row.get("mass_sq", "0.0")) for row in bosons_for_mass]
     derived_assignments = _render_derived_assignments(derived, public_inputs, constants)
@@ -2742,23 +2988,25 @@ def _render_cosmotransitions_source(
         public_inputs,
         constants,
         derived,
-        used_names=_names_in_expressions(fermion_mass_exprs),
+        used_names=_names_in_expressions([*fermion_mass_exprs, *fermion_matrix_entry_exprs]),
     )
-    fermion_temperature_binding = "        T = 0.0\n" if "T" in _names_in_expressions(fermion_mass_exprs) else ""
+    fermion_temperature_binding = "        T = 0.0\n" if "T" in _names_in_expressions([*fermion_mass_exprs, *fermion_matrix_entry_exprs]) else ""
     vtot_bindings = _render_local_bindings(
         public_inputs,
         constants,
         derived,
         used_names=_names_in_expressions(_loop_custom_expressions(zero, thermal)),
     )
-    boson_names = [str(row.get("name", "")) for row in bosons_for_mass] + _matrix_eigen_names(boson_matrices)
-    boson_dof = ", ".join([str(row.get("dof", 1)) for row in bosons_for_mass] + _matrix_repeated_values(boson_matrices, "dof_per_eigenvalue", "1"))
-    boson_c = ", ".join([str(row.get("c", 1.5)) for row in bosons_for_mass] + _matrix_repeated_values(boson_matrices, "c", "1.5"))
-    fermion_dof = ", ".join(str(row.get("dof", 1)) for row in fermions)
-    boson_mass_body = _render_boson_mass_body(bosons_for_mass, boson_matrices)
-    fermion_mass_body = _render_fermion_mass_body(fermions)
+    boson_names = [str(row.get("name", "")) for row in bosons_for_mass] + _matrix_eigen_names(boson_matrices_for_mass)
+    boson_dof = ", ".join([str(row.get("dof", 1)) for row in bosons_for_mass] + _matrix_repeated_values(boson_matrices_for_mass, "dof_per_eigenvalue", "1"))
+    boson_c = ", ".join([str(row.get("c", 1.5)) for row in bosons_for_mass] + _matrix_repeated_values(boson_matrices_for_mass, "c", "1.5"))
+    fermion_dof = ", ".join(
+        [str(row.get("dof", 1)) for row in fermions]
+        + _matrix_repeated_values(fermion_matrices, "dof_per_eigenvalue", "2")
+    )
+    boson_mass_body = _render_boson_mass_body(bosons_for_mass, boson_matrices_for_mass)
+    fermion_mass_body = _render_fermion_mass_body(fermions, fermion_matrices)
     implementation_phase_filter = _dict(implementation.get("phase_filter"))
-    resummation_scheme = str(implementation_daisy.get("scheme") or model_card.get("resummation_scheme") or "")
     renormalization_scale_name = _resolve_renormalization_scale_name(contract)[0]
     runtime_assignments = _render_runtime_assignments(
         public_inputs,
@@ -2793,6 +3041,7 @@ def _render_cosmotransitions_source(
         public_inputs,
         constants,
         derived,
+        boson_matrices=boson_matrices,
     )
     counterterm_methods = _render_counterterm_methods(
         implementation_counterterms,
@@ -2866,7 +3115,7 @@ INPUT_PARAMETERS = {input_names!r}
 DEFAULT_PARAMETER_SOURCES = {default_parameter_sources!r}
 DEFAULT_INPUT_VALUES = {default_input_values!r}
 BOSON_NAMES = {boson_names!r}
-FERMION_NAMES = {[str(row.get("name", "")) for row in fermions]!r}
+FERMION_NAMES = {([str(row.get("name", "")) for row in fermions] + _matrix_eigen_names(fermion_matrices))!r}
 
 
 def _ptagent_jsonable(value):
@@ -3137,7 +3386,11 @@ def _render_runtime_assignments(
     names = {str(row.get("name", "")) for row in [*public_inputs, *constants, *derived]}
     lines: list[str] = []
     if renormalization_scale_name:
-        lines.append(f"        self.renormScaleSq = float(self.{renormalization_scale_name}**2)")
+        normalized = re.sub(r"[^a-z0-9]", "", renormalization_scale_name.lower())
+        if normalized == "renormscalesq":
+            lines.append(f"        self.renormScaleSq = float(self.{renormalization_scale_name})")
+        else:
+            lines.append(f"        self.renormScaleSq = float(self.{renormalization_scale_name}**2)")
     for name in ("num_boson_dof", "num_fermion_dof"):
         if name in names:
             lines.append(f"        self.{name} = int(round(float(self.{name})))")
@@ -3305,6 +3558,57 @@ def _cosmotransitions_bosons_for_mass(
     return result
 
 
+def _cosmotransitions_boson_matrices_for_mass(
+    matrices: list[dict[str, Any]],
+    resummation_scheme: str,
+) -> list[dict[str, Any]]:
+    if str(resummation_scheme).strip().lower() != "parwani":
+        return matrices
+    result: list[dict[str, Any]] = []
+    for raw in matrices:
+        matrix = dict(raw)
+        thermal = _list(matrix.get("thermal_matrix"))
+        if str(matrix.get("thermal_matrix_mode", "none")) == "none" or not thermal:
+            result.append(matrix)
+            continue
+        kind = str(matrix.get("kind", "scalar")).strip().lower()
+        if "gauge" in kind or "vector" in kind:
+            transverse = dict(matrix)
+            transverse["name"] = f"{matrix.get('name', 'gauge')}_transverse"
+            transverse["dof_per_eigenvalue"] = _polarization_dof(
+                matrix,
+                "transverse_dof_per_eigenvalue",
+                fraction=2.0 / 3.0,
+            )
+            longitudinal = dict(matrix)
+            longitudinal["name"] = f"{matrix.get('name', 'gauge')}_longitudinal"
+            longitudinal["matrix"] = thermal
+            longitudinal["dof_per_eigenvalue"] = _polarization_dof(
+                matrix,
+                "longitudinal_dof_per_eigenvalue",
+                fraction=1.0 / 3.0,
+            )
+            result.extend([transverse, longitudinal])
+            continue
+        matrix["matrix"] = thermal
+        result.append(matrix)
+    return result
+
+
+def _polarization_dof(matrix: dict[str, Any], key: str, *, fraction: float) -> str:
+    explicit = str(matrix.get(key, "0")).strip()
+    try:
+        value = float(explicit)
+    except ValueError:
+        value = 0.0
+    if value > 0:
+        return f"{value:.17g}"
+    try:
+        return f"{float(matrix.get('dof_per_eigenvalue', 0.0)) * fraction:.17g}"
+    except (TypeError, ValueError):
+        raise CompileBlocked(f"Invalid gauge degree-of-freedom value for matrix {matrix.get('name', '<unnamed>')}.")
+
+
 def _render_boson_mass_body(bosons: list[dict[str, Any]], matrices: list[dict[str, Any]]) -> str:
     lines = ["        mass_parts = []"]
     direct_vars: list[str] = []
@@ -3338,8 +3642,12 @@ def _render_boson_mass_body(bosons: list[dict[str, Any]], matrices: list[dict[st
     return "\n".join(lines)
 
 
-def _render_fermion_mass_body(fermions: list[dict[str, Any]]) -> str:
-    lines: list[str] = []
+def _render_fermion_mass_body(
+    fermions: list[dict[str, Any]],
+    matrices: list[dict[str, Any]] | None = None,
+) -> str:
+    matrices = matrices or []
+    lines: list[str] = ["        mass_parts = []"]
     mass_vars: list[str] = []
     for index, row in enumerate(fermions):
         name = _program_symbol(str(row.get("name", f"fermion_{index + 1}")))
@@ -3347,7 +3655,19 @@ def _render_fermion_mass_body(fermions: list[dict[str, Any]]) -> str:
         lines.extend(_render_compiler_assignment(str(row.get("mass_sq", "0.0")), var))
         mass_vars.append(var)
     if mass_vars:
-        lines.append(f"        massSq = self._stack_species([{', '.join(mass_vars)}], base)")
+        lines.append(f"        mass_parts.append(self._stack_species([{', '.join(mass_vars)}], base))")
+    for index, matrix in enumerate(matrices):
+        basis = _list(matrix.get("basis"))
+        entries = _list(matrix.get("matrix"))
+        size = len(basis)
+        var = f"M_{_program_symbol(str(matrix.get('name', f'fermion_matrix_{index}')))}"
+        lines.append(f"        {var} = np.empty(base.shape + ({size}, {size}), dtype=float)")
+        for row_index, row in enumerate(entries):
+            for col_index, expr in enumerate(_list(row)):
+                lines.extend(_render_compiler_assignment(str(expr), f"{var}[..., {row_index}, {col_index}]"))
+        lines.append(f"        mass_parts.append(np.linalg.eigvalsh({var}))")
+    if mass_vars or matrices:
+        lines.append("        massSq = np.concatenate(mass_parts, axis=-1)")
     else:
         lines.append("        massSq = np.zeros(base.shape + (0,), dtype=float)")
     return "\n".join(lines)
@@ -3820,9 +4140,21 @@ def _render_daisy_method(
     public_inputs: list[dict[str, Any]],
     constants: list[dict[str, Any]],
     derived: list[dict[str, Any]],
+    *,
+    boson_matrices: list[dict[str, Any]] | None = None,
 ) -> str:
     if daisy.get("mode") != "custom_expr":
         return ""
+    matrix_method = _render_source_matrix_daisy_method(
+        implementation_daisy,
+        fields,
+        public_inputs,
+        constants,
+        derived,
+        boson_matrices or [],
+    )
+    if matrix_method:
+        return matrix_method
     structured = _render_structured_daisy_method(
         implementation_daisy,
         fields,
@@ -3860,6 +4192,76 @@ def _render_daisy_method(
     lines.extend(_render_compiler_assignment(expr, "y", indent="    "))
     lines.extend(["    return y", ""])
     return textwrap.indent("\n".join(lines), "    ")
+
+
+def _render_source_matrix_daisy_method(
+    implementation_daisy: dict[str, Any],
+    fields: list[dict[str, Any]],
+    public_inputs: list[dict[str, Any]],
+    constants: list[dict[str, Any]],
+    derived: list[dict[str, Any]],
+    matrices: list[dict[str, Any]],
+) -> str:
+    scheme = str(implementation_daisy.get("scheme", "")).strip().lower().replace("-", "")
+    if scheme != "arnoldespinosa" or not _source_thermal_matrices_cover_rows(matrices):
+        return ""
+    expressions = _matrix_entry_expressions(matrices)
+    expressions.extend(
+        str(expr)
+        for matrix in matrices
+        for row in _list(matrix.get("thermal_matrix"))
+        for expr in _list(row)
+    )
+    bindings = _render_local_bindings(
+        public_inputs,
+        constants,
+        derived,
+        used_names=_names_in_expressions(expressions),
+    )
+    field_tuple = ", ".join(["X"] + [str(row["name"]) for row in fields])
+    lines = [
+        "def Vdaisy(self, X, T):",
+        f"    {field_tuple} = self._fields(X)",
+        "    T = np.asanyarray(T, dtype=float)",
+        "    base = np.asanyarray(X[..., 0], dtype=float) * 0.0 + T * 0.0",
+    ]
+    if bindings:
+        lines.extend(line[4:] if line.startswith("    ") else line for line in bindings.splitlines())
+    lines.append("    total = base * 0.0")
+    for index, matrix in enumerate(matrices):
+        basis = _list(matrix.get("basis"))
+        zero = _list(matrix.get("matrix"))
+        thermal = _list(matrix.get("thermal_matrix"))
+        size = len(basis)
+        name = _program_symbol(str(matrix.get("name", f"matrix_{index + 1}")))
+        zero_var = f"M0_{name}"
+        thermal_var = f"MT_{name}"
+        lines.append(f"    {zero_var} = np.empty(base.shape + ({size}, {size}), dtype=float)")
+        lines.append(f"    {thermal_var} = np.empty(base.shape + ({size}, {size}), dtype=float)")
+        for row_index in range(size):
+            for col_index in range(size):
+                lines.extend(_render_compiler_assignment(str(_list(zero[row_index])[col_index]), f"{zero_var}[..., {row_index}, {col_index}]", indent="    "))
+                lines.extend(_render_compiler_assignment(str(_list(thermal[row_index])[col_index]), f"{thermal_var}[..., {row_index}, {col_index}]", indent="    "))
+        kind = str(matrix.get("kind", "scalar")).strip().lower()
+        dof_key = "longitudinal_dof_per_eigenvalue" if "gauge" in kind or "vector" in kind else "dof_per_eigenvalue"
+        dof = _polarization_dof(matrix, dof_key, fraction=1.0 / 3.0) if dof_key.startswith("longitudinal") else str(matrix.get(dof_key, "1"))
+        lines.extend(
+            [
+                f"    eig0_{name} = np.linalg.eigvalsh({zero_var})",
+                f"    eigT_{name} = np.linalg.eigvalsh({thermal_var})",
+                f"    total = total + ({dof}) * np.sum(np.maximum(eigT_{name}, 0.0)**1.5 - np.maximum(eig0_{name}, 0.0)**1.5, axis=-1)",
+            ]
+        )
+    lines.extend(["    return -T*total/(12.0*np.pi)", ""])
+    return textwrap.indent("\n".join(lines), "    ")
+
+
+def _source_thermal_matrices_cover_rows(matrices: list[dict[str, Any]]) -> bool:
+    return bool(matrices) and all(
+        str(matrix.get("thermal_matrix_mode", "none")) in {"source_imported", "reviewed"}
+        and bool(_list(matrix.get("thermal_matrix")))
+        for matrix in matrices
+    )
 
 
 def _render_split_custom_daisy_method(
@@ -4829,6 +5231,61 @@ def _validate_boson_matrices(
                     "Do not compile vacuum physical-mass relations or phenomenology matrices as field-dependent spectra.",
                 )
             )
+        statuses = _list(row.get("matrix_entry_statuses"))
+        if any(
+            isinstance(status_row, list) and any(str(status).strip() == "source_imported" for status in status_row)
+            for status_row in statuses
+        ):
+            source_location = str(row.get("source_location", "")).strip()
+            if not source_location.startswith("/VevaciousModelFile/"):
+                issues.append(
+                    _error(
+                        f"{field_key}[{index}].source_location",
+                        "source_import_location_missing",
+                        "source_imported matrix entries require their Vevacious++ XML location.",
+                    )
+                )
+        thermal_mode = str(row.get("thermal_matrix_mode", "none")).strip()
+        thermal_matrix = _list(row.get("thermal_matrix"))
+        if thermal_mode not in {"none", "source_imported", "reviewed"}:
+            issues.append(
+                _error(
+                    f"{field_key}[{index}].thermal_matrix_mode",
+                    "invalid_mode",
+                    "thermal_matrix_mode must be none, source_imported, or reviewed.",
+                )
+            )
+        if thermal_mode != "none":
+            if len(thermal_matrix) != len(basis) or any(
+                not isinstance(line, list) or len(line) != len(basis) for line in thermal_matrix
+            ):
+                issues.append(
+                    _error(
+                        f"{field_key}[{index}].thermal_matrix",
+                        "invalid_matrix_shape",
+                        "Thermal mass matrix must be square and aligned with the zero-temperature basis.",
+                    )
+                )
+            else:
+                statuses = _list(row.get("thermal_matrix_entry_statuses"))
+                for row_index, line in enumerate(thermal_matrix):
+                    for col_index, expr in enumerate(line):
+                        _require_expression(
+                            expr,
+                            set(allowed_names) | {"T"},
+                            f"{field_key}[{index}].thermal_matrix[{row_index}][{col_index}]",
+                            issues,
+                        )
+                        status = ""
+                        if row_index < len(statuses) and isinstance(statuses[row_index], list) and col_index < len(statuses[row_index]):
+                            status = str(statuses[row_index][col_index]).strip()
+                        _require_review_status(
+                            {"entry_status": status},
+                            status_column="entry_status",
+                            field_key=f"{field_key}[{index}].thermal_matrix_entry_statuses[{row_index}][{col_index}]",
+                            issues=issues,
+                            subject=f"Thermal matrix entry {row.get('name', index)}[{row_index},{col_index}]",
+                        )
 
 
 def _matrix_entry_status(row: dict[str, Any], row_index: int, col_index: int) -> str:
@@ -4873,7 +5330,7 @@ def _require_review_status(
             )
         )
         return
-    if status == REVIEW_COMPILE_READY_STATUS:
+    if status in REVIEW_COMPILE_READY_STATUSES:
         return
     code = "human_modified_review_required" if status == "human_modified" else "compiler_expression_unreviewed"
     action = (

@@ -23,6 +23,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Check the local PTagent runtime environment before using the skill.")
     parser.add_argument("--project-root", default="", help="Optional PTagent repo root.")
     parser.add_argument("--phasetracer-root", default="", help="Optional explicit PhaseTracer source root.")
+    parser.add_argument("--sarah-root", default="", help="Optional SARAH installation root used only by export-sarah.")
     args = parser.parse_args()
 
     from _bootstrap import ensure_ptagent_backend
@@ -38,6 +39,7 @@ def main() -> int:
     current_python = Path(sys.executable).resolve()
     current_python_ok = True
     current_has_cosmo = importlib.util.find_spec("cosmoTransitions") is not None
+    current_has_defusedxml = importlib.util.find_spec("defusedxml") is not None
     runtime_ok, runtime_message = _check_python_executable(settings.runtime_python)
     runtime_has_cosmo, runtime_cosmo_message = _check_python_module(
         settings.runtime_python,
@@ -59,14 +61,18 @@ def main() -> int:
     wolfram_status = _check_wolfram_and_dralgo()
     wolfram_ready = bool(wolfram_status["wolframscript_path"])
     dralgo_ready = bool(wolfram_status["dralgo_available"])
+    sarah_root = Path(args.sarah_root).expanduser().resolve() if args.sarah_root else None
+    sarah_ready = bool(sarah_root and (sarah_root / "SARAH.m").is_file())
 
     operation_blockers = _operation_blockers(
         current_python_ok=current_python_ok,
+        defusedxml_ready=current_has_defusedxml,
         runtime_python_ok=runtime_ok,
         cosmotransitions_ready=runtime_has_cosmo,
         phasetracer_ready=phasetracer_ready,
         wolfram_ready=wolfram_ready,
         dralgo_ready=dralgo_ready,
+        sarah_ready=sarah_ready,
     )
     missing = _missing_components(
         runtime_python_ok=runtime_ok,
@@ -74,6 +80,8 @@ def main() -> int:
         phasetracer_ready=phasetracer_ready,
         wolfram_ready=wolfram_ready,
         dralgo_ready=dralgo_ready,
+        defusedxml_ready=current_has_defusedxml,
+        sarah_ready=sarah_ready,
     )
     advisories = _advisories(
         missing=missing,
@@ -81,6 +89,7 @@ def main() -> int:
         runtime_cosmo_message=runtime_cosmo_message,
         phasetracer_message=configured_phase_message,
         wolfram_message=str(wolfram_status["message"]),
+        sarah_root=str(sarah_root or ""),
     )
 
     phasetracer_download_dir = project_root / "PhaseTracer"
@@ -92,6 +101,7 @@ def main() -> int:
         "current_python": str(current_python),
         "current_python_ok": current_python_ok,
         "current_python_has_cosmoTransitions": current_has_cosmo,
+        "current_python_has_defusedxml": current_has_defusedxml,
         "runtime_python": str(settings.runtime_python),
         "runtime_python_configured": settings.runtime_python_configured,
         "runtime_python_check_ok": runtime_ok,
@@ -113,6 +123,12 @@ def main() -> int:
             "wolframscript_found": wolfram_ready,
             "dralgo_available": dralgo_ready,
             "message": wolfram_status["message"],
+        },
+        "sarah": {
+            "root": str(sarah_root or ""),
+            "configured": sarah_root is not None,
+            "available": sarah_ready,
+            "required_only_for": "export-sarah",
         },
         "missing": missing,
         "advisories": advisories,
@@ -202,20 +218,26 @@ def _check_wolfram_and_dralgo() -> dict[str, Any]:
 def _operation_blockers(
     *,
     current_python_ok: bool,
+    defusedxml_ready: bool,
     runtime_python_ok: bool,
     cosmotransitions_ready: bool,
     phasetracer_ready: bool,
     wolfram_ready: bool,
     dralgo_ready: bool,
+    sarah_ready: bool,
 ) -> dict[str, list[str]]:
     python_blockers = [] if current_python_ok else ["python_current"]
+    xml_blockers = [] if defusedxml_ready else ["defusedxml"]
     runtime_blockers = [] if runtime_python_ok else ["python_runtime"]
     cosmo_blockers = [] if (cosmotransitions_ready or not runtime_python_ok) else ["cosmotransitions"]
     phasetracer_blockers = [] if phasetracer_ready else ["phasetracer"]
     wolfram_blockers = [] if wolfram_ready else ["wolfram"]
     dralgo_blockers = [] if dralgo_ready else ["dralgo"]
+    sarah_blockers = [] if sarah_ready else ["sarah"]
     return {
         "4d_extract": python_blockers,
+        "sarah_import": python_blockers + xml_blockers,
+        "sarah_export": python_blockers + xml_blockers + wolfram_blockers + sarah_blockers,
         "4d_validate": python_blockers,
         "4d_resolve": python_blockers,
         "cosmotransitions_compile": runtime_blockers + cosmo_blockers,
@@ -242,6 +264,8 @@ def _missing_components(
     phasetracer_ready: bool,
     wolfram_ready: bool,
     dralgo_ready: bool,
+    defusedxml_ready: bool,
+    sarah_ready: bool,
 ) -> list[str]:
     missing: list[str] = []
     if not runtime_python_ok:
@@ -254,6 +278,10 @@ def _missing_components(
         missing.append("wolfram")
     if wolfram_ready and not dralgo_ready:
         missing.append("dralgo")
+    if not defusedxml_ready:
+        missing.append("defusedxml")
+    if not sarah_ready:
+        missing.append("sarah")
     return missing
 
 
@@ -264,6 +292,7 @@ def _advisories(
     runtime_cosmo_message: str,
     phasetracer_message: str,
     wolfram_message: str,
+    sarah_root: str,
 ) -> list[str]:
     advisories: list[str] = []
     if "python_runtime" in missing:
@@ -287,6 +316,16 @@ def _advisories(
         advisories.append(
             "DRalgo could not be loaded; 3DEFT DRalgo run is blocked until DRalgo is installed. "
             f"Detail: {wolfram_message}"
+        )
+    if "defusedxml" in missing:
+        advisories.append(
+            "defusedxml is missing from the current Python; import-sarah and the import stage of export-sarah are blocked. "
+            "Install the dependencies listed in requirements.txt in a user-managed Python environment."
+        )
+    if "sarah" in missing:
+        advisories.append(
+            "A SARAH root was not supplied or does not contain SARAH.m; only export-sarah is blocked. "
+            f"Checked: {sarah_root or '<not supplied>'}. import-sarah does not require SARAH."
         )
     return advisories
 

@@ -23,7 +23,7 @@ from .backends import SUPPORTED_COMPILE_BACKENDS, normalize_compile_backend, sup
 from .compiler import CompileBlocked
 from .model_preflight import ModelSelectionRequired
 from .workflow import PhaseTransitionAgent
-from .reporting import write_json
+from .reporting import create_run_id, prepare_run_dir, write_json
 from .template_contract import contract_to_model_ir, validate_contract_template, write_resolved_contract_data
 from .user_guidance import write_user_guidance
 from .runner import import_check
@@ -69,6 +69,29 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help="Optional pre-contract model focus, e.g. XSM or 2HDM. If omitted and multiple models are detected, extraction stops with a model-selection question.",
     )
+
+    import_sarah = sub.add_parser(
+        "import-sarah",
+        help="Import deterministic SARAH Vevacious++ v2 model and parameter-map files.",
+    )
+    import_sarah.add_argument("--vin", required=True, help="SARAH MakeVevacious++ MODEL.vin file.")
+    import_sarah.add_argument("--parameter-map", required=True, help="Matching ScaleAndBlock.xml file.")
+    import_sarah.add_argument("--thermal-metadata", default="", help="Optional ptagent_thermal_metadata.json from the companion exporter.")
+    import_sarah.add_argument("--slha", default="", help="Optional real-parameter SLHA numerical point.")
+    import_sarah.add_argument("--parameters", default="", help="Optional JSON object or JSON file with real parameter overrides.")
+    import_sarah.add_argument("--run-dir", default="", help="Task directory. Default: a fresh directory under the configured artifact root.")
+
+    export_sarah = sub.add_parser(
+        "export-sarah",
+        help="Run an existing SARAH model through MakeVevacious++ and the PTagent companion exporter.",
+    )
+    export_sarah.add_argument("--sarah-root", required=True, help="Existing SARAH installation root.")
+    export_sarah.add_argument("--model", required=True, help="SARAH model name accepted by Start[...].")
+    export_sarah.add_argument("--model-search-path", default="", help="Optional parent directory containing a custom SARAH model.")
+    export_sarah.add_argument("--slha", default="", help="Optional SLHA point copied into the generated task.")
+    export_sarah.add_argument("--run-dir", required=True, help="Task directory receiving SARAH and PTagent outputs.")
+    export_sarah.add_argument("--wolframscript", default="wolframscript", help="wolframscript executable or absolute path.")
+    export_sarah.add_argument("--timeout", type=int, default=600, help="Exporter timeout in seconds.")
 
     validate = sub.add_parser("validate", help="Validate a reviewed template markdown file.")
     validate.add_argument("--template", required=True, help="Reviewed template markdown path.")
@@ -143,6 +166,63 @@ def main(argv: list[str] | None = None) -> int:
     settings = get_settings()
     agent = PhaseTransitionAgent(settings)
 
+    if args.command == "import-sarah":
+        try:
+            from .sarah_import import run_sarah_import
+        except ModuleNotFoundError as exc:
+            if exc.name == "defusedxml":
+                raise SystemExit(
+                    "import-sarah requires defusedxml. Install the dependencies from requirements.txt "
+                    "in your user-managed Python environment; existing paper and 3DEFT routes do not require it."
+                ) from exc
+            raise
+
+        run_dir = Path(args.run_dir).expanduser().resolve() if args.run_dir else prepare_run_dir(
+            settings,
+            create_run_id(f"sarah_{Path(args.vin).stem}"),
+        )
+        result = run_sarah_import(
+            vin_path=args.vin,
+            parameter_map_path=args.parameter_map,
+            thermal_metadata_path=args.thermal_metadata or None,
+            slha_path=args.slha or None,
+            parameters=_load_parameters(args.parameters),
+            run_dir=run_dir,
+        )
+        print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
+        return 0
+
+    if args.command == "export-sarah":
+        from .sarah_export import export_sarah_model
+
+        result = export_sarah_model(
+            sarah_root=args.sarah_root,
+            model=args.model,
+            model_search_path=args.model_search_path or None,
+            slha_path=args.slha or None,
+            run_dir=args.run_dir,
+            wolframscript=args.wolframscript,
+            timeout_seconds=args.timeout,
+        )
+        try:
+            from .sarah_import import run_sarah_import
+        except ModuleNotFoundError as exc:
+            if exc.name == "defusedxml":
+                raise SystemExit(
+                    "export-sarah generated the SARAH files, but deterministic import requires defusedxml. "
+                    "Install the dependencies from requirements.txt, then run import-sarah on the task input files."
+                ) from exc
+            raise
+        imported = run_sarah_import(
+            vin_path=result["vin"]["path"],
+            parameter_map_path=result["parameter_map"]["path"],
+            thermal_metadata_path=(result.get("thermal_metadata") or {}).get("path") or None,
+            slha_path=(result.get("slha") or {}).get("path") or None,
+            run_dir=args.run_dir,
+        )
+        print(json.dumps({"export": result, "import": imported.to_dict()}, ensure_ascii=False, indent=2))
+        return 0
+
     if args.command == "extract":
         if args.arxiv:
             if args.input and Path(args.input).suffix.lower() == ".pdf":
@@ -162,14 +242,44 @@ def main(argv: list[str] | None = None) -> int:
             except ModelSelectionRequired as exc:
                 return _print_model_selection_required(exc)
         elif args.input:
-            if Path(args.input).suffix.lower() in {".m", ".wl"}:
+            input_path = Path(args.input).expanduser().resolve()
+            if input_path.suffix.lower() == ".vin":
+                try:
+                    from .sarah_import import is_vevacious_v2_file, run_sarah_import
+                except ModuleNotFoundError as exc:
+                    if exc.name == "defusedxml":
+                        raise SystemExit(
+                            "Vevacious++ import requires defusedxml. Install the dependencies from requirements.txt "
+                            "in your user-managed Python environment."
+                        ) from exc
+                    raise
+
+                if not is_vevacious_v2_file(input_path):
+                    raise SystemExit(
+                        ".vin auto-routing accepts only XML files whose root is VevaciousModelFile "
+                        "and whose VevaciousMajorVersion is 2."
+                    )
+                parameter_map = input_path.parent / "ScaleAndBlock.xml"
+                if not parameter_map.is_file():
+                    raise SystemExit(
+                        f"Vevacious++ input detected, but the sibling parameter map is missing: {parameter_map}. "
+                        "Use import-sarah --parameter-map <path> when it is stored elsewhere."
+                    )
+                result = run_sarah_import(
+                    vin_path=input_path,
+                    parameter_map_path=parameter_map,
+                    run_dir=prepare_run_dir(settings, create_run_id(f"sarah_{input_path.stem}")),
+                )
+                print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
+                return 0
+            if input_path.suffix.lower() in {".m", ".wl"}:
                 raise SystemExit(
                     "4D extraction does not accept Mathematica/Wolfram .m/.wl files. "
-                    "Use --ptagent-engine 3deft for DRalgo/3DEFT sources, "
-                    "or provide PDF/Markdown/TeX for 4D extraction."
+                    "Use export-sarah explicitly for an existing SARAH model, use --ptagent-engine 3deft "
+                    "for DRalgo/3DEFT sources, or provide PDF/Markdown/TeX for paper extraction."
                 )
             try:
-                bundle = agent.extract(args.input, model_focus=args.model)
+                bundle = agent.extract(input_path, model_focus=args.model)
             except ModelSelectionRequired as exc:
                 return _print_model_selection_required(exc)
         else:

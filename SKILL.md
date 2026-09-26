@@ -1,6 +1,6 @@
 ---
 name: ptagent
-description: Parse finite-temperature phase-transition papers and reviewed DRalgo/3DEFT sources with the self-contained PTagent backend, ask focused physics questions, and compile reviewed contracts locally to CosmoTransitions or PhaseTracer artifacts without external model services.
+description: Build reviewed finite-temperature phase-transition models from papers, SARAH/Vevacious++ exports, and DRalgo/3DEFT sources, then compile local contracts to CosmoTransitions or PhaseTracer without external model services.
 ---
 
 # PTagent
@@ -20,6 +20,8 @@ or run `pip install ptagent` / `pip install -e .`.
 SKILL.md
 agents/openai.yaml
 references/model_program_contract.md
+references/ptagent_sarah_workflow.md
+references/sarah_thermal_metadata.md
 references/ptagent_4d_workflow.md
 references/ptagent_3deft_workflow.md
 scripts/_bootstrap.py
@@ -56,14 +58,31 @@ flag. The `ready` field only means baseline 4D extraction can start; before any
 specific operation, inspect `operation_blockers[<operation>]` and continue only
 when that list is empty.
 
+If `ready` is false, stop. Do not continue to extraction, question mode, compilation, or code generation
+until the reported baseline blockers are resolved. A true `ready` value does
+not override a nonempty blocker list for the requested operation.
+
 Python and CosmoTransitions are reported separately. CosmoTransitions must be
 available in the configured runtime Python before 4D CosmoTransitions compile,
 check, or run operations. PhaseTracer must be found or configured before
 PhaseTracer compilation, backend comparison, or generated PhaseTracer model
 checks. On Windows, Linux-style roots such as `/home/user/src/PhaseTracer`
 are validated inside installed WSL distributions. 3DEFT extraction of local
-Wolfram/wolframscript runtime; DRalgo itself is additionally required before
-running the marked DRalgo workflow.
+sources requires a Wolfram/wolframscript runtime; DRalgo itself is additionally
+required before running the marked DRalgo workflow.
+
+For SARAH routes, inspect `operation_blockers.sarah_import` or
+`operation_blockers.sarah_export`. Importing existing Vevacious++ files needs
+only the Python dependencies. Exporting them from a SARAH model additionally
+needs `wolframscript` and an explicit SARAH root. Never install SARAH or Wolfram
+automatically.
+
+On macOS, if `wolframscript` is found but its local evaluation probe times out,
+test the configured `WolframKernel` directly. If the kernel returns normally,
+do not ask the user to reactivate, reconfigure, or reinstall Mathematica. A
+restricted agent sandbox may be blocking WSTP shared memory. Ask for permission
+to run the existing local `wolframscript` outside that sandbox, rerun the
+environment gate there, and continue only after the local probe succeeds.
 
 Do not install Python packages, download PhaseTracer, install DRalgo, or modify
 persistent config until the user explicitly approves. When PhaseTracer is
@@ -73,6 +92,19 @@ user already has PhaseTracer or provides a path, validate that path only; do not
 check or enforce its version.
 
 ## Routing
+
+Use the SARAH route when the user supplies a Vevacious++ v2 `.vin` file,
+`ScaleAndBlock.xml`, or explicitly asks to export an existing SARAH model. Read
+`references/ptagent_sarah_workflow.md`; read
+`references/sarah_thermal_metadata.md` when companion thermal data is present
+or requested. A `.vin` file is auto-routed only after its XML root and v2 model
+version are verified. A SARAH `.m` or `.wl` model is never auto-routed; use
+`export-sarah` explicitly.
+
+Do not create a model from a free-form Lagrangian. Ask the user for SARAH
+Vevacious++ output or an existing SARAH model that can be exported. This leaves
+paper/arXiv and manual-contract workflows unchanged while keeping the new
+Lagrangian-source route deterministic.
 
 Default to the 4D workflow when the user uploads or references a paper, arXiv
 source archive, TeX, Markdown, PDF, or ordinary finite-temperature

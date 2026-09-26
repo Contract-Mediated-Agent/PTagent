@@ -7,7 +7,7 @@ def parse_detailed_smoke_output(stdout: str) -> dict[int, dict[str, Any]]:
     parsed: dict[int, dict[str, Any]] = {}
     for raw_line in str(stdout or "").splitlines():
         parts = raw_line.strip().split()
-        if len(parts) < 3 or not parts[0].startswith("PTAGENT_"):
+        if len(parts) < 3 or parts[0] not in {"PTAGENT_POINT", "PTAGENT_VECTOR"}:
             continue
         try:
             index = int(parts[1])

@@ -1,4 +1,4 @@
 interface:
   display_name: "PTagent"
-  short_description: "Self-contained PTagent workflow for 4D papers and 3DEFT/DRalgo sources."
-  default_prompt: "Use $ptagent to analyze this phase-transition source and build a reviewed local model workflow."
+  short_description: "Reviewed workflows for papers, SARAH/Vevacious++ exports, and 3DEFT sources."
+  default_prompt: "Use $ptagent to analyze this phase-transition paper or deterministic model export and build a reviewed local workflow."

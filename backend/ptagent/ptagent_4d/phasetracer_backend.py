@@ -624,12 +624,7 @@ def _render_fermion_mass_method(
         *_render_method_prelude(fields, public_inputs, constants, derived, include_temperature=False, indent="  "),
         "  std::vector<double> masses;",
     ]
-    for spec in specs:
-        name = _program_symbol(spec["name"])
-        lines.append("  {")
-        lines.extend(render_cpp_assignment_block(spec["expr"], f"m2_{name}", indent="    ", prefer_square_aliases=True))
-        lines.append(f"    masses.push_back(m2_{name});")
-        lines.append("  }")
+    lines.extend(_render_mass_spec_pushes(specs, indent="  "))
     lines.extend(["  return masses;", "}"])
     return "\n".join(lines)
 
@@ -1553,8 +1548,10 @@ def _render_model_runner(contract: dict[str, Any], *, header_filename: str | Non
         "    }",
         "  } catch (const std::exception& exc) {",
         '    std::cout << "PTAGENT_TC_STATUS error " << exc.what() << "\\n";',
+        "    return 1;",
         "  } catch (...) {",
         '    std::cout << "PTAGENT_TC_STATUS error unknown exception\\n";',
+        "    return 1;",
         "  }",
         "  return 0;",
         "}",
@@ -1893,7 +1890,9 @@ def _renorm_scale_sq(contract: dict[str, Any]) -> float:
     values = _parameter_reference_environment(contract)
     if name not in values:
         raise CompileBlocked(f"Reviewed renormalization scale {name!r} could not be evaluated.")
-    return float(values[name]) ** 2
+    value = float(values[name])
+    normalized = re.sub(r"[^a-z0-9]", "", name.lower())
+    return value if normalized == "renormscalesq" else value**2
 
 
 def _radiation_dof(contract: dict[str, Any]) -> float:
@@ -1963,7 +1962,19 @@ def _evaluate_masses(contract: dict[str, Any], phi: list[float], kind: str) -> l
 
 def _evaluate_fermion_masses(contract: dict[str, Any], phi: list[float]) -> list[float]:
     env = _reference_environment(contract, phi, 0.0)
-    return [_eval_compiler_block(spec["expr"], env) for spec in _fermion_specs(contract)]
+    values: list[float] = []
+    for spec in _fermion_specs(contract):
+        if spec["source"] == "direct":
+            values.append(_eval_compiler_block(spec["expr"], env))
+            continue
+        matrix = _dict(spec["matrix"])
+        entries = [
+            [_eval_compiler_block(str(expr), env) for expr in _list(row)]
+            for row in _list(matrix.get("matrix"))
+        ]
+        if entries:
+            values.extend(float(value) for value in np.linalg.eigvalsh(np.asarray(entries, dtype=float)))
+    return values
 
 
 def _evaluate_debye_masses(contract: dict[str, Any], phi: list[float], temperature: float, kind: str) -> list[float]:
@@ -2007,6 +2018,33 @@ def _mass_specs(contract: dict[str, Any], kind: str) -> list[dict[str, Any]]:
             continue
         if _boson_kind(item) != kind:
             continue
+        if kind == "vector" and str(item.get("thermal_matrix_mode", "none")) != "none" and _list(item.get("thermal_matrix")):
+            transverse = dict(item)
+            transverse["name"] = f"{item.get('name', f'vector_matrix_{index + 1}')}_transverse"
+            transverse["thermal_matrix"] = _list(item.get("matrix"))
+            transverse["ptagent_polarization"] = "transverse"
+            longitudinal = dict(item)
+            longitudinal["name"] = f"{item.get('name', f'vector_matrix_{index + 1}')}_longitudinal"
+            longitudinal["ptagent_polarization"] = "longitudinal"
+            specs.extend(
+                [
+                    {
+                        "source": "matrix",
+                        "name": str(transverse["name"]),
+                        "matrix": transverse,
+                        "dof": _matrix_polarization_dof(item, "transverse_dof_per_eigenvalue", 2.0 / 3.0),
+                        "c": float(item.get("c", 5.0 / 6.0)),
+                    },
+                    {
+                        "source": "matrix",
+                        "name": str(longitudinal["name"]),
+                        "matrix": longitudinal,
+                        "dof": _matrix_polarization_dof(item, "longitudinal_dof_per_eigenvalue", 1.0 / 3.0),
+                        "c": float(item.get("c", 5.0 / 6.0)),
+                    },
+                ]
+            )
+            continue
         specs.append(
             {
                 "source": "matrix",
@@ -2019,17 +2057,41 @@ def _mass_specs(contract: dict[str, Any], kind: str) -> list[dict[str, Any]]:
     return specs
 
 
+def _matrix_polarization_dof(matrix: dict[str, Any], key: str, fraction: float) -> float:
+    try:
+        explicit = float(matrix.get(key, 0.0))
+    except (TypeError, ValueError):
+        explicit = 0.0
+    if explicit > 0.0:
+        return explicit
+    return float(matrix.get("dof_per_eigenvalue", 0.0)) * fraction
+
+
 def _fermion_specs(contract: dict[str, Any]) -> list[dict[str, Any]]:
     specs = []
-    for index, row in enumerate(_list(_dict(contract.get("masses")).get("fermions"))):
+    masses = _dict(contract.get("masses"))
+    for index, row in enumerate(_list(masses.get("fermions"))):
         item = _dict(row)
         if not _truthy(item.get("enabled", True)):
             continue
         specs.append(
             {
+                "source": "direct",
                 "name": str(item.get("name", f"fermion_{index + 1}")),
                 "expr": str(item.get("mass_sq", "0.0")),
                 "dof": float(item.get("dof", 1.0)),
+            }
+        )
+    for index, matrix in enumerate(_list(masses.get("fermion_matrices"))):
+        item = _dict(matrix)
+        if not _truthy(item.get("enabled", True)):
+            continue
+        specs.append(
+            {
+                "source": "matrix",
+                "name": str(item.get("name", f"fermion_matrix_{index + 1}")),
+                "matrix": item,
+                "dof": float(item.get("dof_per_eigenvalue", 2.0)),
             }
         )
     return specs
@@ -2074,7 +2136,13 @@ def _mass_c_values(contract: dict[str, Any], kind: str) -> list[float]:
 
 
 def _fermion_dofs(contract: dict[str, Any]) -> list[float]:
-    return [float(spec["dof"]) for spec in _fermion_specs(contract)]
+    values: list[float] = []
+    for spec in _fermion_specs(contract):
+        if spec["source"] == "direct":
+            values.append(float(spec["dof"]))
+        else:
+            values.extend([float(spec["dof"])] * len(_list(_dict(spec["matrix"]).get("basis"))))
+    return values
 
 
 def _aligned_thermal_mass_exprs(contract: dict[str, Any], kind: str, *, required: bool) -> list[str]:
@@ -2116,6 +2184,12 @@ def _aligned_thermal_mass_specs(contract: dict[str, Any], kind: str, *, required
         base = str(mass_spec["name"])
         matrix = _dict(mass_spec["matrix"])
         size = len(_list(matrix.get("basis")))
+        thermal_matrix = _list(matrix.get("thermal_matrix"))
+        if str(matrix.get("thermal_matrix_mode", "none")) != "none" and thermal_matrix:
+            thermal_spec = dict(matrix)
+            thermal_spec["matrix"] = thermal_matrix
+            specs.append({"source": "matrix", "name": base, "matrix": thermal_spec})
+            continue
         eigen_labels = [f"{base}_eig{index + 1}" for index in range(size)]
         if size and all(label in by_name for label in eigen_labels):
             for label in eigen_labels:
@@ -2216,7 +2290,7 @@ def _uses_default_arnold_espinosa_daisy(contract: dict[str, Any]) -> bool:
         return False
     for kind in ("scalar", "vector"):
         try:
-            _aligned_thermal_mass_exprs(contract, kind, required=True)
+            _aligned_thermal_mass_specs(contract, kind, required=True)
         except CompileBlocked:
             return False
     return True

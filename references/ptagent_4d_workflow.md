@@ -9,6 +9,10 @@ Use this internal workflow for the 4D finite-temperature workflow: papers, arXiv
 archives, TeX, Markdown, and PDFs that should become a reviewed
 `contract_template.md` and then compile to CosmoTransitions or PhaseTracer.
 
+For SARAH Vevacious++ v2 `.vin` and `ScaleAndBlock.xml` inputs, use the
+deterministic route in `ptagent_sarah_workflow.md` instead. Both routes produce
+the same reviewed 4D contract and use the same backend compilers.
+
 If the user explicitly asks for DRalgo, 3DEFT, dimensionally reduced EFT, or
 uploads a DRalgo-style Mathematica/Wolfram file, switch to the internal 3DEFT
 workflow in `references/ptagent_3deft_workflow.md` instead.

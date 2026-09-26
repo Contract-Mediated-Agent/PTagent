@@ -5,7 +5,9 @@ from pathlib import Path
 
 FOUR_D_EXCLUSIVE_COMMANDS = {
     "compare-backends",
+    "export-sarah",
     "guide",
+    "import-sarah",
     "init",
     "validate",
 }

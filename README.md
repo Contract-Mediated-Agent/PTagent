@@ -1,7 +1,8 @@
 # PTagent
 
 PTagent is a self-contained agent skill package for finite-temperature
-phase-transition papers and reviewed DRalgo/3DEFT sources. Install this
+phase-transition papers, deterministic SARAH/Vevacious++ model exports, and
+reviewed DRalgo/3DEFT sources. Install this
 repository as one skill in a compatible agent environment, then invoke the
 PTagent skill through that environment's skill mechanism.
 
@@ -33,6 +34,12 @@ own invocation syntax.
 
 - Reads arXiv IDs, local PDFs, TeX, Markdown, and arXiv source archives for 4D
   finite-temperature phase-transition models.
+- Imports SARAH `MakeVevacious[Version -> "++"]` output (`MODEL.vin` and
+  `ScaleAndBlock.xml`) without requiring SARAH on the import machine.
+- Resolves real numerical parameter points from SLHA or explicit JSON, records
+  source hashes, and keeps unresolved values as visible compile blockers.
+- Accepts optional companion thermal metadata and deterministically constructs
+  scalar thermal self-energies and longitudinal gauge Debye matrices.
 - Reads reviewed DRalgo/3DEFT Mathematica/Wolfram sources when the user clearly
   asks for 3DEFT or supplies a DRalgo-style `.m`/`.wl` file.
 - Builds evidence packets, asks only blocking physics questions, and fills a
@@ -57,6 +64,8 @@ Python and CosmoTransitions are reported separately:
   generated PhaseTracer model checks are requested.
   On Windows, Linux-style roots such as `/home/user/src/PhaseTracer` are
   validated inside installed WSL distributions.
+- `import-sarah` requires `defusedxml`, but does not require Wolfram or SARAH.
+- `export-sarah` requires an existing SARAH installation and `wolframscript`.
 - 3DEFT `.m`/`.wl` extraction requires a local Wolfram/wolframscript runtime;
   DRalgo is additionally required before running the marked DRalgo workflow.
 
@@ -90,6 +99,39 @@ Analyze a local TeX source:
 ```text
 $ptagent extract /path/to/main.tex
 ```
+
+Import existing SARAH Vevacious++ output:
+
+```bash
+python scripts/ptagent_cli.py import-sarah \
+  --vin /path/to/MODEL.vin \
+  --parameter-map /path/to/ScaleAndBlock.xml \
+  --slha /path/to/spectrum.slha
+```
+
+With companion metadata, add
+`--thermal-metadata /path/to/ptagent_thermal_metadata.json`. Without it,
+PTagent still imports the tree potential and zero-temperature spectra, sets
+`thermal_ready=false`, and blocks Parwani or Arnold-Espinosa compilation.
+
+Generate the inputs from an existing SARAH model when SARAH is available:
+
+```bash
+python scripts/ptagent_cli.py export-sarah \
+  --sarah-root /path/to/SARAH \
+  --model MODEL_NAME \
+  --run-dir /path/to/run
+```
+
+`export-sarah` runs the companion exporter and immediately feeds the generated
+files through the same deterministic importer, so the task receives its proof
+materials and `contract_template.md` in one command. If generic thermal tensors
+cannot be established from the loaded model, the export remains useful but is
+marked partial and resummed compilation stays blocked.
+
+PTagent does not infer a complete model from free-form Lagrangian prose and does
+not ask an LLM to derive thermal masses or backend code. Existing paper, arXiv,
+manual-contract, and 3DEFT workflows remain available.
 
 Process a reviewed DRalgo/3DEFT source:
 
