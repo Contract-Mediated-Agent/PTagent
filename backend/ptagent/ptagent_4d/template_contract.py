@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ..symmetry_analysis import SignFlipAnalysis, analyze_sign_flip_symmetries, format_sign_flip_generators
 from .artifact_layout import generated_models_dir, model_artifact_slug
 from .compiler import CompileBlocked, CompileResult, compile_usage_instructions
 from .config import Settings
@@ -397,6 +398,10 @@ def _render_human_contract_template(
     gauge_thermal_derivation_notes: str = "State whether the source gives the final total gauge Debye masses/eigenvalues directly or whether this block assembles baseline/SM self-energies plus extra-field increments. Record longitudinal/transverse policy, neutral mixing basis, photon/Z branch convention, and source equation/prose references.",
 ) -> str:
     phase_filter_example_field = str(fields[0].get("name", "h")) if fields else "h"
+    field_names = [str(field.get("name", "")).strip() for field in fields if str(field.get("name", "")).strip()]
+    symmetry_analysis = analyze_sign_flip_symmetries(v0_python, field_names)
+    symmetry_generators = format_sign_flip_generators(symmetry_analysis)
+    symmetry_candidate_rows = _tree_level_symmetry_candidate_rows(symmetry_analysis, phase_filter_example_field)
     goldstone_defaults = goldstone_defaults or {}
     return "\n".join(
         [
@@ -651,11 +656,12 @@ def _render_human_contract_template(
             "### CosmoTransitions Phase Filtering",
             "",
             "This section is used only by the CosmoTransitions backend. The phase-filter hook discards a traced phase when it returns true and renders as `forbidPhaseCrit(X)`. PhaseTracer does not consume this section; PhaseTracer symmetry double-counting is handled separately with `apply_symmetry(phi)` below.",
+            f"Tree-level static check: `{symmetry_analysis.status}`; candidate sign-flip generator(s): `{symmetry_generators}`. This is a recommendation only. Confirm that loop, thermal, counterterm, and gauge choices preserve the symmetry before using it to remove a duplicate branch.",
             "",
             _render_table_with_notes(
                 ["key", "value", "notes"],
                 [
-                    {"key": "mode", "value": "ASK_USER", "notes": "Mandatory user-confirmed choice. Choices: none, negative_field_threshold, custom_expr. Recommendation: none unless the paper/reference code explicitly removes a duplicate or unphysical traced branch."},
+                    {"key": "mode", "value": "ASK_USER", "notes": f"Mandatory user-confirmed choice. Choices: none, negative_field_threshold, custom_expr. Tree-level candidate generators: {symmetry_generators}. A candidate may motivate duplicate-branch filtering, but the branch and nonzero tolerance cannot be inferred from V0 alone."},
                     {"key": "custom_expr", "value": "0.0", "notes": "Only used when mode=custom_expr; Python boolean expression using fields/parameters, e.g. (h < -5.0) or (s < -5.0). Python and/or are compiled to NumPy-safe elementwise logic. For PhaseTracer symmetry equivalence, use the PhaseTracer Symmetry section instead."},
                     {"key": "notes", "value": "ASK_USER", "notes": "State the recommendation and reason. If mode=none, explain that no CosmoTransitions branch is forbidden. If filtering is enabled, state what phase type or hard field region is being removed and why. For PhaseTracer Z2 equivalence, set this to none and use PhaseTracer Symmetry."},
                 ],
@@ -684,11 +690,12 @@ def _render_human_contract_template(
             "### PhaseTracer Symmetry",
             "",
             "PhaseTracer uses `apply_symmetry(phi)` to identify symmetry-equivalent field points so they are not counted as distinct phases. This does not create new physical vacua. It is different from phase filtering: symmetry records reviewed equivalence relations, while filtering forbids selected branches. This section is used only by the PhaseTracer backend.",
+            f"Tree-level static check: `{symmetry_analysis.status}`; candidate generator(s): `{symmetry_generators}`. {symmetry_analysis.reason}",
             "",
             _render_table_with_notes(
                 ["key", "value", "notes"],
                 [
-                    {"key": "mode", "value": "ASK_USER", "notes": "Mandatory user-confirmed choice. Choices: none, z2_reflection. Recommendation: none unless the user confirms that PhaseTracer should merge reviewed field-reflection-equivalent points."},
+                    {"key": "mode", "value": "ASK_USER", "notes": f"Mandatory user-confirmed choice. Choices: none, z2_reflection. Static V0 candidate generator(s): {symmetry_generators}. Enable only after the user confirms that the full reviewed potential preserves the equivalence."},
                     {"key": "notes", "value": "ASK_USER", "notes": "State the recommendation and reason. If mode=none, explain that no apply_symmetry equivalence is applied. If enabled, state the reviewed symmetry and whether the sign flips are simultaneous (`and`) or independent alternatives (`or`)."},
                 ],
                 id_key="key",
@@ -698,18 +705,7 @@ def _render_human_contract_template(
             "",
             "Use rows when `mode=z2_reflection`. Each row lists one simultaneous field-sign reflection and creates one generated symmetry partner. Example: `s` means `s -> -s`; `h,s` means `h -> -h and s -> -s`, i.e. `(h,s) -> (-h,-s)` as one combined symmetry operation. Two separate rows `h` and `s` mean `h -> -h or s -> -s` and generate two separate partners. Do not encode independent alternatives as `h,s`; use separate rows.",
             "",
-            _render_table(
-                ["enabled", "fields", "transformation", "reason", "source_reference"],
-                [
-                    {
-                        "enabled": "false",
-                        "fields": phase_filter_example_field,
-                        "transformation": "sign_flip",
-                        "reason": "Example only: Z2 reflection equivalence for PhaseTracer apply_symmetry.",
-                        "source_reference": "PhaseTracer apply_symmetry convention.",
-                    }
-                ],
-            ),
+            _render_table(["enabled", "fields", "transformation", "reason", "source_reference"], symmetry_candidate_rows),
             "",
             "## 7. Generated Files",
             "",
@@ -754,6 +750,33 @@ def _render_human_contract_template(
             "```",
         ]
     )
+
+
+def _tree_level_symmetry_candidate_rows(analysis: SignFlipAnalysis, example_field: str) -> list[dict[str, str]]:
+    if not analysis.candidates:
+        return [
+            {
+                "enabled": "false",
+                "fields": example_field,
+                "transformation": "sign_flip",
+                "reason": "Example only: no sign-flip generator was proven by the tree-level static check.",
+                "source_reference": "Requires source or user review.",
+            }
+        ]
+    rows: list[dict[str, str]] = []
+    for candidate in analysis.candidates:
+        fields_text = ",".join(candidate.fields)
+        operation = "simultaneous" if len(candidate.fields) > 1 else "single-field"
+        rows.append(
+            {
+                "enabled": "false",
+                "fields": fields_text,
+                "transformation": "sign_flip",
+                "reason": f"Tree-level {operation} reflection candidate; enable only after full-potential review and user confirmation.",
+                "source_reference": "Deterministic V0 AST parity check.",
+            }
+        )
+    return rows
 
 
 def _render_human_potential_part(name: str, source_latex: str, python_expr: str, notes: str) -> str:
@@ -849,6 +872,11 @@ def _parse_markdown_contract(markdown_text: str) -> dict[str, Any]:
     implementation_section = _section(markdown_text, "6. Counterterm, Goldstone, And Daisy Contracts")
     implementation = _parse_implementation_contracts(implementation_section, model_card)
     approval = _key_value_table(_section(markdown_text, "8. Approval"))
+    clean_fields = [_clean_field(row) for row in fields if str(row.get("name", "")).strip()]
+    symmetry_analysis = analyze_sign_flip_symmetries(
+        potential_parts["V0"].get("python", "ASK_USER"),
+        [str(row.get("name", "")).strip() for row in clean_fields],
+    )
     return {
         "schema": CONTRACT_SCHEMA,
         "paper_id": paper_id,
@@ -860,7 +888,7 @@ def _parse_markdown_contract(markdown_text: str) -> dict[str, Any]:
             "approved": _truthy(approval.get("approved", "")),
             "notes": approval.get("reviewer_notes", ""),
         },
-        "fields": [_clean_field(row) for row in fields if str(row.get("name", "")).strip()],
+        "fields": clean_fields,
         "parameters": {
             "public_inputs": [_clean_public_input(row) for row in public_inputs if str(row.get("name", "")).strip()],
             "constants": [_clean_constant(row) for row in constants if str(row.get("name", "")).strip()],
@@ -883,6 +911,7 @@ def _parse_markdown_contract(markdown_text: str) -> dict[str, Any]:
         },
         "loops": loops,
         "implementation": implementation,
+        "symmetry_analysis": symmetry_analysis.to_dict(),
         "questions": _default_questions({}),
     }
 
@@ -1796,7 +1825,33 @@ def validate_contract(
         issues,
         compile_backend=compile_backend,
     )
+    _append_tree_level_symmetry_advice(contract, issues)
     return ContractValidation(contract=contract, issues=issues)
+
+
+def _append_tree_level_symmetry_advice(
+    contract: dict[str, Any],
+    issues: list[ValidationIssue],
+) -> None:
+    analysis = _dict(contract.get("symmetry_analysis"))
+    candidates = [_dict(candidate) for candidate in _list(analysis.get("candidates"))]
+    generators = [
+        ",".join(str(field).strip() for field in _list(candidate.get("fields")) if str(field).strip())
+        for candidate in candidates
+    ]
+    generators = [generator for generator in generators if generator]
+    if not generators:
+        return
+    issues.append(
+        _warning(
+            "potential.V0.python",
+            "tree_level_symmetry_candidate",
+            "The deterministic tree-level check found candidate sign-flip generator(s): "
+            + "; ".join(generators)
+            + ".",
+            "Check the loop, thermal, counterterm, gauge-fixing, and source conventions. Then ask the user whether to enable the matching PhaseTracer symmetry rows or a separately reviewed CosmoTransitions duplicate-branch filter. Do not infer a filter threshold from V0.",
+        )
+    )
 
 
 def _validate_source_import_provenance(
@@ -5547,4 +5602,14 @@ def _error(field_key: str, code: str, message: str, suggested_action: str = "") 
         field_key=field_key,
         message=message,
         suggested_action=suggested_action or "Fill this field in the Markdown contract template; do not infer silently.",
+    )
+
+
+def _warning(field_key: str, code: str, message: str, suggested_action: str = "") -> ValidationIssue:
+    return ValidationIssue(
+        severity="warning",
+        code=code,
+        field_key=field_key,
+        message=message,
+        suggested_action=suggested_action,
     )

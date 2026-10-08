@@ -456,6 +456,14 @@ truth. Derived JSON must not be hand-edited:
   generated symmetry partner: `h,s` means `h -> -h and s -> -s`, while two
   separate rows `h` and `s` mean `h -> -h or s -> -s`. Do not encode independent
   alternatives as `h,s`.
+- Shared tree-level symmetry check: PTagent parses the reviewed `V0` compiler
+  expression without evaluating it and reports a conservative independent set
+  of sign-flip generators. Paper extraction and SARAH import use the same
+  checker. Use its rows as review suggestions only. Confirm that all compiled
+  loop, thermal, counterterm, and gauge-dependent pieces preserve the proposed
+  relation before enabling PhaseTracer symmetry. For CosmoTransitions, the
+  check may motivate duplicate-branch filtering but cannot choose which branch
+  to remove or infer a safe nonzero threshold.
 - Daisy resummation has two standard routes:
   - Parwani: replace one-loop finite-temperature mass eigenvalues by reviewed
     lowest-order thermal mass eigenvalues and add no separate `V_daisy`.

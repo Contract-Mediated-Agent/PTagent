@@ -155,7 +155,14 @@ Ask the user only for items that cannot be safely inferred after checking the re
 - RG and matching scales: infer explicit scale policies from source/output first. Ask as one connected scale policy only if the evidence does not determine them. Recommended default is `mu4 = 4*pi*exp(-EulerGamma)*xi4*T` with `xi4=1`, `mu_3_scale = T`, and `mu_3_us_scale = factor*T`, where `factor` should be reviewed from the model's soft scale convention such as `g2` when appropriate.
 - Soft scalar indices: if source/output does not provide an auditable `PrintScalarRepPositions[]` map, help the user with a representation-order guess but do not treat a bare index as reviewed truth.
 - Ambiguous physical labels: ask for labels only when the source names/comments do not make the label clear. Representation data alone should not be promoted to particle identities.
-- PhaseTracer `apply_symmetry()` policy: always ask the user to confirm `symmetry_hook`, `symmetry_rules`, and `low_t_phase_guesses` before PhaseTracer compile, even when reviewed source/V3D suggests a candidate symmetry. The agent must first inspect source/V3D, present a recommendation and reason, and record the final status as `user_confirmed` or `human_reviewed`. Recommended default is `symmetry_hook=none`, `symmetry_rules=none`, and `low_t_phase_guesses=none` unless the user intentionally wants PhaseTracer to identify symmetry-equivalent field points or use numeric low-temperature phase hints.
+- PhaseTracer `apply_symmetry()` policy: run the shared conservative sign-flip
+  checker on the reviewed V3D expression, then ask the user to confirm
+  `symmetry_hook`, `symmetry_rules`, and `low_t_phase_guesses` before PhaseTracer
+  compile. The checker may recommend independent single-field generators or a
+  simultaneous multi-field generator, but it does not approve them. Present the
+  recommendation and reason, and record the final status as `user_confirmed` or
+  `human_reviewed`. Keep low-temperature guesses `none` unless numeric hints are
+  intentionally supplied.
 - PhaseTracer compile approval: after `three_deft_contract_merged.md` has no compile blockers, ask the user to open and review it, then record their exact approval sentence.
 
 Do not ask the user to hand-copy DRalgo-derived outputs before DRalgo has run. These are agent/DRalgo backfill items:

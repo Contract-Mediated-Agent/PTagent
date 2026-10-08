@@ -119,6 +119,12 @@ previous artifacts.
   - Daisy: when the scheme is not `none`, list every affected particle/mode
     group with zeroT mass, thermal mass, d.o.f., longitudinal-only flag, and
     the reviewed Daisy term or Parwani replacement route.
+  - Tree-level symmetry analysis: run the shared conservative AST parity check
+    on the reviewed tree-level compiler expression. Record its minimal
+    independent sign-flip generators as candidates, including simultaneous
+    groups such as `h,s` when neither individual flip is invariant. These
+    candidates guide the two backend-specific decisions below but never approve
+    them. Check the full compiled potential before asking the user to confirm.
   - CosmoTransitions phase filtering: explicitly ask the user to decide whether
     to implement the CosmoTransitions phase-filter hook after presenting the
     agent's recommendation and reason. Recommend `mode=none` unless the

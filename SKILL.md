@@ -123,6 +123,14 @@ materials for the selected workflow: paper/source files, current contract,
 proof files, previous extracted model information in the active run, explicit
 user inputs, and DRalgo output when using 3DEFT.
 
+Whenever a deterministic tree-level potential is available, inspect the shared
+`symmetry_analysis` result before asking about phase handling. Present its
+minimal sign-flip generator candidates as recommendations for PhaseTracer
+symmetry or possible CosmoTransitions duplicate-branch filtering. Treat these
+as tree-level candidates only: never enable a symmetry or invent a phase-filter
+threshold until loop, thermal, counterterm, and gauge choices have been checked
+and the user has confirmed the final policy.
+
 Ask the user only when evidence is missing, conflicting, physically ambiguous,
 or guessing would make the generated model/code/report misleading or
 unverifiable. Do not ask about safe conventions, notation mapping, variable

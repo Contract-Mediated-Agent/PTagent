@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..symmetry_analysis import analyze_sign_flip_symmetries
 from .contract import ThreeDeftBlocked, ensure_ready, parse_contract, validate_contract_template
 from .layout import default_phasetracer_dir
 from .mathematica_expr import convert_mathematica_inputform_expression, looks_like_mathematica_inputform
@@ -2446,66 +2447,15 @@ def _expression_names_many(expressions: Any) -> set[str]:
 
 
 def _candidate_z2_symmetries_from_expression(expression: str, field_names: list[str]) -> list[dict[str, str]]:
-    candidates: list[dict[str, str]] = []
-    try:
-        tree = ast.parse(expression, mode="eval")
-    except SyntaxError:
-        return candidates
-    for field_name in field_names:
-        if _node_parity(tree.body, field_name) == 0:
-            candidates.append(
-                {
-                    "mode": "z2_reflection",
-                    "field": field_name,
-                    "reason": "V3D is even under this single-field sign flip by conservative AST parity check.",
-                }
-            )
-    return candidates
-
-
-def _node_parity(node: ast.AST, target_name: str) -> int | None:
-    if isinstance(node, ast.Constant):
-        return 0
-    if isinstance(node, ast.Name):
-        return 1 if node.id == target_name else 0
-    if isinstance(node, ast.UnaryOp):
-        return _node_parity(node.operand, target_name)
-    if isinstance(node, ast.BinOp):
-        left = _node_parity(node.left, target_name)
-        right = _node_parity(node.right, target_name)
-        if isinstance(node.op, (ast.Add, ast.Sub)):
-            if left is None or right is None:
-                return None
-            return left if left == right else None
-        if isinstance(node.op, (ast.Mult, ast.Div)):
-            if left is None or right is None:
-                return None
-            return (left + right) % 2
-        if isinstance(node.op, ast.Pow):
-            exponent = _literal_integer(node.right)
-            if exponent is None:
-                return None if _node_contains_name(node, target_name) else 0
-            base = _node_parity(node.left, target_name)
-            return None if base is None else (base * exponent) % 2
-        return None
-    if isinstance(node, ast.Call):
-        return None if _node_contains_name(node, target_name) else 0
-    if isinstance(node, ast.IfExp):
-        body = _node_parity(node.body, target_name)
-        other = _node_parity(node.orelse, target_name)
-        return body if body is not None and body == other else None
-    return None if _node_contains_name(node, target_name) else 0
-
-
-def _node_contains_name(node: ast.AST, target_name: str) -> bool:
-    return any(isinstance(child, ast.Name) and child.id == target_name for child in ast.walk(node))
-
-
-def _literal_integer(node: ast.AST) -> int | None:
-    value = _literal_number(node)
-    if value is None or not float(value).is_integer():
-        return None
-    return int(value)
+    analysis = analyze_sign_flip_symmetries(expression, field_names)
+    return [
+        {
+            "mode": "z2_reflection",
+            "field": ",".join(candidate.fields),
+            "reason": "V3D is invariant under this sign-flip generator by the shared conservative AST parity check.",
+        }
+        for candidate in analysis.candidates
+    ]
 
 
 def _require_v3d_symbols_are_3d_parameters(expression: str, allowed_names: set[str]) -> None:

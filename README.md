@@ -44,6 +44,8 @@ own invocation syntax.
   asks for 3DEFT or supplies a DRalgo-style `.m`/`.wl` file.
 - Builds evidence packets, asks only blocking physics questions, and fills a
   deterministic model contract.
+- Runs one shared, non-executing tree-level parity check for paper, SARAH, and
+  3DEFT inputs, and presents possible sign-flip symmetries for human review.
 - Compiles reviewed contracts locally to CosmoTransitions or PhaseTracer
   artifacts.
 - Uses local code and the agent's review loop by default; it does not ask

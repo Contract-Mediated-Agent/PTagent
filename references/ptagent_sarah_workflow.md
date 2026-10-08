@@ -66,5 +66,9 @@ fails.
 Do not ask the user to approve every imported matrix element. Ask for one
 physics-policy batch covering species inclusion, resummation, Goldstone/photon
 and gauge-mode policy, counterterms, symmetry or phase handling, and backend.
+For symmetry or phase handling, use the same deterministic tree-level
+sign-flip analysis as the paper workflow. Imported metadata may support the
+recommendation, but neither the metadata nor the V0 check silently approves a
+PhaseTracer symmetry or a CosmoTransitions filter threshold.
 Resolve the contract again after that batch. Ask separately for final compile
 approval, as in the ordinary 4D workflow.
