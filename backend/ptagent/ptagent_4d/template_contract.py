@@ -4067,7 +4067,8 @@ def _render_os_like_helper(*, enabled: bool) -> str:
                 m2 = np.asanyarray(massSq, dtype=float)
                 n = np.asanyarray(dof, dtype=float)
                 m2v = np.asanyarray(vacuumMassSq, dtype=float)
-                active = np.abs(m2v) > 1e-80
+                vacuum_scale = max(1.0, float(np.max(np.abs(m2v), initial=0.0)))
+                active = np.abs(m2v) > 1e-12*vacuum_scale
                 denom = np.where(active, np.abs(m2v), 1.0)
                 term = m2*m2*(np.log(np.abs(m2/denom) + 1e-100) - 1.5) + 2.0*m2*m2v
                 term = np.where(active, term, 0.0)
@@ -4105,6 +4106,24 @@ def _render_safe_v1t_method(thermal: dict[str, Any]) -> str:
     return textwrap.indent(
         textwrap.dedent(
             """
+            @staticmethod
+            def _thermal_integral(mass_ratio_sq, fermion=False):
+                # Keep the nonanalytic small-mass terms that a coarse spline
+                # can smooth out near a very weak first-order transition.
+                y = np.asarray(mass_ratio_sq, dtype=float)
+                spline = finiteT.Jf_spline if fermion else finiteT.Jb_spline
+                expansion = finiteT.Jf_low if fermion else finiteT.Jb_low
+                result = np.array(spline(y), copy=True)
+                selected = np.abs(y) < 2.0
+                if np.any(selected):
+                    z = y[selected]
+                    with np.errstate(divide='ignore', invalid='ignore'):
+                        accurate = np.real(expansion(np.sqrt(z.astype(complex)), n=20))
+                    u = np.clip(np.abs(z) - 1.0, 0.0, 1.0)
+                    weight = 1.0 - (10.0*u**3 - 15.0*u**4 + 6.0*u**5)
+                    result[selected] = weight*accurate + (1.0-weight)*result[selected]
+                return result
+
             def V1T(self, bosons, fermions, T, include_radiation=True):
                 T = np.asanyarray(T, dtype=float)
                 T2 = (T*T)[..., np.newaxis] + 1e-100
@@ -4112,10 +4131,10 @@ def _render_safe_v1t_method(thermal: dict[str, Any]) -> str:
                 boson_m2, boson_dof, _c = bosons
                 y = np.zeros(np.shape(T), dtype=float)
                 if boson_m2.shape[-1] > 0:
-                    y = y + np.sum(boson_dof*finiteT.Jb_spline(boson_m2/T2), axis=-1)
+                    y = y + np.sum(boson_dof*self._thermal_integral(boson_m2/T2), axis=-1)
                 fermion_m2, fermion_dof = fermions
                 if fermion_m2.shape[-1] > 0:
-                    y = y + np.sum(fermion_dof*finiteT.Jf_spline(fermion_m2/T2), axis=-1)
+                    y = y + np.sum(fermion_dof*self._thermal_integral(fermion_m2/T2, fermion=True), axis=-1)
                 if include_radiation:
                     if self.num_boson_dof is not None:
                         explicit_boson_dof = np.sum(boson_dof) if boson_dof.size else 0.0

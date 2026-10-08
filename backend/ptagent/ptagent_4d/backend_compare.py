@@ -327,7 +327,7 @@ def _compare_phasetracer_smoke_output_to_python_model_details(
             errors.append(f"missing smoke point {index} V")
             continue
         cpp_value = float(scalars["V"])
-        py_value = evaluate_python_model_vtot(model, phi, temperature, include_radiation=False)
+        py_value = evaluate_python_model_vtot(model, phi, temperature, include_radiation=True)
         abs_diff = abs(float(py_value) - float(cpp_value))
         rel_diff = abs_diff / max(abs(float(py_value)), abs(float(cpp_value)), 1.0)
         comparison_points.append(
@@ -343,7 +343,7 @@ def _compare_phasetracer_smoke_output_to_python_model_details(
         )
         _append_scalar_error(
             errors,
-            f"point {index} Python model Vtot(include_radiation=False) vs C++ V",
+            f"point {index} Python model Vtot(include_radiation=True) vs C++ V",
             py_value,
             cpp_value,
             abs_tol=abs_tol,
@@ -490,7 +490,9 @@ def _point_location_from_smoke(point: dict[str, Any] | None) -> tuple[list[float
 
 
 def _python_model_raddof(model: Any) -> float:
-    return _optional_float(getattr(model, "num_boson_dof", 0.0)) + 0.875 * _optional_float(getattr(model, "num_fermion_dof", 0.0))
+    # Generated models include the contract's full radiation contribution in
+    # Vtot. PhaseTracer's get_raddof() therefore has no omitted species to add.
+    return 0.0
 
 
 def _optional_float(value: Any) -> float:

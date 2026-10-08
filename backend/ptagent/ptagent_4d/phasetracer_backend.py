@@ -264,6 +264,8 @@ def _render_potential_header(contract: dict[str, Any], metadata: dict[str, Any])
     private_members = [f"double {row['name']}_;" for row in public_inputs]
     private_members.extend(member.strip() for member in _render_ct_private_members(contract))
     private_body = textwrap.indent("\n".join(private_members), "  ") if private_members else "  // No private state."
+    if any(str(row.get("name")) == "phi" for row in fields):
+        methods = [_avoid_phi_binding_collision(method) for method in methods]
     body = "\n\n".join(method.strip("\n") for method in methods if method.strip())
     method_body = textwrap.indent(body, "  ")
     source = "\n".join(
@@ -302,6 +304,28 @@ def _render_potential_header(contract: dict[str, Any], metadata: dict[str, Any])
         ]
     )
     return _cleanup_generated_cpp_source(source)
+
+
+def _avoid_phi_binding_collision(source: str) -> str:
+    """Keep the vector argument distinct from a scalar background named phi."""
+    matches = list(re.finditer(r"Eigen::VectorXd\s+phi\b", source))
+    for match in reversed(matches):
+        start = source.find("{", match.end())
+        if start < 0:
+            continue
+        level, end = 1, start + 1
+        while end < len(source) and level:
+            level += (source[end] == "{") - (source[end] == "}")
+            end += 1
+        signature = source[match.start():start].replace("VectorXd phi", "VectorXd ptagent_fields")
+        body = source[start:end]
+        body = re.sub(r"\bphi\.", "ptagent_fields.", body)
+        if re.search(r"const\s+double\s+phi\s*=", body):
+            body = re.sub(r"\bphi\[", "ptagent_fields[", body)
+        else:
+            body = re.sub(r"\bphi\b", "ptagent_fields", body)
+        source = source[:match.start()] + signature + body + source[end:]
+    return source
 
 
 def _render_constructor(class_name: str, public_inputs: list[dict[str, Any]], contract: dict[str, Any]) -> str:
@@ -439,7 +463,7 @@ def _needs_v1_component_helper(contract: dict[str, Any]) -> bool:
 def _needs_v1t_component_helper(contract: dict[str, Any]) -> bool:
     thermal = _dict(_dict(contract.get("loops")).get("thermal"))
     mode = str(thermal.get("mode", "none"))
-    return mode == "custom_expr" or (mode == "standard_thermal_integrals" and _phasetracer_daisy_method(contract) == "Parwani")
+    return mode in {"custom_expr", "standard_thermal_integrals"}
 
 
 def _needs_daisy_component_helper(contract: dict[str, Any]) -> bool:
@@ -505,16 +529,25 @@ def _render_v1t_component(
         lines.extend(render_cpp_assignment_block(str(thermal.get("custom_expr", "0.0")), "value", indent="  ", prefer_square_aliases=True))
         lines.append("  return value;")
     elif mode == "standard_thermal_integrals":
+        # The native thermal sum contains explicit massive species only.
+        # Preserve the total radiation count supplied by the model specification.
+        missing_dof = _missing_radiation_dof(contract)
+        if missing_dof < -1e-10:
+            raise CompileBlocked("Total radiation degrees of freedom are smaller than the explicit mass spectrum.")
+        lines.append(
+            "  const double radiation = -3.14159265358979323846 * "
+            f"3.14159265358979323846 / 90.0 * {_float_literal(missing_dof)} * T * T * T * T;"
+        )
         if _phasetracer_daisy_method(contract) == "Parwani":
             lines.extend(
                 [
-                    "  return V1T(get_scalar_debye_sq(phi, get_xi(), T), get_fermion_masses_sq(phi), get_vector_debye_sq(phi, T), get_ghost_masses_sq(phi, get_xi()), T);",
+                    "  return V1T(get_scalar_debye_sq(phi, get_xi(), T), get_fermion_masses_sq(phi), get_vector_debye_sq(phi, T), get_ghost_masses_sq(phi, get_xi()), T) + radiation;",
                 ]
             )
         else:
             lines.extend(
                 [
-                    "  return V1T(get_scalar_masses_sq(phi, get_xi()), get_fermion_masses_sq(phi), get_vector_masses_sq(phi), get_ghost_masses_sq(phi, get_xi()), T);",
+                    "  return V1T(get_scalar_masses_sq(phi, get_xi()), get_fermion_masses_sq(phi), get_vector_masses_sq(phi), get_ghost_masses_sq(phi, get_xi()), T) + radiation;",
                 ]
             )
     else:
@@ -1092,7 +1125,11 @@ def _render_os_like_v1_override() -> str:
           for (size_t i = 0; i < masses_sq.size(); ++i) {
             const double m2 = masses_sq[i];
             const double m2_vac = vacuum_masses_sq[i];
-            if (std::abs(m2_vac) <= 1e-80) continue;
+            double vacuum_scale = 1.0;
+            for (const double reference : vacuum_masses_sq) {
+              vacuum_scale = std::max(vacuum_scale, std::abs(reference));
+            }
+            if (std::abs(m2_vac) <= 1e-12 * vacuum_scale) continue;
             const double denom = std::abs(m2_vac);
             correction += dofs[i] * (m2 * m2 * (std::log(std::abs(m2 / denom) + 1e-100) - 1.5) + 2.0 * m2 * m2_vac);
           }
@@ -1105,10 +1142,10 @@ def _render_os_like_v1_override() -> str:
 def _render_raddof_method(contract: dict[str, Any]) -> str:
     if not _uses_standard_thermal_integrals(contract):
         return "double get_raddof() const override { return 0.0; }"
-    values = _parameter_values(contract)
-    if "num_boson_dof" not in values or "num_fermion_dof" not in values:
-        raise CompileBlocked("PhaseTracer standard thermal integrals need reviewed num_boson_dof and num_fermion_dof constants.")
-    return f"double get_raddof() const override {{ return {_float_literal(_radiation_dof(contract))}; }}"
+    _missing_radiation_dof(contract)
+    # ptagent_V1T_component adds every radiation species omitted by the native
+    # mass sums, so TransitionSolver must not add an independent radiation bath.
+    return "double get_raddof() const override { return 0.0; }"
 
 
 def _render_zero_t_vacuum_method(
@@ -1900,6 +1937,18 @@ def _radiation_dof(contract: dict[str, Any]) -> float:
         return 0.0
     values = _parameter_values(contract)
     return float(values["num_boson_dof"]) + 0.875 * float(values["num_fermion_dof"])
+
+
+def _missing_radiation_dof(contract: dict[str, Any]) -> float:
+    explicit_dof = (
+        sum(_mass_dofs(contract, "scalar"))
+        + sum(_mass_dofs(contract, "vector"))
+        + 0.875 * sum(_fermion_dofs(contract))
+    )
+    missing_dof = _radiation_dof(contract) - explicit_dof
+    if missing_dof < -1e-10:
+        raise CompileBlocked("Total radiation degrees of freedom are smaller than the explicit mass spectrum.")
+    return max(0.0, missing_dof)
 
 
 def _standard_v1_sum(masses: list[float], dofs: list[float], c_values: list[float], sign: float, q_sq: float) -> float:
