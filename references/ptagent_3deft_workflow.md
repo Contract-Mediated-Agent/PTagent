@@ -131,7 +131,13 @@ python <skill-dir>/scripts/ptagent_cli.py --ptagent-engine 3deft compare-mathema
 
 ## Question Mode
 
-Ask one fused question packet at a time. Before asking, the agent must fill every mechanical item it can infer from the reviewed source, DRalgo output, or generated proof files. The default is agent-first and evidence-first: do the work locally when source/proof evidence is available; ask the user only when evidence is missing, conflicting, multiple interpretations would change physics intent/backend behavior/numerical results, or guessing would make the generated model unverifiable.
+Present all available unresolved decisions together in one numbered batch, with related fields grouped. Before asking, fill every mechanical item supported by the reviewed source, DRalgo output, or proof files. Ask only when missing/conflicting evidence or multiple interpretations would change physics or make the model unverifiable. Do not repeat explicit user choices. If DRalgo execution reveals a new ambiguity, explain that dependency before asking a follow-up batch.
+
+Whenever presenting either 3DEFT contract for review, follow
+`contract_review.md`: show the current Markdown and its matching provenance
+graph together. Include the DRalgo source/output, matching scales, EFT potential,
+RG/evaluation choices, and pending PhaseTracer policies. Do not add 4D CW/Daisy
+terms to a 3DEFT graph. The graph ends at the contract, before backend execution.
 
 Do not ask about safe conventions, notation mapping, variable renaming, formatting choices, or backend-compatible defaults. Proceed with a documented assumption in those cases.
 
@@ -144,7 +150,7 @@ Every question should include:
 - the agent's current source-backed thought, clearly marked as reviewable;
 - what the agent will do if the user accepts that recommendation;
 - the exact contract field or table being patched;
-- the current question number (`1 of N`) and how many packets remain after this answer, if known.
+- a number within the complete current question batch.
 
 Do not dump raw validation blockers on the user.
 

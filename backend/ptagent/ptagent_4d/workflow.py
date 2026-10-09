@@ -232,8 +232,6 @@ class PhaseTransitionAgent:
         questions = []
         if not backend or (backend not in SUPPORTED_COMPILE_BACKENDS and backend != COMPARE_BACKENDS_SENTINEL):
             questions.append(backend_selection_question(compile_backend))
-            ir, validation = self.parse_contract_template(template_markdown, source_path=source_path)
-            return ir, validation, questions
         compile_context = backend if backend in SUPPORTED_COMPILE_BACKENDS or backend == COMPARE_BACKENDS_SENTINEL else None
         ir, validation = self.parse_contract_template(
             template_markdown,
@@ -246,12 +244,13 @@ class PhaseTransitionAgent:
         )
         if blocking:
             contract = parse_contract(template_markdown)
+            if questions or any(issue.field_key != "review.approved" for issue in blocking):
+                blocking = [issue for issue in blocking if issue.field_key != "review.approved"]
             packets = build_question_packets(blocking, contract)
-            packet = next(
-                (item for item in packets if item.key != "review.approved"),
-                packets[0],
+            questions.extend(
+                question_packet_to_dict(packet, contract, compile_backend=backend)
+                for packet in packets
             )
-            questions.append(question_packet_to_dict(packet, contract, compile_backend=backend))
         return ir, validation, questions
 
     def compile_cosmotransitions_template(

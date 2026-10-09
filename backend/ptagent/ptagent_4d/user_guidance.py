@@ -106,7 +106,8 @@ def build_user_guidance_markdown(
         key=_issue_sort_key,
     )
     nonapproval_blocking = [issue for issue in all_blocking if issue.field_key != "review.approved"]
-    approval_deferred = bool(nonapproval_blocking) and any(
+    backend_missing = backend not in SUPPORTED_COMPILE_BACKENDS and backend != COMPARE_BACKENDS_SENTINEL
+    approval_deferred = (bool(nonapproval_blocking) or backend_missing) and any(
         issue.field_key == "review.approved" for issue in all_blocking
     )
     blocking = nonapproval_blocking if approval_deferred else all_blocking
@@ -117,9 +118,9 @@ def build_user_guidance_markdown(
         f"- Template to edit: `{template_label}`",
         "- `contract_template.md` is the only file users should edit.",
         "- Files under `proof_materials/` and `generated_models/` are derived and will be overwritten.",
-        "- Related blockers are fused into one question packet, and packets are asked one at a time in dependency order.",
+        "- Related blockers are fused into packets; present ALL available packets together in one numbered checklist.",
         "- The agent should patch source-evident fields itself before asking; only uncertain physics choices should reach the user.",
-        "- The agent should patch the Markdown, rerun this guide, and then ask the next question.",
+        "- Apply the answer batch to the Markdown and rerun this guide; ask again only for unanswered or newly exposed blockers.",
         "",
         "```powershell",
         f"python -m ptagent resolve --template \"{template_label}\"",
@@ -129,17 +130,11 @@ def build_user_guidance_markdown(
     backend_gate = _backend_selection_gate_lines(compile_backend)
     lines.extend(backend_gate)
     if backend_gate:
-        lines.extend(
-            [
-                "## Question Progress",
-                "",
-                "- Current round: 1 backend-selection question.",
-                "- Current question: 1 of 1.",
-                "- After the backend is selected, rerun `resolve` so PTagent can generate the backend-specific next question.",
-                "",
-            ]
-        )
-        return "\n".join(lines).strip() + "\n"
+        lines.extend([
+            "Include backend selection in the same batch as the questions below. "
+            "Label backend-dependent choices conditionally; do not assume a backend.",
+            "",
+        ])
     if not all_blocking:
         status = "No blocking questions remain. Review the rendered Markdown, then run compile when ready."
         if backend_gate:
@@ -158,14 +153,14 @@ def build_user_guidance_markdown(
         [
             "## How To Answer In Chat",
             "",
-            "Answer only the current question packet. The agent can then edit `contract_template.md`, rerun `resolve`, and ask the next packet if one remains.",
+            "Answer all numbered questions together; partial answers are also accepted. The agent applies the batch and reruns `resolve`.",
             "",
             "```text",
             "Q1: ...",
             "```",
             "",
             "If a candidate is not really a model input, say whether it should become a fixed constant, a derived parameter, or be removed.",
-            "After this answer, rerun `resolve`; if blockers remain, this file will be regenerated with the next single question.",
+            "After this answer, rerun `resolve`; retain answered choices and explain any genuinely new or still-unanswered blockers together.",
             "",
         ]
     )
@@ -182,15 +177,14 @@ def build_user_guidance_markdown(
             "",
             f"- Backend context: `{backend}`.",
             f"- Underlying blocking fields remaining: {len(blocking)}.",
-            f"- Current question: 1 of {len(packets)}.",
-            f"- Remaining after this answer: {max(len(packets) - 1, 0)}.",
+            f"- Questions in this batch: {len(packets)}.",
             "",
-            "## Current Question",
+            "## Questions To Answer Together",
             "",
         ]
     )
-    if packets:
-        lines.extend(_render_question_packet(1, packets[0], contract, memory, compile_backend=backend))
+    for number, packet in enumerate(packets, 1):
+        lines.extend(_render_question_packet(number, packet, contract, memory, compile_backend=backend))
         lines.append("")
     return "\n".join(lines).strip() + "\n"
 
@@ -276,7 +270,7 @@ def _render_issue_question(
         f"- Accepted format: {target['format']}",
         f"- Ask the user: {prompt}",
         f"- My current thought (reviewable): {recommendation or _default_recommendation(issue, target)}",
-        "- If you accept my recommendation: the agent will patch the edit target, rerun `resolve`, and continue with the next blocker if one remains.",
+        "- If you accept my recommendation: the agent will apply the answer batch and rerun `resolve` to check remaining blockers.",
     ]
     if target.get("notes"):
         lines.append(f"- Notes: {target['notes']}")
@@ -327,7 +321,7 @@ def _render_question_packet(
         f"- Ask the user: {_packet_prompt(packet, target)}",
         f"- My current thought (reviewable): {_packet_recommendation(packet, target, memory)}",
         f"- The agent should handle first: {agent_action}",
-        f"- If you accept my recommendation: the agent will {agent_action} Then it will patch the Markdown, rerun `resolve`, and ask the next packet only if blockers remain.",
+        f"- If you accept my recommendation: the agent will {agent_action} Then it will apply the answer batch and rerun `resolve` to check remaining blockers.",
     ]
     notes = _packet_notes(packet, target)
     if notes:

@@ -63,9 +63,16 @@ fails.
 
 ## Review Boundary
 
+Follow `contract_review.md`: show the current Markdown contract and its
+evidence-bound graph together, including a partial import's unavailable thermal
+data and compile blockers. SARAH exports do not by themselves approve phase
+filtering, resummation, Goldstone/photon choices, or a numerical benchmark.
+
 Do not ask the user to approve every imported matrix element. Ask for one
 physics-policy batch covering species inclusion, resummation, Goldstone/photon
 and gauge-mode policy, counterterms, symmetry or phase handling, and backend.
+Include missing numerical inputs and renormalization scale in this same batch;
+omit questions already answered by source evidence or explicit user choices.
 For symmetry or phase handling, use the same deterministic tree-level
 sign-flip analysis as the paper workflow. Imported metadata may support the
 recommendation, but neither the metadata nor the V0 check silently approves a

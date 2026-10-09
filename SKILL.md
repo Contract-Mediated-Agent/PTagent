@@ -30,6 +30,7 @@ scripts/check_model.py
 scripts/compile_template.py
 scripts/prepare_paper.py
 scripts/ptagent_cli.py
+scripts/render_contract_graph.py
 backend/ptagent/
 requirements.txt
 ```
@@ -140,6 +141,33 @@ the assumption.
 Every question must be a blocking ambiguity and must state what was checked,
 why it blocks, what physics/code/result would change, the current recommendation,
 and what PTagent will do if the user accepts it.
+
+## Batched Questions And Visual Review
+
+Read `references/contract_review.md` for every route before asking physics
+questions or presenting a contract. Finish all available evidence checks first,
+then present ALL unresolved decisions in one numbered message, with related
+items grouped. Include backend selection and applicable conditional choices;
+never deliberately disclose only the next question. Respect choices already
+specified in the user's prompt. Apply an answer batch before revalidating.
+
+Collect missing dependencies in one preflight request; never install them
+without approval. A missing source, model-selection ambiguity, or blocked
+operation can require a preliminary batch. Do not invent branch-specific
+questions before the branch is known. Explain why any later question could not
+be answered or discovered earlier. Final compile approval remains a separate
+gate after construction blockers have been resolved.
+
+Whenever showing the Markdown contract for review, show its matching provenance
+graph INLINE in the same response, plus the contract link and complete pending
+question checklist. Use `scripts/render_contract_graph.py` and the current
+contract/evidence, not an image-generation model or a previous example's data.
+The graph ends at `Contract for review`; regenerate it after changes. Green is
+source evidence, blue is deterministic calculation, orange is explicit user
+input/confirmation, pale red is a pending recommendation (including grounded
+policy suggestions), and gray is unavailable/blocked. Never label an agent's
+interpretation or approval as the user's confirmation. A graph is a review
+artifact, not approval to compile or evidence of a completed numerical run.
 
 ## Backend Lookup
 

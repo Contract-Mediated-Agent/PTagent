@@ -61,10 +61,10 @@ If developing against a repository checkout, include
 front, include `--phasetracer-root <PhaseTracer-source-root>`. Treat the script
 output as an operation gate, not as a physics-contract field.
 
-When the gate reports that no usable Python has `cosmoTransitions`, stop and ask
-the user whether to install CosmoTransitions into the Python environment that
-will run PTagent. Do not install packages automatically, and do not keep running
-paper extraction while this environment question is unanswered.
+Collect missing dependencies for the requested operations in one preflight
+message, following the router's operation blockers. Missing CosmoTransitions
+blocks its compile/check/run operations, not independent paper extraction.
+Ask permission before installing into the configured runtime Python.
 
 When the gate reports that PhaseTracer is not found under the selected backend
 or project directory and no valid PhaseTracer root is configured, stop and ask
@@ -143,8 +143,8 @@ or pass it to PhaseTracer compile commands as `--phasetracer-root`.
      contract physics. If the user has already specified `cosmotransitions` or
      `phasetracer`, carry that choice as compile context; otherwise ask which
      supported backend to generate. Do not compile for any other backend.
-   - Backend-specific phase handling: always ask the user to confirm this
-     policy for the selected backend. First inspect source, contract, proof
+   - Backend-specific phase handling: include this policy in the question batch
+     only if the user has not already explicitly specified it. First inspect source, contract, proof
      files, and explicit user inputs, then present a recommendation and reason.
      For `cosmotransitions`, ask whether `forbidPhaseCrit` should discard any
      traced phase. Recommend `mode=none` unless the paper/reference code
@@ -164,7 +164,7 @@ or pass it to PhaseTracer compile commands as `--phasetracer-root`.
      ask the user to review the rendered `contract_template.md` and explicitly
      approve backend code generation/compilation. Do not treat a request like
      "write a model" as approval to compile.
-   Ask only one question packet at a time. Each question must correspond to a
+   Present all available question packets together. Each question must correspond to a
    blocking ambiguity and must state the checked materials, missing/conflicting
    information, why it blocks, what physics/code/result would change, the
    current recommendation, and what PTagent will do if the user accepts it.
@@ -189,8 +189,10 @@ or pass it to PhaseTracer compile commands as `--phasetracer-root`.
    answer batch. This regenerates `proof_materials/contract_resolved.json`,
    `proof_materials/model_ir.json`, `proof_materials/validation.json`, and
    `proof_materials/user_questions.md`.
-9. Replace every unresolved `ASK_USER` in the human Markdown source. When every
-   field is resolved, stop and ask the user to review the rendered Markdown.
+9. Whenever presenting the current contract, render and show its matching graph
+   using `references/contract_review.md`, even if construction questions remain.
+   Replace every unresolved `ASK_USER` in the human Markdown source. When every
+   field is resolved, show the updated Markdown and graph for final review.
    Do not set `approved=true` and do not compile until the user explicitly says
    to approve/generate/compile the model.
 10. Only after explicit user approval, set `approved` to `true` and verify the
@@ -266,17 +268,16 @@ backend context:
 - ask which backend to compile only if the user/source/task has not specified
   one, and
   show the supported choices `cosmotransitions` and `phasetracer`;
-- after the backend is selected, always ask the user to confirm backend-specific
-  phase handling after presenting a source-backed recommendation and reason.
+- include any unconfirmed backend-specific phase handling in the complete batch,
+  with a source-backed recommendation and reason; do not re-ask explicit choices.
   `cosmotransitions` uses phase filtering / `forbidPhaseCrit`; recommend
   `mode=none` unless the paper/reference code intentionally removes a traced
   branch. `phasetracer` uses `apply_symmetry(phi)` to identify reviewed
   symmetry-equivalent field points and avoid duplicate phase counting; recommend
   `mode=none` unless the user confirms a reviewed sign-flip equivalence;
-- ask only the current next question packet, not a full batch of unrelated
-  questions; include the current question number (`1 of N`), how many packets
-  remain after this answer, the underlying blocker count, and a plain-language
-  explanation;
+- ask all available unresolved decisions together, grouping related fields and
+  explaining each decision in plain language. Include conditional questions
+  when the backend is not selected. Do not hide later questions;
 - do not ask about safe conventions, notation mapping, variable renaming,
   formatting choices, or backend-compatible defaults. Proceed and record the
   assumption;

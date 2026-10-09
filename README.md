@@ -42,8 +42,11 @@ own invocation syntax.
   scalar thermal self-energies and longitudinal gauge Debye matrices.
 - Reads reviewed DRalgo/3DEFT Mathematica/Wolfram sources when the user clearly
   asks for 3DEFT or supplies a DRalgo-style `.m`/`.wl` file.
-- Builds evidence packets, asks only blocking physics questions, and fills a
-  deterministic model contract.
+- Builds evidence packets, asks all currently unresolved physics questions
+  together, and fills a deterministic model contract.
+- Shows the Markdown contract with a consistent provenance graph for review:
+  source evidence, deterministic derivations, explicit user inputs, pending
+  recommendations, and unavailable quantities are distinguished by color.
 - Runs one shared, non-executing tree-level parity check for paper, SARAH, and
   3DEFT inputs, and presents possible sign-flip symmetries for human review.
 - Compiles reviewed contracts locally to CosmoTransitions or PhaseTracer
@@ -52,6 +55,13 @@ own invocation syntax.
   the user for an LLM API key.
 
 ## First Run
+
+PTagent first checks available evidence and collects unresolved decisions into
+one question batch. Already specified choices are not asked again. A missing
+source or a blocked tool may require a preliminary batch; new questions after
+that must identify the newly exposed ambiguity. Final compilation still needs
+explicit approval of the completed contract. Each review includes a graph
+ending at that contract, not a claim that phase-transition calculations ran.
 
 On first use, PTagent checks the local environment before doing heavy work.
 The check reports missing software as advisories and lists exactly which
