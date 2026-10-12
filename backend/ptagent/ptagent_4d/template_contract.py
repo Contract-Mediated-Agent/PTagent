@@ -1692,6 +1692,16 @@ def validate_contract(
     if contract.get("schema") != CONTRACT_SCHEMA:
         issues.append(_error("schema", "schema_mismatch", f"Expected schema {CONTRACT_SCHEMA}."))
     _validate_source_import_provenance(contract, issues)
+    preparation_card = _dict(contract.get("model_card"))
+    if preparation_card.get("sarah_profile_id") and not preparation_card.get("sarah_preparation_manifest"):
+        issues.append(_error("model_card.sarah_preparation_manifest", "sarah_preparation_missing", "A prepared SARAH profile requires its machine-check manifest."))
+    if preparation_card.get("sarah_preparation_manifest"):
+        from .sarah_prepare import preparation_errors
+
+        for message in preparation_errors(contract):
+            issues.append(_error("model_card.sarah_preparation_manifest", "sarah_preparation_stale", message))
+        if compile_backend and compile_backend not in {preparation_card.get("compile_backend"), "compare-backends"}:
+            issues.append(_error("model_card.compile_backend", "sarah_backend_changed", "The compile backend differs from the prepared choice. Re-prepare with the explicit backend override."))
     review = _dict(contract.get("review"))
     if review_required and review.get("approved") is not True:
         issues.append(
@@ -2927,8 +2937,9 @@ def compile_contract_template(
     output_dir: Path | None = None,
     output_path: Path | None = None,
     run_import_check: bool = True,
+    for_comparison: bool = False,
 ) -> CompileResult:
-    validation = validate_contract_template(markdown_text, review_required=True, compile_backend="cosmotransitions")
+    validation = validate_contract_template(markdown_text, review_required=True, compile_backend="compare-backends" if for_comparison else "cosmotransitions")
     if not validation.ok:
         preview = "; ".join(f"{issue.code}: {issue.message}" for issue in validation.issues[:5])
         raise CompileBlocked("Template contract is not compile-ready: " + preview)

@@ -30,6 +30,8 @@ def export_sarah_model(
     if not executable or not Path(executable).exists():
         raise SarahExportError("wolframscript is required only for export-sarah and was not found.")
     output = Path(run_dir).expanduser().resolve()
+    if (output / "contract_template.md").exists():
+        raise SarahExportError("Export never overwrites an existing contract. Use a fresh task directory.")
     input_dir = output / "input"
     proof_dir = output / "proof_materials"
     input_dir.mkdir(parents=True, exist_ok=True)
@@ -112,6 +114,14 @@ def export_sarah_model(
         "driver": _record(driver),
         "companion_exporter": _record(companion),
     }
+    model_parent = Path(model_search_path).expanduser().resolve() if model_search_path else root / "Models"
+    source_directory = model_parent / model
+    if source_directory.is_dir():
+        archived = input_dir / "sarah_model"
+        archived.mkdir(exist_ok=True)
+        for source in sorted(source_directory.glob("*.m")):
+            shutil.copy2(source, archived / source.name)
+        manifest["model_source"] = str(archived)
     manifest_path = proof_dir / "sarah_export.json"
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     manifest["manifest"] = str(manifest_path)

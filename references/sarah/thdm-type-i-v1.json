@@ -1,0 +1,47 @@
+{
+  "id": "sarah-thdm-type-i-v1",
+  "adapter_version": 1,
+  "scope": "Audited SARAH 4.14.5 THDM, real parameters, two neutral backgrounds. Illustrative pipeline point, not a fitted 125 GeV Higgs benchmark.",
+  "source_signatures": {
+    "THDM.m": "9ae03dbe7f26a42f02131684ed272f852bb0049ebef26a4504ed144ebe2d7abb",
+    "parameters.m": "98c9666a0886ff064f87f710003782615a49849b120ef6611d77dd639d436e71",
+    "SPheno.m": "da79b5b937d69132015dcc5efcccf2e6baf90585f8dd21861d4ee69f3a21aed9"
+  },
+  "parameters": {
+    "vSM": 246.0,
+    "Q": 246.0,
+    "g1": 0.357,
+    "g2": 0.652,
+    "m_u": 0.0022,
+    "m_c": 1.27,
+    "m_t": 173.0,
+    "m_d": 0.0047,
+    "m_s": 0.096,
+    "m_b": 4.18,
+    "m_e": 0.000511,
+    "m_mu": 0.10566,
+    "m_tau": 1.77686,
+    "num_boson_dof": 32.0,
+    "num_fermion_dof": 90.0
+  },
+  "policies": {
+    "backend": "cosmotransitions",
+    "resummation_scheme": "Arnold-Espinosa",
+    "counterterm": "none",
+    "goldstone": "included",
+    "photon": "retained",
+    "phase_filter": "negative_field_threshold",
+    "phase_filter_field": "phi2",
+    "phase_filter_threshold": -1.0,
+    "phasetracer_symmetry": "simultaneous",
+    "cubic_power_policy": "positive_part"
+  },
+  "numerics": {"x_eps": 0.01, "T_eps": 0.01},
+  "notes": [
+    "Scalar example inputs are read from the audited SPheno.m DefaultInputValues, never invented or fitted by an agent.",
+    "SM inputs define illustrative tree matching, not precision RG or pole-to-MSbar matching.",
+    "Scalar and longitudinal gauge self-energies use all source species in the leading high-temperature approximation.",
+    "The fixed phase-filter tolerance is a numerical convention, not a consequence of the symmetry.",
+    "All defaults are proposed until the exact contract is approved. Existing contracts are never overwritten."
+  ]
+}

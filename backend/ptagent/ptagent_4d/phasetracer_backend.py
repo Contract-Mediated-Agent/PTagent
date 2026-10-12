@@ -45,8 +45,9 @@ def compile_phasetracer_template(
     linux_runner: str = "native",
     wsl_distro: str = "",
     clang_format: bool = True,
+    for_comparison: bool = False,
 ) -> CompileResult:
-    validation = validate_contract_template(markdown_text, review_required=True, compile_backend="phasetracer")
+    validation = validate_contract_template(markdown_text, review_required=True, compile_backend="compare-backends" if for_comparison else "phasetracer")
     if not validation.ok:
         preview = "; ".join(f"{issue.code}: {issue.message}" for issue in validation.issues[:5])
         raise CompileBlocked("Template contract is not compile-ready: " + preview)
@@ -141,8 +142,10 @@ def _compare_detailed_smoke_output(
         if "raddof" in scalars:
             _append_scalar_error(
                 errors,
-                f"point {index} radiation d.o.f.",
-                _radiation_dof(contract),
+                f"point {index} additional radiation d.o.f.",
+                # The generated thermal potential already includes the full
+                # declared bath; get_raddof is the extra TransitionSolver bath.
+                0.0,
                 scalars["raddof"],
                 abs_tol=PHASETRACER_LOOP_SMOKE_ABS_TOL,
                 rel_tol=PHASETRACER_LOOP_SMOKE_REL_TOL,

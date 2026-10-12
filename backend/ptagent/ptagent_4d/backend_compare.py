@@ -174,6 +174,7 @@ def _reuse_or_compile_python_artifact(
         settings,
         output_dir=output_dir,
         run_import_check=True,
+        for_comparison=True,
     )
     action = "regenerated_forced" if force_regenerate else ("regenerated_stale" if existed_before else "generated")
     return result, action
@@ -211,6 +212,7 @@ def _reuse_or_compile_phasetracer_artifact(
         run_smoke=False,
         clang_format=clang_format,
         phasetracer_root=phasetracer_root,
+        for_comparison=True,
     )
     action = "regenerated_forced" if force_regenerate else ("regenerated_stale" if existed_before else "generated")
     return result, action

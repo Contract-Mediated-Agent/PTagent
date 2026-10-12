@@ -580,7 +580,8 @@ def _resolve_parameter_values(
             value = slha.value(reference["block"], reference["indices"])
             if value is not None:
                 values.setdefault(symbol, value)
-    pending = dict(derived_parameters)
+    # Explicit numerical bindings take priority even for derived XML aliases.
+    pending = {name: expression for name, expression in derived_parameters.items() if name not in overrides}
     while pending:
         progressed = False
         for name, expression in list(pending.items()):

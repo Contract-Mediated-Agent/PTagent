@@ -92,6 +92,23 @@ def build_parser() -> argparse.ArgumentParser:
     export_sarah.add_argument("--run-dir", required=True, help="Task directory receiving SARAH and PTagent outputs.")
     export_sarah.add_argument("--wolframscript", default="wolframscript", help="wolframscript executable or absolute path.")
     export_sarah.add_argument("--timeout", type=int, default=600, help="Exporter timeout in seconds.")
+    export_sarah.add_argument("--preset", choices=["auto", "none", "sarah-thdm-type-i-v1"], default="auto", help="Automatically prepare audited THDM with the fixed preset; none keeps symbolic-only import.")
+    export_sarah.add_argument("--parameters", default="", help="Explicit numeric overrides for deterministic preparation.")
+    export_sarah.add_argument("--choices", default="", help="Explicit policy overrides for deterministic preparation.")
+
+    prepare_sarah = sub.add_parser("prepare-sarah", help="Prepare a frozen, checked THDM contract using a versioned preset; no LLM algebra or numerical inverse fit.")
+    prepare_sarah.add_argument("--vin", required=True)
+    prepare_sarah.add_argument("--parameter-map", required=True)
+    prepare_sarah.add_argument("--model-source", required=True, help="Audited SARAH THDM directory containing THDM.m, parameters.m and SPheno.m.")
+    prepare_sarah.add_argument("--run-dir", required=True, help="Fresh task directory; existing contracts are never overwritten.")
+    prepare_sarah.add_argument("--slha", default="")
+    prepare_sarah.add_argument("--parameters", default="", help="JSON object/file with explicit numeric overrides; these beat source/preset values.")
+    prepare_sarah.add_argument("--choices", default="", help="JSON object/file with explicit policy overrides; unsupported choices stop, never silently fall back.")
+
+    approve_sarah = sub.add_parser("approve-sarah", help="Record explicit user approval of an exact prepared contract hash.")
+    approve_sarah.add_argument("--template", required=True)
+    approve_sarah.add_argument("--expected-sha256", required=True)
+    approve_sarah.add_argument("--user-approval-quote", required=True, help="Actual user approval; never fabricate or infer it from defaults.")
 
     validate = sub.add_parser("validate", help="Validate a reviewed template markdown file.")
     validate.add_argument("--template", required=True, help="Reviewed template markdown path.")
@@ -166,6 +183,24 @@ def main(argv: list[str] | None = None) -> int:
     settings = get_settings()
     agent = PhaseTransitionAgent(settings)
 
+    if args.command in {"prepare-sarah", "approve-sarah"}:
+        from .sarah_prepare import prepare_sarah, approve_sarah
+        from .sarah_import import SarahImportError
+
+        try:
+            if args.command == "prepare-sarah":
+                result = prepare_sarah(vin_path=args.vin, parameter_map_path=args.parameter_map,
+                                       model_source=args.model_source, run_dir=args.run_dir,
+                                       slha_path=args.slha or None, parameters=_load_parameters(args.parameters),
+                                       choices=_load_parameters(args.choices))
+            else:
+                result = approve_sarah(Path(args.template).expanduser().resolve(), args.expected_sha256, args.user_approval_quote)
+        except (SarahImportError, ValueError, OSError) as exc:
+            print(json.dumps({"ready": False, "error": str(exc)}, indent=2))
+            return 2
+        print(json.dumps(result, indent=2))
+        return 0
+
     if args.command == "import-sarah":
         try:
             from .sarah_import import run_sarah_import
@@ -213,6 +248,25 @@ def main(argv: list[str] | None = None) -> int:
                     "Install the dependencies from requirements.txt, then run import-sarah on the task input files."
                 ) from exc
             raise
+        use_preset = args.preset == "sarah-thdm-type-i-v1" or (args.preset == "auto" and args.model == "THDM")
+        if use_preset:
+            from .sarah_prepare import prepare_sarah
+            from .sarah_import import SarahImportError
+
+            try:
+                if not result.get("model_source"):
+                    raise SarahImportError("Cannot locate the SARAH model source for deterministic preparation.")
+                prepared = prepare_sarah(vin_path=result["vin"]["path"], parameter_map_path=result["parameter_map"]["path"],
+                                         model_source=result["model_source"], run_dir=args.run_dir,
+                                         slha_path=(result.get("slha") or {}).get("path") or None,
+                                         parameters=_load_parameters(args.parameters), choices=_load_parameters(args.choices))
+            except (SarahImportError, ValueError, OSError) as exc:
+                print(json.dumps({"export": result, "ready": False, "error": str(exc)}, indent=2))
+                return 2
+            print(json.dumps({"export": result, "preparation": prepared}, indent=2))
+            return 0
+        if args.parameters or args.choices:
+            raise SystemExit("This model has no deterministic preset; explicit preparation inputs were not applied. Use import-sarah with a reviewed parameter binding.")
         imported = run_sarah_import(
             vin_path=result["vin"]["path"],
             parameter_map_path=result["parameter_map"]["path"],

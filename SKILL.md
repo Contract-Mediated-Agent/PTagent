@@ -102,6 +102,17 @@ or requested. A `.vin` file is auto-routed only after its XML root and v2 model
 version are verified. A SARAH `.m` or `.wl` model is never auto-routed; use
 `export-sarah` explicitly.
 
+For the audited SARAH THDM source, use the versioned deterministic preparation
+route in that reference. `export-sarah` selects it automatically for THDM;
+existing exports plus model files use `prepare-sarah`. Pass explicit user inputs
+as parameter/policy overrides, and let the program apply all remaining defaults.
+Do not write task-local parameter fits, tadpole/Hessian derivations, thermal
+completion scripts, or contract patches for this route. Unsupported inputs must
+be reported, not replaced. Present the generated contract, graph and checks in
+one review; after explicit approval use `approve-sarah` with the exact reviewed
+hash. Preset defaults are not prior user confirmation. Existing approved tasks
+and the paper/3DEFT workflows retain their behavior.
+
 Do not create a model from a free-form Lagrangian. Ask the user for SARAH
 Vevacious++ output or an existing SARAH model that can be exported. This leaves
 paper/arXiv and manual-contract workflows unchanged while keeping the new

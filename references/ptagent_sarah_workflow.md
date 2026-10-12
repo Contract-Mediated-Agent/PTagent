@@ -3,6 +3,82 @@
 Use this route only for deterministic SARAH model exports. PTagent does not
 infer a SARAH model from prose or a free-form Lagrangian.
 
+## Deterministic THDM Preparation
+
+The audited real type-I THDM distributed with SARAH 4.14.5 has a complete
+code-driven route. It is not a generic adapter for every model called THDM.
+`references/sarah/thdm-type-i-v1.json` versions its defaults and source
+signatures. The backend checks the source files and all eight exported mass
+sectors, differentiates the full eight-real-scalar potential, solves the tree
+tadpoles, contracts thermal tensors, and independently checks the high-T
+supertrace. The original exports remain unchanged.
+
+For existing exports, no Wolfram execution is needed:
+
+```bash
+python <skill-dir>/scripts/ptagent_cli.py prepare-sarah \
+  --vin /path/to/THDM.vin --parameter-map /path/to/ScaleAndBlock.xml \
+  --model-source /path/to/SARAH/Models/THDM --run-dir /path/to/fresh-task
+```
+
+This reads scalar example inputs from the audited `SPheno.m` numeric
+`DefaultInputValues` list. It does not execute arbitrary Wolfram source during
+import. Remaining defaults are v=246 GeV, Q=246 GeV, fixed illustrative SM inputs,
+MSbar/Landau, Arnold-Espinosa with positive-part cubic powers, Loop=Tree and no
+finite counterterms, all exported modes retained including Goldstones and the
+thermal photon, and radiation d.o.f. 32/90. The CT mirror filter is phi2 < -1 GeV;
+PhaseTracer uses simultaneous reflection only. The full matrices and thermal
+terms are checked for that symmetry. These are reviewable preset conventions,
+not source-mandated physics or an experimentally fitted benchmark.
+
+Explicit user choices take precedence. Example:
+
+```bash
+python <skill-dir>/scripts/ptagent_cli.py prepare-sarah \
+  --vin /path/to/THDM.vin --parameter-map /path/to/ScaleAndBlock.xml \
+  --model-source /path/to/SARAH/Models/THDM --run-dir /path/to/another-task \
+  --parameters '{"Lambda1":0.12,"Q":200}' \
+  --choices '{"backend":"phasetracer","resummation_scheme":"Parwani"}'
+```
+
+Both JSON arguments also accept files. Native SLHA symbols are supported;
+explicit aliases override SLHA, which overrides source/preset defaults. Do not
+invent physical-mass inverse relations. Inputs such as mh/mH/mA need a separately
+validated inverse adapter and are currently rejected by this route. Unsupported
+particle exclusions, counterterms or modified source conventions stop with an
+error instead of falling back to different physics. `source_polynomial` is the
+available counterterm override when supplied loop/tree values define a nonzero
+ExtraPolynomialPart. Paper and manual-contract routes remain available for
+other reviewed prescriptions.
+
+Preparation writes `sarah_preparation.json`, `sarah_preparation_checks.json`, a
+complete contract, validation, a pending-question checklist, and a matching
+provenance graph under `proof_materials/`. Check the command exit status and
+machine reports. Matrix shape/symmetry alone is not a physical check. The point
+must pass tadpole residual, scalar curvature, Goldstone and tree quartic checks;
+these do not establish the global or loop-corrected vacuum. A failed fit or check
+does not prove that a requested spectrum is impossible.
+
+Show the contract and graph together with the preset summary and any explicit
+overrides. There are no incremental policy questions when the preset covers all
+inputs: request one final approval of the complete specification. Never claim
+defaults were already confirmed. Only after the user actually approves:
+
+```bash
+python <skill-dir>/scripts/ptagent_cli.py approve-sarah \
+  --template /path/to/task/contract_template.md \
+  --expected-sha256 <hash-returned-by-prepare-sarah> \
+  --user-approval-quote '<actual user approval>'
+```
+
+Then use the existing `compile`, `check-model` and `run` workflow. Approval updates
+the graph, resolved contract and validation together. Compilation rejects stale
+prepared inputs or changed construction choices. This first adapter freezes a
+numerical point: new inputs require another prepared task and approval, not edits
+to generated constants. Preparation never overwrites an existing contract.
+Do not generate ad hoc derivation, fitting or completion scripts to bypass a
+failure. Report unsupported cases in one batch and retain the diagnostic files.
+
 ## Import Existing Output
 
 The recommended route needs no SARAH installation:
@@ -47,8 +123,11 @@ python <skill-dir>/scripts/ptagent_cli.py export-sarah \
 ```
 
 The wrapper runs `MakeVevacious[Version -> "++"]`, then the bundled companion
-exporter, and finally invokes the same importer used by `import-sarah`. It does
-not modify SARAH. If a model does not expose the tensor data required by the
+exporter. For `--model THDM`, its default `--preset auto` invokes the audited
+preparation route above, including source archival and fixed defaults. Pass
+`--parameters` and `--choices` to preserve explicit user inputs. `--preset none`
+explicitly retains symbolic-only import. Other models invoke the same importer
+used by `import-sarah`. The wrapper does not modify SARAH. If a model does not expose the tensor data required by the
 companion schema, the metadata records a deterministic blocker instead of
 inventing thermal masses; the zero-temperature contract is still produced.
 
@@ -62,6 +141,9 @@ or ask the user to reactivate Mathematica unless the direct kernel check also
 fails.
 
 ## Review Boundary
+
+The fixed THDM route above uses one final preset review. The following partial
+import rules apply to other models and explicit symbolic-only imports.
 
 Follow `contract_review.md`: show the current Markdown contract and its
 evidence-bound graph together, including a partial import's unavailable thermal
