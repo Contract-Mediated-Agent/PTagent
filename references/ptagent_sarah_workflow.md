@@ -61,10 +61,11 @@ Unsupported choices fail; they are never replaced with a different prescription.
 
 Preparation records source/configuration hashes, the bound point, raw tadpole
 residuals and mass eigenvalues when evaluable, proposals and software versions.
-These checks do not solve tadpoles, establish vacuum stability or reconstruct
-thermal tensors from missing representation data. The companion metadata must
-supply the model's invariants and basis mappings. There is no hidden THDM
-completion path.
+These checks do not solve tadpoles or establish vacuum stability. For a loaded
+supported SARAH model, the bundled exporter extracts full component data and
+the shared Python engine constructs the thermal invariants and basis mappings.
+For an existing `.vin` without this companion data, the partial-import rules
+still apply. No model-name dispatch or hand-written model potential is used.
 
 Present the contract, graph and all remaining questions together. Once blockers
 are resolved, obtain final approval of the exact contract hash:
@@ -151,9 +152,23 @@ python <skill-dir>/scripts/ptagent_cli.py export-sarah \
 The wrapper runs `MakeVevacious[Version -> "++"]`, then the bundled companion
 exporter. The default `--preset auto` prepares every model with the same rules above.
 Pass `--parameters` and `--choices` to preserve explicit inputs. `--preset none`
-retains the raw-import worksheet. The wrapper does not modify SARAH. If a model does not expose the tensor data required by the
-companion schema, the metadata records a deterministic blocker instead of
-inventing thermal masses; the zero-temperature contract is still produced.
+retains the raw-import worksheet. The wrapper does not modify the installed
+SARAH files. Its in-memory source adapter registers unmixed scalar `TreeMass`
+expressions as identity sectors because SARAH 4.14's Vevacious++ writer visits
+mixed sectors only; additions are recorded in `unmixed_scalar_sectors`.
+
+`ptagent_sarah_components.json` records the full canonical scalar potential,
+the complete Weyl mass-squared trace, gauge representation contractions, and
+ordered sector mappings. `sarah_components.py` derives the thermal matrices
+and checks the background tree potential, scalar matrices, fermion trace and
+high-temperature supertrace against the exported `.vin`. See
+`sarah_thermal_metadata.md` for conventions and support boundaries. Missing
+numeric parameters do not prevent this symbolic calculation. Do not ask users
+to compute or enter thermal tensors when this route is available.
+
+Unsupported source structures produce precise blockers in the metadata, while
+the zero-temperature contract remains available. Existing explicitly supplied
+complete companion metadata remains supported and is validated by the importer.
 
 On macOS, `wolframscript` uses WSTP shared memory for local evaluation. Some
 restricted agent sandboxes can block this transport and leave `wolframscript`

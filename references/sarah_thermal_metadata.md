@@ -33,3 +33,67 @@ unresummed route.
 
 Metadata with `complete=false` is a valid partial export. It preserves source
 facts and blockers but cannot authorize resummed compilation.
+
+## Automatic Component Extraction
+
+`export-sarah` writes `ptagent_sarah_components.json` (schema
+`ptagent.sarah_components.v1`) and automatically constructs the companion
+metadata. The Wolfram bridge reads the initialized SARAH state, not model names
+or tutorial benchmarks. It enumerates canonical real scalars and left-handed
+Weyl components, expands contracted generation/colour indices, and extracts the
+full scalar potential and Weyl mass trace before restricting to background
+fields. Complex scalar sectors use the same realification ordering as the
+Vevacious++ export. Representation data includes massless Weyl multiplet
+members, which contribute to gauge screening even when absent from `.vin`.
+
+Let `q` be the complete canonical real scalar basis, `H = Hessian(V, q)`,
+`F = Tr(M_Weyl M_Weyl^dagger)`, and `C_g` the gauge-coupling-weighted scalar
+Casimir matrix. The shared Python engine computes
+
+```text
+scalar_quartic = Hessian(Tr(H), q)
+scalar_yukawa  = Hessian(F, q) / 2
+Pi_scalar/T^2 = scalar_quartic/24 + C_g/4 + scalar_yukawa/12
+```
+
+Gauge Debye contractions count a complex scalar with weight one, a real scalar
+with weight one half, and a left-handed Weyl fermion with weight one in the
+schema's `T_scalar` and `T_Weyl`. Generation and spectator representation
+dimensions are included. SARAH's RGE Casimirs contain `GUTren^2` for Abelian
+groups; the bridge removes that factor for the source-Lagrangian coupling
+convention used by `.vin`. The independent source supertrace check verifies the
+background projection of the resulting scalar gauge contribution.
+
+This is the leading one-loop high-temperature, relativistic-matter
+approximation, not a mass-dependent decoupling calculation. Particle removal
+from loop spectra does not automatically rederive a different thermal bath.
+Such a change requires a consistent reviewed treatment.
+
+Before declaring readiness, the engine checks the full potential's background
+projection, every scalar Hessian block, the Weyl trace, complete basis coverage,
+and the independent `.vin` high-T supertrace. Symbolic coefficient comparisons
+allow relative `1e-12` roundoff from SARAH's decimal XML serialization; missing
+monomials are never accepted. Numeric parameters are not used to hide symbolic
+disagreements. Thermal-only SLHA references join the ordinary parameter binding
+and missing-value checks.
+
+SARAH 4.14's `++` writer omits unmixed scalar sectors. The bridge registers their
+existing `TreeMass` expressions as identity sectors in the running kernel;
+it changes neither the installed model nor its Lagrangian. The recorded
+`unmixed_scalar_sectors` identifies every such addition. Input model files,
+exported XML, component JSON and exporter/engine files are SHA256-tracked.
+
+The initial support boundary is real-parameter non-supersymmetric renormalizable
+models with canonical scalar normalization, supported `SU(N)` and at most one
+`U(1)` factor, and source sectors that remain closed under thermal corrections.
+The implementation bounds expansion to 64 real scalar and 128 Weyl components.
+CP-violating scalar bases, multiple Abelian factors, unsupported unmixed indices,
+incomplete basis mappings and cross-sector thermal mixing fail closed. These
+are capability limits, not recommendations to change a model. The scalar gauge
+matrix and group traces come from source representation data; no LLM tensor
+completion is involved. SM, a real-singlet extension, and both type-I and type-II
+two-doublet models are tested using actual SARAH 4.14.5 exports.
+
+When the loaded model already supplies complete `PTagent...` companion
+variables, the legacy metadata interface is retained. Ordinary `.vin` import
+without thermal metadata also retains its existing partial-import behavior.

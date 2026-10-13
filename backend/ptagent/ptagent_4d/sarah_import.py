@@ -223,6 +223,32 @@ def import_sarah_model(
         raise SarahImportError("Vevacious++ model contains no one-loop mass matrices.")
 
     valid_blocks = _text_lines(_optional_descendant(map_root, "ValidBlocks"))
+    thermal_metadata = None
+    thermal_expressions: list[str] = []
+    if thermal_metadata_path:
+        thermal_metadata = _load_thermal_metadata(thermal_metadata_path)
+        _validate_thermal_source_hashes(thermal_metadata, vin=vin, parameter_map=parameter_map)
+        extra_references = thermal_metadata.get("parameter_references", {})
+        if not isinstance(extra_references, dict):
+            raise SarahImportError("Thermal parameter_references must be an object.")
+        for name, reference in extra_references.items():
+            if not isinstance(reference, dict) or not isinstance(reference.get("indices"), list):
+                raise SarahImportError("Invalid thermal parameter block reference.")
+            if any(type(index) is not int for index in reference["indices"]):
+                raise SarahImportError("Thermal parameter block indices must be integers.")
+            block = reference.get("block", "")
+            if not isinstance(block, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", block):
+                raise SarahImportError("Invalid thermal SLHA block name.")
+            check: dict[str, dict[str, Any]] = {}
+            normalized = _normalize_expression(f"{block}[{','.join(map(str, reference['indices']))}]", check)
+            if normalized != name or (name in block_references and block_references[name] != check[name]):
+                raise SarahImportError("Thermal parameter reference conflicts with source mapping.")
+            block_references.update(check)
+        if thermal_metadata.get("complete") is True:
+            for rows in thermal_metadata.get("thermal_invariants", {}).values():
+                if not isinstance(rows, list) or any(not isinstance(row, list) for row in rows):
+                    raise SarahImportError("Thermal invariants must be matrices.")
+                thermal_expressions.extend(str(entry) for row in rows for entry in row)
     scale_policy = _parse_scale_policy(map_root)
     slha = parse_slha_file(slha_path) if slha_path else None
     overrides = _normalize_parameter_overrides(parameters or {})
@@ -233,16 +259,13 @@ def import_sarah_model(
         overrides=overrides,
     )
     _require_real_symmetric_sectors(sectors)
-    used_names = _expression_names([tree, extra, *dsb.values(), *(entry for sector in sectors for row in sector.matrix for entry in row)])
+    used_names = _expression_names([tree, extra, *dsb.values(), *thermal_expressions, *(entry for sector in sectors for row in sector.matrix for entry in row)])
     unresolved = sorted(name for name in used_names if name not in fields and name not in parameter_values and name != "pi")
     renormalization_scale_sq = _resolve_renormalization_scale_sq(scale_policy, slha, overrides)
 
-    thermal_metadata = None
     thermal_result = None
     issues: list[dict[str, str]] = []
     if thermal_metadata_path:
-        thermal_metadata = _load_thermal_metadata(thermal_metadata_path)
-        _validate_thermal_source_hashes(thermal_metadata, vin=vin, parameter_map=parameter_map)
         from .sarah_thermal import derive_thermal_matrices
 
         thermal_result = derive_thermal_matrices(
@@ -822,7 +845,7 @@ def _attach_high_temperature_supertrace_check(
     try:
         high_temperature_term = sp.Integer(0)
         for sector in sectors:
-            trace = sum(sp.sympify(sector.matrix[index][index]) for index in range(len(sector.matrix)))
+            trace = sum(sp.sympify(sector.matrix[index][index], rational=True) for index in range(len(sector.matrix)))
             denominator = 48 if sector.kind == "fermion" else 24
             high_temperature_term += sp.Rational(str(sector.dof_per_eigenvalue)) * trace / denominator
         symbols = [sp.Symbol(name, real=True) for name in fields]
@@ -856,7 +879,7 @@ def _attach_high_temperature_supertrace_check(
             }
         else:
             selected = [
-                [sp.sympify(scalar_coefficients[row][column]) for column in raw_indices]
+                [sp.sympify(scalar_coefficients[row][column], rational=True) for column in raw_indices]
                 for row in raw_indices
             ]
             equivalent = all(

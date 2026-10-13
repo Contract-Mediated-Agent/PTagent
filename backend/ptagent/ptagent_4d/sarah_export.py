@@ -45,8 +45,10 @@ def export_sarah_model(
     proof_dir.mkdir(parents=True, exist_ok=True)
 
     companion = Path(__file__).resolve().parents[3] / "references" / "sarah" / "ptagent_sarah_export.wl"
-    if not companion.is_file():
-        raise SarahExportError(f"Bundled companion exporter is missing: {companion}")
+    component_exporter = companion.with_name("ptagent_sarah_components.wl")
+    for required in (companion, component_exporter):
+        if not required.is_file():
+            raise SarahExportError(f"Bundled companion exporter is missing: {required}")
     driver = input_dir / "run_sarah_export.wl"
     driver.write_text(
         _render_driver(
@@ -89,13 +91,30 @@ def export_sarah_model(
             "MakeVevacious did not produce exactly one .vin file and ScaleAndBlock.xml in the task input directory."
         )
     thermal_path = input_dir / "ptagent_thermal_metadata.json"
+    component_path = input_dir / "ptagent_sarah_components.json"
+    model_parent = Path(model_search_path).expanduser().resolve() if model_search_path else root / "Models"
+    source_directory = model_parent / model
     thermal_metadata_ready = False
+    supplied_metadata = json.loads(thermal_path.read_text(encoding="utf-8")) if thermal_path.is_file() else {}
+    if not isinstance(supplied_metadata, dict):
+        raise SarahExportError("The companion exporter produced non-object thermal metadata.")
+    if component_path.is_file() and supplied_metadata.get("complete") is not True:
+        from .sarah_components import complete_component_export
+        from .sarah_import import import_sarah_model
+
+        source_model = import_sarah_model(vin_path=vin_candidates[0], parameter_map_path=map_path)
+        metadata = complete_component_export(component_path, source_model)
+        thermal_path.write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
     if thermal_path.is_file():
         _complete_thermal_provenance(
             thermal_path,
             vin_path=vin_candidates[0],
             parameter_map_path=map_path,
             exporter_path=companion,
+            component_path=component_path if component_path.is_file() else None,
+            component_exporter=component_exporter if component_path.is_file() else None,
+            model_source_dir=source_directory,
+            sarah_main=sarah_main,
         )
         thermal_payload = json.loads(thermal_path.read_text(encoding="utf-8"))
         thermal_metadata_ready = bool(
@@ -118,12 +137,11 @@ def export_sarah_model(
         "parameter_map": _record(map_path),
         "thermal_metadata": _record(thermal_path) if thermal_path.is_file() else None,
         "thermal_metadata_ready": thermal_metadata_ready,
+        "component_data": _record(component_path) if component_path.is_file() else None,
         "slha": _record(copied_slha) if copied_slha and copied_slha.is_file() else None,
         "driver": _record(driver),
         "companion_exporter": _record(companion),
     }
-    model_parent = Path(model_search_path).expanduser().resolve() if model_search_path else root / "Models"
-    source_directory = model_parent / model
     if source_directory.is_dir():
         archived = input_dir / "sarah_model"
         archived.mkdir(exist_ok=True)
@@ -158,9 +176,12 @@ def _render_driver(
         + f'SARAH[OutputDirectory] = "{_wl_path(output_dir)}";\n'
         + search_line
         + f'Start["{model}"];\n'
+        + f'Get["{_wl_path(companion.with_name("ptagent_sarah_components.wl"))}"];\n'
+        + 'PTagentCompleteScalarSectors[];\n'
         + f'MakeVevacious[Version -> "++", OutputFile -> "{_safe_filename(model)}.vin"];\n'
         + f'Get["{_wl_path(companion)}"];\n'
         + 'PTagentExportThermalMetadata[FileNameJoin[{Directory[], "ptagent_thermal_metadata.json"}]];\n'
+        + 'Export[FileNameJoin[{Directory[], "ptagent_sarah_components.json"}], PTagentComponentData[], "RawJSON"];\n'
         + 'If[ValueQ[$sarahCurrentVevaciousDir], '
         + 'CopyFile[FileNameJoin[{$sarahCurrentVevaciousDir, "ScaleAndBlock.xml"}], FileNameJoin[{Directory[], "ScaleAndBlock.xml"}], OverwriteTarget -> True];\n'
         + f'CopyFile[FileNameJoin[{{$sarahCurrentVevaciousDir, "{_safe_filename(model)}.vin"}}], FileNameJoin[{{Directory[], "{_safe_filename(model)}.vin"}}], OverwriteTarget -> True]];\n'
@@ -188,6 +209,10 @@ def _complete_thermal_provenance(
     vin_path: Path,
     parameter_map_path: Path,
     exporter_path: Path,
+    component_path: Path | None = None,
+    component_exporter: Path | None = None,
+    model_source_dir: Path | None = None,
+    sarah_main: Path | None = None,
 ) -> None:
     payload = json.loads(thermal_path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
@@ -195,10 +220,22 @@ def _complete_thermal_provenance(
     provenance = payload.setdefault("provenance", {})
     if not isinstance(provenance, dict):
         raise SarahExportError("The companion exporter produced invalid thermal provenance.")
-    provenance["exporter_version"] = "ptagent-sarah-exporter-1"
+    provenance.setdefault("exporter_version", "ptagent-sarah-exporter-1")
     provenance["source_hashes"] = {
         "vin": _record(vin_path)["sha256"],
         "parameter_map": _record(parameter_map_path)["sha256"],
         "companion_exporter": _record(exporter_path)["sha256"],
     }
+    if component_path is not None and component_exporter is not None:
+        provenance["source_hashes"].update({
+            "component_data": _record(component_path)["sha256"],
+            "component_exporter": _record(component_exporter)["sha256"],
+            "component_engine": _record(Path(__file__).with_name("sarah_components.py"))["sha256"],
+        })
+    if model_source_dir is not None:
+        provenance["source_hashes"].update({
+            f"model/{path.name}": _record(path)["sha256"] for path in sorted(model_source_dir.glob("*.m"))
+        })
+    if sarah_main is not None:
+        provenance["source_hashes"]["sarah_main"] = _record(sarah_main)["sha256"]
     thermal_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

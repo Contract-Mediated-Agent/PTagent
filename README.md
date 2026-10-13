@@ -40,6 +40,10 @@ own invocation syntax.
   source hashes, and keeps unresolved values as visible compile blockers.
 - Accepts optional companion thermal metadata and deterministically constructs
   scalar thermal self-energies and longitudinal gauge Debye matrices.
+- Automatically extracts canonical component interactions from supported SARAH
+  models and derives that metadata, without model-specific potential or Yukawa
+  templates. Real SM, singlet-extension, and type-I/type-II two-doublet exports
+  are covered by source-matrix and analytic-coefficient regression checks.
 - Prepares every supported SARAH export using the same source-first rules,
   records parameter bindings and physical proposals, and produces a contract,
   review graph and consolidated blockers without a model-name preset.
@@ -152,9 +156,22 @@ python scripts/ptagent_cli.py export-sarah \
 
 `export-sarah` runs the companion exporter and immediately feeds the generated
 files through the deterministic importer. The default `--preset auto` applies
-the same source-first preparation to every model. If generic thermal tensors
+the same source-first preparation to every model. It writes
+`input/ptagent_sarah_components.json`, differentiates the complete real-component
+scalar potential, contracts the Weyl mass trace, and uses source gauge
+representations for longitudinal screening. The resulting
+`ptagent_thermal_metadata.json` is generated automatically; users do not need
+to hand-write its tensors for supported models. If generic thermal tensors
 cannot be established from the loaded model, the export remains useful but is
 marked partial and resummed compilation stays blocked.
+
+The current automatic extractor covers canonical, real-parameter,
+non-supersymmetric renormalizable models with supported `SU(N)`/single-`U(1)`
+bases. CP-violating scalar bases, multiple Abelian factors, unresolved component
+indices, and thermal mixing across separate source sectors are explicit
+blockers. See [the thermal data contract](references/sarah_thermal_metadata.md)
+for the approximation, checks, and limits. Symbolic readiness does not choose
+a numerical benchmark or authorize a phase-transition run.
 
 For existing exports (no local SARAH installation required):
 

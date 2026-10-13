@@ -123,6 +123,11 @@ model. `export-sarah --preset auto` selects it without a model-name branch;
 existing exports use `prepare-sarah`. Pass explicit user inputs and available
 thermal metadata. Parameters and scales must come from the parameter map, SLHA
 or explicit JSON; missing values remain blockers, not an example benchmark.
+For installed supported SARAH models, `export-sarah` generates the companion
+thermal data automatically from the full canonical component interactions.
+Do not ask the user to supply thermal tensors before trying this built-in route.
+Read the recorded component/thermal blockers when an unsupported convention is
+encountered; do not replace missing contributions with task-local derivations.
 The shared default recommendations are defined in
 `backend/ptagent/ptagent_4d/model_defaults.py` and also apply to paper workflows.
 Do not infer a multiplet normalization or substitute a potential by model name.
