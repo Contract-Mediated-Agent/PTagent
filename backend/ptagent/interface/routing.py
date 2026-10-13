@@ -49,6 +49,8 @@ def _decide_shared_route(command: str, args: list[str]) -> str:
         return "4d"
 
     if command == "extract":
+        if _has_option(args, "--example"):
+            return "3deft"
         input_path = _option_value(args, "--input")
         if input_path and _is_3deft_input_file(input_path):
             return "3deft"

@@ -85,8 +85,8 @@ def build_parser() -> argparse.ArgumentParser:
         "export-sarah",
         help="Run an existing SARAH model through MakeVevacious++ and the PTagent companion exporter.",
     )
-    export_sarah.add_argument("--sarah-root", required=True, help="Existing SARAH installation root.")
-    export_sarah.add_argument("--model", required=True, help="SARAH model name accepted by Start[...].")
+    export_sarah.add_argument("--sarah-root", default="", help="Existing SARAH root; default: configured root or automatic Wolfram package-path discovery.")
+    export_sarah.add_argument("--model", required=True, help="SARAH model name, existing model directory, or /path/to/SARAH/Models/THDM example path.")
     export_sarah.add_argument("--model-search-path", default="", help="Optional parent directory containing a custom SARAH model.")
     export_sarah.add_argument("--slha", default="", help="Optional SLHA point copied into the generated task.")
     export_sarah.add_argument("--run-dir", required=True, help="Task directory receiving SARAH and PTagent outputs.")
@@ -228,17 +228,21 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "export-sarah":
-        from .sarah_export import export_sarah_model
+        from .sarah_export import SarahExportError, export_sarah_model
 
-        result = export_sarah_model(
-            sarah_root=args.sarah_root,
-            model=args.model,
-            model_search_path=args.model_search_path or None,
-            slha_path=args.slha or None,
-            run_dir=args.run_dir,
-            wolframscript=args.wolframscript,
-            timeout_seconds=args.timeout,
-        )
+        try:
+            result = export_sarah_model(
+                sarah_root=args.sarah_root,
+                model=args.model,
+                model_search_path=args.model_search_path or None,
+                slha_path=args.slha or None,
+                run_dir=args.run_dir,
+                wolframscript=args.wolframscript,
+                timeout_seconds=args.timeout,
+            )
+        except SarahExportError as exc:
+            print(json.dumps({"ready": False, "error": str(exc)}, indent=2))
+            return 2
         try:
             from .sarah_import import run_sarah_import
         except ModuleNotFoundError as exc:
@@ -248,7 +252,7 @@ def main(argv: list[str] | None = None) -> int:
                     "Install the dependencies from requirements.txt, then run import-sarah on the task input files."
                 ) from exc
             raise
-        use_preset = args.preset == "sarah-thdm-type-i-v1" or (args.preset == "auto" and args.model == "THDM")
+        use_preset = args.preset == "sarah-thdm-type-i-v1" or (args.preset == "auto" and result["model"] == "THDM")
         if use_preset:
             from .sarah_prepare import prepare_sarah
             from .sarah_import import SarahImportError

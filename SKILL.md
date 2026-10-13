@@ -31,6 +31,7 @@ scripts/compile_template.py
 scripts/prepare_paper.py
 scripts/ptagent_cli.py
 scripts/render_contract_graph.py
+assets/examples/xsm_test.m
 backend/ptagent/
 requirements.txt
 ```
@@ -52,6 +53,8 @@ Use the installed skill directory as `<skill-dir>`. If the user provides a
 repository checkout, pass `--project-root <PTagent-repo-root>`. If the user
 provides an existing PhaseTracer source path, pass
 `--phasetracer-root <PhaseTracer-source-root>`.
+For a SARAH model request, also pass `--sarah-model <model-name-or-directory>`;
+the literal documentation path `/path/to/SARAH/Models/THDM` is accepted.
 
 Read the JSON output before doing anything else. Treat the environment gate as
 an advisory preflight plus per-operation blockers, not as one global stop/go
@@ -75,8 +78,13 @@ required before running the marked DRalgo workflow.
 For SARAH routes, inspect `operation_blockers.sarah_import` or
 `operation_blockers.sarah_export`. Importing existing Vevacious++ files needs
 only the Python dependencies. Exporting them from a SARAH model additionally
-needs `wolframscript` and an explicit SARAH root. Never install SARAH or Wolfram
-automatically.
+needs `wolframscript` and an installed SARAH package. The gate automatically
+searches Wolfram/Mathematica package directories; an explicit `--sarah-root`
+or configured `PTAGENT_SARAH_ROOT`/`SARAH_ROOT` takes precedence. Use the reported
+root/model directly without asking the user to confirm its location. If missing,
+explain the checked paths and request installation of the missing dependency;
+never install SARAH or Wolfram automatically. A failed package-path probe is not
+proof that SARAH is absent.
 
 On macOS, if `wolframscript` is found but its local evaluation probe times out,
 test the configured `WolframKernel` directly. If the kernel returns normally,
@@ -101,6 +109,14 @@ Use the SARAH route when the user supplies a Vevacious++ v2 `.vin` file,
 or requested. A `.vin` file is auto-routed only after its XML root and v2 model
 version are verified. A SARAH `.m` or `.wl` model is never auto-routed; use
 `export-sarah` explicitly.
+
+Treat `Study the EWPT of /path/to/SARAH/Models/THDM with CosmoTransitions`
+as a request for the installed THDM model, not a request for the user to replace
+the placeholder. Pass the model name or this placeholder to `export-sarah`
+without `--sarah-root` when automatic discovery succeeded. Existing user model
+directories take priority. A nonexistent real/custom path must be reported;
+do not silently replace it with another model. Preserve the user's backend
+selection through `--choices '{"backend":"cosmotransitions"}'`.
 
 For the audited SARAH THDM source, use the versioned deterministic preparation
 route in that reference. `export-sarah` selects it automatically for THDM;
@@ -129,6 +145,14 @@ Use the 3DEFT workflow only when the user explicitly says DRalgo, 3DEFT,
 dimensionally reduced EFT, hard/soft/ultrasoft matching, or supplies a
 Mathematica/Wolfram `.m` or `.wl` file that is clearly a DRalgo/3DEFT source.
 Before acting, read `references/ptagent_3deft_workflow.md`.
+
+For the documented xSM 3DEFT example, use the user's provided `.m` file first.
+If they request `xsm_test.m` without supplying a local file, use the copy already
+downloaded with this repository at `assets/examples/xsm_test.m` via
+`extract --example xsm`. The same fallback is built into `--input xsm_test.m`.
+Do not ask them to upload the example. This is only the named xSM example, not
+a default replacement for an unspecified or missing custom 3DEFT model. Source
+selection does not approve the physical contract or authorize compilation.
 
 Do not ask the user out of convenience. Before asking, inspect the available
 materials for the selected workflow: paper/source files, current contract,

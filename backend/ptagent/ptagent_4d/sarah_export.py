@@ -7,6 +7,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from .sarah_discovery import SarahDiscoveryError, resolve_sarah_model
+
 
 class SarahExportError(RuntimeError):
     """Raised when the optional SARAH automation route cannot produce its files."""
@@ -14,7 +16,7 @@ class SarahExportError(RuntimeError):
 
 def export_sarah_model(
     *,
-    sarah_root: str | Path,
+    sarah_root: str | Path = "",
     model: str,
     run_dir: str | Path,
     model_search_path: str | Path | None = None,
@@ -22,10 +24,15 @@ def export_sarah_model(
     wolframscript: str = "wolframscript",
     timeout_seconds: int = 600,
 ) -> dict[str, Any]:
-    root = Path(sarah_root).expanduser().resolve()
+    try:
+        discovery = resolve_sarah_model(model, sarah_root=sarah_root,
+                                        model_search_path=model_search_path, wolframscript=wolframscript)
+    except SarahDiscoveryError as exc:
+        raise SarahExportError(str(exc)) from exc
+    root = Path(discovery["root"])
     sarah_main = root / "SARAH.m"
-    if not sarah_main.is_file():
-        raise SarahExportError(f"SARAH.m was not found under --sarah-root: {sarah_main}")
+    model = discovery["model"]
+    model_search_path = discovery["model_search_path"]
     executable = shutil.which(wolframscript) if not Path(wolframscript).is_absolute() else wolframscript
     if not executable or not Path(executable).exists():
         raise SarahExportError("wolframscript is required only for export-sarah and was not found.")
@@ -106,6 +113,7 @@ def export_sarah_model(
         "schema": "ptagent.sarah_export.v1",
         "model": model,
         "sarah_root": str(root),
+        "source_discovery": discovery,
         "vin": _record(vin_candidates[0]),
         "parameter_map": _record(map_path),
         "thermal_metadata": _record(thermal_path) if thermal_path.is_file() else None,

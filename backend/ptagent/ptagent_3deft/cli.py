@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import shutil
 import sys
@@ -17,6 +18,7 @@ from .contract import (
     write_resolved_artifacts,
 )
 from .environment import check_wolfram_and_dralgo, find_wolframscript, install_dralgo
+from .example_inputs import resolve_dralgo_source
 from .extraction import EXTRACTION_REPORT_NAME, extract_source_to_template
 from .layout import CONTRACT_TEMPLATE_NAME, build_run_layout
 from .mathematica_compare import compare_mathematica_fixed_v3d
@@ -32,7 +34,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     extract = sub.add_parser("extract", help="Create a standalone 3DEFT contract template from a reviewed DRalgo source file.")
-    extract.add_argument("--input", required=True, help="Reviewed DRalgo Mathematica .m/.wl source file.")
+    source = extract.add_mutually_exclusive_group(required=True)
+    source.add_argument("--input", default="", help="DRalgo .m/.wl source; missing bare xsm_test.m uses the bundled example.")
+    source.add_argument("--example", choices=["xsm"], default="", help="Use the bundled xsm_test.m without a local source file.")
     extract.add_argument("--wolframscript", default="", help="wolframscript executable path required for local .m/.wl extraction.")
     extract.add_argument("--run-dir", default="", help="Task directory. Default: <artifact_root>/<timestamp>_<input stem>.")
     extract.add_argument("--output-dir", dest="run_dir", help=argparse.SUPPRESS)
@@ -137,9 +141,7 @@ def _console_safe(message: str) -> str:
 
 
 def _cmd_extract(args: argparse.Namespace) -> int:
-    source = Path(args.input)
-    if not source.exists():
-        raise ThreeDeftBlocked(f"input does not exist: {source}")
+    source, source_kind = resolve_dralgo_source(args.input, example=args.example)
     if not find_wolframscript(args.wolframscript or None):
         raise ThreeDeftBlocked(
             "wolframscript was not found; 3DEFT extract for local .m/.wl sources requires "
@@ -157,11 +159,17 @@ def _cmd_extract(args: argparse.Namespace) -> int:
 
     template_path = layout.run_dir / CONTRACT_TEMPLATE_NAME
     extraction = extract_source_to_template(reviewed_source, model_name=args.model_name or _default_model_name(source))
+    extraction.report["source_selection"] = {
+        "origin": source_kind, "requested_input": args.input, "example": args.example,
+        "source_path": str(source), "task_input_path": str(reviewed_source.resolve()),
+        "sha256": hashlib.sha256(reviewed_source.read_bytes()).hexdigest(),
+    }
     template_path.write_text(extraction.template, encoding="utf-8")
     report_path = layout.proof_dir / EXTRACTION_REPORT_NAME
     report_path.write_text(json.dumps(extraction.report, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
     artifacts = write_resolved_artifacts(template_path)
     print(f"3DEFT run directory: {layout.run_dir}")
+    print(f"Source selection: {source_kind} ({source})")
     print(f"Reviewed DRalgo source copy: {reviewed_source}")
     print(f"3DEFT contract template: {template_path}")
     print(f"Extraction report: {report_path}")

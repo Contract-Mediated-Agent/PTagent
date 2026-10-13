@@ -110,8 +110,32 @@ Arnold-Espinosa are blocked. Do not fill either gap with an LLM guess.
 
 ## Export From SARAH
 
-Use this optional route only when the user already has SARAH and a loadable
-model:
+For a model name or the literal README placeholder
+`/path/to/SARAH/Models/THDM`, find the existing installation automatically:
+
+```bash
+python <skill-dir>/scripts/check_environment.py --sarah-model /path/to/SARAH/Models/THDM
+python <skill-dir>/scripts/ptagent_cli.py export-sarah \
+  --model /path/to/SARAH/Models/THDM \
+  --choices '{"backend":"cosmotransitions"}' --run-dir /path/to/fresh-task
+```
+
+No path confirmation is needed. The resolver uses an explicit root, a root
+containing an explicit real model directory, or `PTAGENT_SARAH_ROOT`/`SARAH_ROOT`
+before standard Wolfram/Mathematica Applications directories. If necessary, a
+bounded read-only Wolfram query checks ``FindFile["SARAH`"]`` and `$Path`. An
+unversioned SARAH package/alias is preferred, followed by numerically ordered
+versioned directories; the selected root is recorded in the export manifest.
+Discovery does not override the audited preset's source-version checks.
+
+When SARAH is missing, report the search results and tell the user to install it
+in their Wolfram/Mathematica Applications directory or configure an existing
+root. Never install automatically. A package-path timeout requires diagnosing
+the Wolfram runtime, not asserting that SARAH is uninstalled. If SARAH exists but
+the requested model is missing, report that distinct problem. Never substitute
+an installed model for a nonexistent explicit custom path.
+
+Explicit paths remain supported:
 
 ```bash
 python <skill-dir>/scripts/ptagent_cli.py export-sarah \

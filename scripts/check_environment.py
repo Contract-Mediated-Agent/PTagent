@@ -24,6 +24,7 @@ def main() -> int:
     parser.add_argument("--project-root", default="", help="Optional PTagent repo root.")
     parser.add_argument("--phasetracer-root", default="", help="Optional explicit PhaseTracer source root.")
     parser.add_argument("--sarah-root", default="", help="Optional SARAH installation root used only by export-sarah.")
+    parser.add_argument("--sarah-model", default="", help="Optional SARAH model name/directory, including the documentation placeholder path.")
     args = parser.parse_args()
 
     from _bootstrap import ensure_ptagent_backend
@@ -32,6 +33,7 @@ def main() -> int:
 
     from ptagent import get_settings
     from ptagent.ptagent_4d.config import validate_phasetracer_root
+    from ptagent.ptagent_4d.sarah_discovery import SarahDiscoveryError, discover_sarah, resolve_sarah_model
 
     settings = get_settings()
     project_root = project_root or settings.project_root
@@ -61,8 +63,18 @@ def main() -> int:
     wolfram_status = _check_wolfram_and_dralgo()
     wolfram_ready = bool(wolfram_status["wolframscript_path"])
     dralgo_ready = bool(wolfram_status["dralgo_available"])
-    sarah_root = Path(args.sarah_root).expanduser().resolve() if args.sarah_root else None
-    sarah_ready = bool(sarah_root and (sarah_root / "SARAH.m").is_file())
+    sarah_options = {"sarah_root": args.sarah_root, "wolframscript": wolfram_status["wolframscript_path"]}
+    if args.sarah_model:
+        try:
+            sarah_status = resolve_sarah_model(args.sarah_model, **sarah_options)
+            sarah_status["model_available"] = True
+        except SarahDiscoveryError as exc:
+            sarah_status = discover_sarah(**sarah_options)
+            sarah_status.update({"model_available": False, "diagnostics": [str(exc)],
+                                 "requested_model": args.sarah_model})
+    else:
+        sarah_status = discover_sarah(**sarah_options)
+    sarah_ready = bool(sarah_status["available"]) and sarah_status.get("model_available", True)
 
     operation_blockers = _operation_blockers(
         current_python_ok=current_python_ok,
@@ -89,8 +101,9 @@ def main() -> int:
         runtime_cosmo_message=runtime_cosmo_message,
         phasetracer_message=configured_phase_message,
         wolfram_message=str(wolfram_status["message"]),
-        sarah_root=str(sarah_root or ""),
+        sarah_root=str(sarah_status.get("root") or ""),
     )
+    advisories.extend(sarah_status.get("diagnostics", []))
 
     phasetracer_download_dir = project_root / "PhaseTracer"
     payload: dict[str, Any] = {
@@ -125,9 +138,7 @@ def main() -> int:
             "message": wolfram_status["message"],
         },
         "sarah": {
-            "root": str(sarah_root or ""),
-            "configured": sarah_root is not None,
-            "available": sarah_ready,
+            **sarah_status,
             "required_only_for": "export-sarah",
         },
         "missing": missing,
@@ -324,8 +335,9 @@ def _advisories(
         )
     if "sarah" in missing:
         advisories.append(
-            "A SARAH root was not supplied or does not contain SARAH.m; only export-sarah is blocked. "
-            f"Checked: {sarah_root or '<not supplied>'}. import-sarah does not require SARAH."
+            "SARAH or the requested model could not be located; only export-sarah is blocked. "
+            f"Selected root: {sarah_root or '<not found>'}. See sarah.diagnostics and searched_locations. "
+            "import-sarah does not require SARAH."
         )
     return advisories
 

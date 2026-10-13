@@ -17,7 +17,9 @@ This workflow is separate from the internal 4D workflow. Do not use the standard
 reviewed user DRalgo .m/.wl -> DRalgo output capture -> reviewed 3DEFT contract -> PhaseTracer C++
 ```
 
-The agent must not create the user's physics DRalgo model file from contract rows. The executable physics source is always a user-supplied Mathematica/Wolfram DRalgo file.
+The agent must not create the user's physics DRalgo model file from contract rows.
+The executable physics source is a user-supplied Mathematica/Wolfram DRalgo file
+or the explicitly requested bundled xSM example.
 
 Accepted input files:
 
@@ -25,6 +27,34 @@ Accepted input files:
 - `.wl`
 
 Reject TeX, Markdown, PDF, arXiv archives, old JSON-fence templates, and non-3DEFT PTagent contracts for this workflow.
+
+## Bundled xSM Example
+
+The repository includes `assets/examples/xsm_test.m`, copied from the paper's
+3DEFT supplementary source. It uses the explicit fermion-generation factor
+`nF` and scalar/vector rotations before `CalculatePotentialUS[]`. Keep the
+source unchanged; importing it does not settle numerical inputs or approve a
+contract. It is an example, not a replacement for arbitrary user physics.
+
+For an xSM 3DEFT example request without an uploaded/local source:
+
+```bash
+python <skill-dir>/scripts/ptagent_cli.py --ptagent-engine 3deft extract --example xsm
+```
+
+`--input xsm_test.m` uses a file in the current directory if present, otherwise
+the bundled copy. For uploads or explicit paths, always pass that actual path
+with `--input`; a missing custom path is an error, not an invitation to replace
+it. Do not ask the user to download/upload the documented example. Installing
+the repository already downloads it with the skill. If an incomplete older
+installation lacks the asset, retrieve `assets/examples/xsm_test.m` from
+`Contract-Mediated-Agent/PTagent` into the task workspace and pass that path;
+report the repository revision and file hash. Never recreate the model with an
+LLM or fetch another project's file as a substitute.
+
+Extraction copies the selected source into `input/` and records its origin,
+original path and SHA256 in the extraction report. Wolfram/DRalgo dependency
+checks, grouped physical questions and final compile approval remain in force.
 
 ## Task Layout
 
@@ -43,7 +73,7 @@ PTagentRuns/<YYYYMMDD_HHMMSS>_<safe_input_stem>/
 
 Use these roles:
 
-- `input/`: task-local copy of the reviewed user-supplied `.m`/`.wl` source; follow-up steps must depend on this copy, not on the original upload path.
+- `input/`: task-local copy of the user-supplied or bundled `.m`/`.wl` source; follow-up steps must depend on this copy, not on the original upload or skill path.
 - `three_deft_contract_template.md`: human-readable source of truth after extraction; placed in the run root so it is easy to find.
 - `three_deft_contract_merged.md`: human-readable candidate after DRalgo output is merged; placed in the run root and reviewed before compile.
 - `proof_materials/`: derived evidence and status files only.

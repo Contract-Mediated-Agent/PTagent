@@ -81,6 +81,8 @@ Python and CosmoTransitions are reported separately:
   validated inside installed WSL distributions.
 - `import-sarah` requires `defusedxml`, but does not require Wolfram or SARAH.
 - `export-sarah` requires an existing SARAH installation and `wolframscript`.
+  PTagent locates SARAH in Wolfram/Mathematica package directories automatically;
+  if absent, it reports the missing dependency and asks you to install it.
 - 3DEFT `.m`/`.wl` extraction requires a local Wolfram/wolframscript runtime;
   DRalgo is additionally required before running the marked DRalgo workflow.
 
@@ -131,10 +133,20 @@ PTagent still imports the tree potential and zero-temperature spectra, sets
 
 Generate the inputs from an existing SARAH model when SARAH is available:
 
+```text
+$ptagent Study the EWPT of /path/to/SARAH/Models/THDM with CosmoTransitions
+```
+
+You may use this prompt literally: PTagent finds `THDM` in the installed SARAH
+package without asking you to replace the placeholder or confirm a discovered
+path. You can also supply a real model directory; your file is never replaced
+silently. Automatic lookup supports standard macOS, Linux and Windows package
+directories and a bounded Wolfram package-path query. An explicit `--sarah-root`
+or `PTAGENT_SARAH_ROOT`/`SARAH_ROOT` can select a nonstandard installation.
+
 ```bash
 python scripts/ptagent_cli.py export-sarah \
-  --sarah-root /path/to/SARAH \
-  --model MODEL_NAME \
+  --model THDM --choices '{"backend":"cosmotransitions"}' \
   --run-dir /path/to/run
 ```
 
@@ -178,6 +190,24 @@ Process a reviewed DRalgo/3DEFT source:
 $ptagent process /path/to/model.m with the 3DEFT workflow
 ```
 
+Try the bundled xSM example without uploading or downloading a separate file:
+
+```text
+$ptagent process xsm_test.m with the 3DEFT workflow and generate a PhaseTracer model
+```
+
+The [example source](assets/examples/xsm_test.m) is included in the skill. A
+user-provided file takes priority; otherwise the repository copy is used and
+recorded in the task. The equivalent CLI is:
+
+```bash
+python scripts/ptagent_cli.py --ptagent-engine 3deft extract --example xsm
+```
+
+These shortcuts resolve input locations, not physics approvals. Required tools
+must still be installed, and the contract is presented for review before
+compilation. They do not turn a generic 3DEFT request into an xSM calculation.
+
 Compile an already reviewed contract:
 
 ```text
@@ -191,6 +221,7 @@ SKILL.md                         skill entrypoint and router instructions
 agents/openai.yaml               OpenAI/Codex-compatible skill metadata
 references/                      workflow and contract reference documents
 scripts/                         wrapper scripts used by the skill
+assets/examples/xsm_test.m        bundled DRalgo xSM input from the paper supplement
 backend/ptagent/                 bundled PTagent backend source
 requirements.txt                 Python dependencies for normal use
 ```
