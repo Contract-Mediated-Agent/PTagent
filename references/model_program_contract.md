@@ -48,7 +48,7 @@ clear or previous chat context contains answers:
    before asking this. For `cosmotransitions`, ask whether the
    `forbidPhaseCrit` phase-filter hook should discard any traced phases. If
    yes, ask for field, comparison, threshold, phase type, and reason.
-   Reference-code patterns such as `field < -5.0` are suggestions, never
+   Scale-based numerical tolerances are suggestions, never
    automatic choices. For `phasetracer`, do not ask the CosmoTransitions-style
    phase-filter question; ask whether PhaseTracer should use
    `apply_symmetry(phi)` / `get_symmetry_axes()` to identify reviewed Z2
@@ -132,9 +132,11 @@ previous artifacts.
     This maps to `forbidPhaseCrit`. It
     discards traced phases when the method returns true; it is not part of
     `Vtot`. If enabled, list the phase type, field component, comparison,
-    numeric threshold, and reason. For xSM-like Z2 mirror branches in
-    CosmoTransitions, the standard pattern is a tolerance such as
-    `field < -5.0`, not `field < 0`.
+    numeric threshold, and reason. Suggest `field < -epsilon`, with
+    `epsilon=0.01*L` for a sourced reference field scale L and at least ten
+    numerical field steps when known. No field scale means no guessed numeric
+    threshold. Vary the tolerance by a factor of two and preserve the origin
+    and distinct phases. Keep the proposal disabled until reviewed.
     Custom expressions may use Python `and`/`or` in the Markdown contract, but
     generated code must convert them to NumPy-safe elementwise boolean logic and
     smoke-test both single-point and batched `X` inputs. PhaseTracer does not
@@ -153,8 +155,8 @@ previous artifacts.
 - `num_boson_dof` and `num_fermion_dof` whenever standard thermal integrals
   are used. These are total thermal-radiation d.o.f.; backend `V1T`
   implementations subtract explicit species internally. Ask the user to confirm the totals.
-  Use SM baseline 28/90, add reviewed BSM d.o.f. beyond the one SM Higgs scalar
-  already in that baseline, and report the additions to the user.
+  Count the reviewed species inventory and any additional radiation bath,
+  including explicit polarization conventions; do not assume an SM baseline.
   If no enabled `masses.fermions` rows are reviewed, keep the explicit fermion
   spectrum empty. Do not add placeholder fermion species to work around
   CosmoTransitions smoke failures; `num_fermion_dof` remains only total

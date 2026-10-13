@@ -118,15 +118,19 @@ directories take priority. A nonexistent real/custom path must be reported;
 do not silently replace it with another model. Preserve the user's backend
 selection through `--choices '{"backend":"cosmotransitions"}'`.
 
-For the audited SARAH THDM source, use the versioned deterministic preparation
-route in that reference. `export-sarah` selects it automatically for THDM;
-existing exports plus model files use `prepare-sarah`. Pass explicit user inputs
-as parameter/policy overrides, and let the program apply all remaining defaults.
+Use the same source-first deterministic preparation for every supported SARAH
+model. `export-sarah --preset auto` selects it without a model-name branch;
+existing exports use `prepare-sarah`. Pass explicit user inputs and available
+thermal metadata. Parameters and scales must come from the parameter map, SLHA
+or explicit JSON; missing values remain blockers, not an example benchmark.
+The shared default recommendations are defined in
+`backend/ptagent/ptagent_4d/model_defaults.py` and also apply to paper workflows.
+Do not infer a multiplet normalization or substitute a potential by model name.
 Do not write task-local parameter fits, tadpole/Hessian derivations, thermal
 completion scripts, or contract patches for this route. Unsupported inputs must
 be reported, not replaced. Present the generated contract, graph and checks in
 one review; after explicit approval use `approve-sarah` with the exact reviewed
-hash. Preset defaults are not prior user confirmation. Existing approved tasks
+hash. Generic defaults are not prior user confirmation. Existing approved tasks
 and the paper/3DEFT workflows retain their behavior.
 
 Do not create a model from a free-form Lagrangian. Ask the user for SARAH

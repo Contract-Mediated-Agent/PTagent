@@ -16,6 +16,9 @@ from .compiler import CompileBlocked, CompileResult, compile_usage_instructions
 from .config import Settings
 from .latex_display import clean_latex_evidence_for_markdown, render_latex_evidence_block
 from .model_preflight import model_focus_terms, selected_model_from_memory
+from .model_defaults import DEFAULT_RULES, FILTER_GUIDANCE, phase_filter_suggestion
+from .paper_expression import scalar_expression
+from .safe_expression import parse_safe_expression
 from .schemas import (
     DaisyInfo,
     FieldDefinition,
@@ -283,27 +286,22 @@ def build_contract_template(memory: PaperMemory) -> str:
         "daisy": _best_formula(memory.formula_registry, "daisy", focus_terms=focus_terms),
     }
     fields = _candidate_fields(memory, tree_potential_latex=formulas["V0"])
-    parameters = _candidate_parameters(memory, tree_potential_latex=formulas["V0"])
+    parameters = [row for row in _candidate_parameters(memory, tree_potential_latex=formulas["V0"])
+                  if row["name"] not in {field["name"] for field in fields}]
     selected_model = selected_model_from_memory(memory)
     public_inputs = _public_input_candidates(parameters)
     constants = [
         {
-            "name": "vh",
-            "latex": "v_h",
-            "value": 246.0,
-            "description": "Default electroweak vev; change if the paper uses a different convention.",
-        },
-        {
             "name": "num_boson_dof",
             "latex": "n_b^{radiation}",
             "value": "ASK_USER",
-            "description": "Ask the user for the total bosonic radiation d.o.f. used by standard thermal integrals. Start from SM baseline 28, add reviewed BSM d.o.f. beyond the one SM Higgs scalar already in the baseline, and report the count.",
+            "description": "Count the reviewed bosonic spectrum and any additional radiation bath. Show the inventory and request confirmation; no model-specific baseline is assumed.",
         },
         {
             "name": "num_fermion_dof",
             "latex": "n_f^{radiation}",
             "value": "ASK_USER",
-            "description": "Ask the user for the total fermionic radiation d.o.f. SM baseline is 90 unless the paper uses a nonstandard fermion content.",
+            "description": "Count the reviewed fermionic spectrum and any additional radiation bath. Show the inventory and request confirmation; do not infer absent species.",
         }
     ]
     direct_bosons = [
@@ -325,11 +323,11 @@ def build_contract_template(memory: PaperMemory) -> str:
     direct_fermions = [
         {
             "enabled": "false",
-            "name": "top",
+            "name": "fermion_candidate",
             "kind": "fermion",
             "mass_sq": "ASK_USER",
             "mass_sq_status": "needs_review",
-            "dof": 12,
+            "dof": "ASK_USER",
             "usage": "zeroT_CW, finiteT_V1T",
             "thermal_policy": "none",
             "vacuum_anchor": "none",
@@ -338,7 +336,7 @@ def build_contract_template(memory: PaperMemory) -> str:
         }
     ]
     v0_python, v0_notes = _auto_v0_compiler_expression(formulas["V0"], fields)
-    matrix_basis = [str(row.get("name", "")) for row in fields[:2]] or ["phi"]
+    matrix_basis = [str(row.get("name", "")) for row in fields] or ["phi"]
     matrix_rows, matrix_verified = _auto_scalar_matrix_rows(
         v0_python,
         matrix_basis,
@@ -397,7 +395,8 @@ def _render_human_contract_template(
     scalar_thermal_derivation_notes: str = "State whether the source gives the final total scalar thermal masses directly or whether this block assembles zero-temperature matrices plus baseline/SM self-energies plus BSM increments. Record branch-sensitive details such as Yukawa type, tan(beta) factors, neglected off-diagonal self-energies, and source equation/prose references.",
     gauge_thermal_derivation_notes: str = "State whether the source gives the final total gauge Debye masses/eigenvalues directly or whether this block assembles baseline/SM self-energies plus extra-field increments. Record longitudinal/transverse policy, neutral mixing basis, photon/Z branch convention, and source equation/prose references.",
 ) -> str:
-    phase_filter_example_field = str(fields[0].get("name", "h")) if fields else "h"
+    phase_filter_example_field = str(fields[0].get("name", "phi")) if fields else "phi"
+    filter_proposal = phase_filter_suggestion(phase_filter_example_field, fields[0].get("zeroT_default") if fields else None)
     field_names = [str(field.get("name", "")).strip() for field in fields if str(field.get("name", "")).strip()]
     symmetry_analysis = analyze_sign_flip_symmetries(v0_python, field_names)
     symmetry_generators = format_sign_flip_generators(symmetry_analysis)
@@ -413,6 +412,7 @@ def _render_human_contract_template(
             f"# PTagent Model Contract: {paper_id}",
             "",
             "Edit this Markdown file only. PTagent rebuilds `contract_resolved.json` and generated backend code from this file every time.",
+            DEFAULT_RULES,
             "Do not edit files under `proof_materials/` or `generated_models/`; they are derived artifacts.",
             "",
             "## 0. How To Use This File",
@@ -662,7 +662,7 @@ def _render_human_contract_template(
                 ["key", "value", "notes"],
                 [
                     {"key": "mode", "value": "ASK_USER", "notes": f"Mandatory user-confirmed choice. Choices: none, negative_field_threshold, custom_expr. Tree-level candidate generators: {symmetry_generators}. A candidate may motivate duplicate-branch filtering, but the branch and nonzero tolerance cannot be inferred from V0 alone."},
-                    {"key": "custom_expr", "value": "0.0", "notes": "Only used when mode=custom_expr; Python boolean expression using fields/parameters, e.g. (h < -5.0) or (s < -5.0). Python and/or are compiled to NumPy-safe elementwise logic. For PhaseTracer symmetry equivalence, use the PhaseTracer Symmetry section instead."},
+                    {"key": "custom_expr", "value": "0.0", "notes": "Only used when mode=custom_expr; use a reviewed boolean expression with an explicit tolerance. Python and/or are compiled to NumPy-safe elementwise logic. For PhaseTracer symmetry equivalence, use the PhaseTracer Symmetry section instead."},
                     {"key": "notes", "value": "ASK_USER", "notes": "State the recommendation and reason. If mode=none, explain that no CosmoTransitions branch is forbidden. If filtering is enabled, state what phase type or hard field region is being removed and why. For PhaseTracer Z2 equivalence, set this to none and use PhaseTracer Symmetry."},
                 ],
                 id_key="key",
@@ -670,7 +670,7 @@ def _render_human_contract_template(
             "",
             "### CosmoTransitions Phase Filter Rules",
             "",
-            "Use rows when `mode=negative_field_threshold`. This compiles to CosmoTransitions `forbidPhaseCrit`, for example a test like `field < -5.0`. Keep the tolerance away from zero so phases located at zero are not accidentally removed by floating-point noise. For PhaseTracer symmetry-equivalent branches, use `apply_symmetry(phi)` in the next section instead of a threshold filter.",
+            "Use rows when `mode=negative_field_threshold`. This compiles to CosmoTransitions `forbidPhaseCrit`. For PhaseTracer symmetry-equivalent branches, use `apply_symmetry(phi)` instead of a threshold filter. " + FILTER_GUIDANCE,
             "",
             _render_table(
                 ["enabled", "field", "comparison", "threshold", "phase_type", "reason", "source_reference"],
@@ -679,10 +679,10 @@ def _render_human_contract_template(
                         "enabled": "false",
                         "field": phase_filter_example_field,
                         "comparison": "<",
-                        "threshold": "-5.0",
+                        "threshold": filter_proposal["threshold"],
                         "phase_type": "negative_branch",
-                        "reason": "Example only: CosmoTransitions xSM-style negative branch filter.",
-                        "source_reference": "xSM-style phase-filter tolerance.",
+                        "reason": "Disabled proposal: tolerance relative to a sourced field scale; full-potential symmetry and branch must be confirmed.",
+                        "source_reference": "Model-independent numerical recommendation; not source evidence.",
                     }
                 ],
             ),
@@ -1825,7 +1825,7 @@ def validate_contract(
                         f"parameters.radiation_dof.{name}",
                         "missing_value",
                         f"standard_thermal_integrals requires reviewed `{name}` so radiation terms are correct.",
-                        "Add it to Fixed Constants or Derived Quantities. Use SM baseline 28/90 and add reviewed extra BSM relativistic d.o.f.; tell the user what was added.",
+                        "Add it to Fixed Constants or Derived Quantities. Count the reviewed spectrum and any additional bath species explicitly; do not assume a Standard Model baseline.",
                     )
                 )
     _validate_model_card_and_implementation(
@@ -2225,7 +2225,17 @@ def _validate_model_card_and_implementation(
             )
         )
     goldstone_species = _list(goldstone.get("species"))
-    if _goldstone_requires_species(goldstone) and not goldstone_species:
+    # A hash-locked source import retains whole matrices, so no individual
+    # Goldstone identification is needed unless a special treatment is applied.
+    whole_source_spectrum = (
+        model_card.get("source_import_kind") == "sarah_vevacious_v2"
+        and bool(model_card.get("sarah_preparation_manifest"))
+        and goldstone.get("cw_policy") == goldstone.get("thermal_policy") == "included"
+        and goldstone.get("ct_derivative_policy") == "not_applicable"
+        and goldstone.get("regulator") == "none"
+        and replacement in no_replacement_values
+    )
+    if _goldstone_requires_species(goldstone) and not goldstone_species and not whole_source_spectrum:
         issues.append(
             _error(
                 "implementation.goldstone.species",
@@ -2627,7 +2637,7 @@ def _validate_phase_filter(
                 "implementation.phase_filter.mode",
                 "placeholder_value",
                 "Phase-filtering policy is unresolved.",
-                "Ask the user to confirm the CosmoTransitions forbidden-phase policy. Recommend `none` unless the paper/reference code explicitly removes a duplicate or unphysical branch; otherwise use `negative_field_threshold` with field/comparison/threshold rows such as xSM's `h < -5.0` style and explain the reason.",
+                "Ask the user to confirm the CosmoTransitions forbidden-phase policy. Recommend `none` unless a full-potential duplicate or unphysical branch has been established. " + FILTER_GUIDANCE,
             )
         )
         return
@@ -2659,7 +2669,7 @@ def _validate_phase_filter(
                     "implementation.phase_filter.rules",
                     "missing_value",
                     "negative_field_threshold mode requires at least one reviewed Phase Filter Rule row.",
-                    "Ask the user to confirm which field branch to discard and what tolerance to use; xSM often uses `< -5.0` to remove negative mirror branches without removing phases at zero. Recommend `none` if no forbidden branch is intentionally reviewed.",
+                    "Ask the user to confirm which field branch to discard. " + FILTER_GUIDANCE,
                 )
             )
             return
@@ -4698,14 +4708,14 @@ def _cosmotransitions_model_filename(contract: dict[str, Any]) -> str:
 
 
 def _auto_v0_compiler_expression(source_latex: str, fields: list[dict[str, Any]]) -> tuple[str, str]:
-    latex = str(source_latex or "")
-    field_names = {str(row.get("name", "")) for row in fields}
-    if {"h", "s"}.issubset(field_names) and _looks_like_xsm_tree_potential(latex):
-        return (
-            "-0.5*mu_H_sq*h**2 + 0.25*lambda_H*h**4 - 0.5*mu_S_sq*s**2 + 0.25*lambda_S*s**4 + 0.25*lambda_HS*h**2*s**2",
-            "Auto-drafted from source-exact xSM tree potential using H^dagger H -> h^2/2 and S -> s. Review this normalization if the paper uses a different background-field convention.",
-        )
-    return "ASK_USER", "Required tree-level potential."
+    try:
+        expr = scalar_expression(source_latex)
+        names = set(parse_safe_expression(expr).names)
+        if not names.intersection(str(row.get("name", "")) for row in fields):
+            raise ValueError("No explicit background field matches the extracted field basis.")
+    except ValueError as exc:
+        return "ASK_USER", f"Supply a source-checked scalar tree potential and field normalization: {exc} No model template was substituted."
+    return expr, "Translated the complete scalar source expression without changing coefficients or field normalization; review against source evidence."
 
 
 def _auto_scalar_matrix_rows(
@@ -4731,8 +4741,8 @@ def _hessian_entries(expr: str, basis: list[str]) -> list[list[str]]:
 
     names = sorted(set(re.findall(r"\b[A-Za-z_][A-Za-z0-9_]*\b", expr)))
     local_symbols = {name: sp.Symbol(name) for name in names}
-    parsed = sp.sympify(expr, locals=local_symbols)
-    fields = [local_symbols[name] for name in basis]
+    parsed = sp.sympify(parse_safe_expression(expr).python, locals=local_symbols)
+    fields = [local_symbols.setdefault(name, sp.Symbol(name)) for name in basis]
     rows: list[list[str]] = []
     for row_symbol in fields:
         row_entries: list[str] = []
@@ -4800,30 +4810,10 @@ def _mass_lhs_key(lhs: str, basis: list[str]) -> tuple[str, str] | None:
 
 
 def _simple_latex_expr_to_python(expr: str) -> str:
-    text = str(expr or "")
-    text = re.sub(r"\\frac\s*\{([^{}]+)\}\s*\{([^{}]+)\}", r"((\1)/(\2))", text)
-    replacements = {
-        r"\mu_{H}^{2}": "mu_H_sq",
-        r"\mu_H^2": "mu_H_sq",
-        r"\mu_{S}^{2}": "mu_S_sq",
-        r"\mu_S^2": "mu_S_sq",
-        r"\lambda_{H}": "lambda_H",
-        r"\lambda_H": "lambda_H",
-        r"\lambda_{S}": "lambda_S",
-        r"\lambda_S": "lambda_S",
-        r"\lambda_{HS}": "lambda_HS",
-        r"\lambda_HS": "lambda_HS",
-    }
-    for latex_name, python_name in replacements.items():
-        text = text.replace(latex_name, python_name)
-    text = text.replace("{", "").replace("}", "")
-    text = text.replace("\\left", "").replace("\\right", "")
-    text = text.replace("\\,", "")
-    text = text.replace("\\", "")
-    text = re.sub(r"\^([A-Za-z0-9_]+)", r"**\1", text)
-    text = text.replace("^", "**")
-    text = re.sub(r"(?<=[A-Za-z0-9_])\s+(?=[A-Za-z0-9_])", "*", text)
-    return text.strip().strip(".")
+    try:
+        return scalar_expression(expr)
+    except ValueError:
+        return ""
 
 
 def _sympy_equivalent(left: str, right: str) -> bool:
@@ -4854,20 +4844,6 @@ def _auto_goldstone_defaults(formulas: dict[str, str]) -> dict[str, str]:
     }
 
 
-def _looks_like_xsm_tree_potential(source_latex: str) -> bool:
-    text = re.sub(r"\s+", "", str(source_latex or ""))
-    required = (
-        r"\mu_{H}",
-        r"\lambda_{H}",
-        r"\mu_{S}",
-        r"\lambda_{S}",
-        r"\lambda_{HS}",
-        "H^{\\dagger}H",
-        "S^2",
-    )
-    return all(token in text for token in required)
-
-
 def _candidate_fields(memory: PaperMemory, *, tree_potential_latex: str = "") -> list[dict[str, Any]]:
     selected: list[str] = []
     for item in memory.symbol_registry:
@@ -4884,7 +4860,7 @@ def _candidate_fields(memory: PaperMemory, *, tree_potential_latex: str = "") ->
             "zeroT_default": "0.0",
             "description": "Candidate background field from source evidence; review normalization.",
         }
-        for symbol in selected[:4]
+        for symbol in selected
     ]
 
 
@@ -4903,7 +4879,7 @@ def _candidate_parameters(memory: PaperMemory, *, tree_potential_latex: str = ""
         if not symbol or any(row["name"] == name for row in selected):
             continue
         selected.append({"name": name, "latex": symbol, "description": "Candidate parameter; classify as input, constant, or derived."})
-    return selected[:10]
+    return selected
 
 
 def _background_fields_from_tree_potential(source_latex: str) -> list[str]:
@@ -4920,18 +4896,18 @@ def _background_fields_from_tree_potential(source_latex: str) -> list[str]:
             result.append(symbol.lower())
         else:
             result.append(_program_symbol(symbol))
-    return result[:4]
+    return result
 
 
 def _parameter_candidates_from_tree_potential(source_latex: str) -> list[dict[str, str]]:
-    if not _looks_like_xsm_tree_potential(source_latex):
+    try:
+        names = parse_safe_expression(scalar_expression(source_latex)).names
+    except ValueError:
         return []
+    fields = set(_background_fields_from_tree_potential(source_latex))
     return [
-        {"name": "mu_H_sq", "latex": r"\mu_H^2", "description": "Auto-detected from the source tree potential; confirm whether this is a public scan input, fixed constant, or derived parameter."},
-        {"name": "lambda_H", "latex": r"\lambda_H", "description": "Auto-detected from the source tree potential; confirm whether this is a public scan input, fixed constant, or derived parameter."},
-        {"name": "mu_S_sq", "latex": r"\mu_S^2", "description": "Auto-detected from the source tree potential; confirm whether this is a public scan input, fixed constant, or derived parameter."},
-        {"name": "lambda_S", "latex": r"\lambda_S", "description": "Auto-detected from the source tree potential; confirm whether this is a public scan input, fixed constant, or derived parameter."},
-        {"name": "lambda_HS", "latex": r"\lambda_{HS}", "description": "Auto-detected from the source tree potential; confirm whether this is a public scan input, fixed constant, or derived parameter."},
+        {"name": name, "latex": name, "description": "Symbol in the source scalar potential; classify as input, constant or derived quantity."}
+        for name in names if name not in fields
     ]
 
 

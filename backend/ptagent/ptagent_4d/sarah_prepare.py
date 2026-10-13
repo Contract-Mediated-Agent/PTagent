@@ -1,4 +1,4 @@
-"""Versioned, deterministic SARAH preparation and hash-bound review approval."""
+"""Model-independent deterministic SARAH preparation and hash-bound approval."""
 from __future__ import annotations
 
 import copy
@@ -12,10 +12,15 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+from .model_defaults import DEFAULTS_ID, DEFAULT_RULES, POLICY_DEFAULTS, phase_filter_suggestion
+from .safe_expression import evaluate_safe_expression, parse_safe_expression
 from .sarah_contract import build_sarah_contract, _insert_model_card_rows, _replace_model_card_value, _replace_potential_compiler_expression
 from .sarah_import import SarahImportError, import_sarah_model, run_sarah_import
-from .sarah_thdm import PROFILE_PATH, audit_source, bind_parameters, check_point, derive_model, file_hash
 from .template_contract import contract_to_model_ir, parse_contract, validate_contract_template, write_resolved_contract_data
+
+
+def file_hash(path: Path) -> str:
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
 def write_json(path: Path, payload: Any) -> None:
@@ -48,145 +53,180 @@ def _kv(markdown: str, heading: str, values: dict) -> str:
     return _section(markdown, heading, _table(["key", "value"], list(map(list, values.items()))))
 
 
-def _policies(profile: dict, choices: dict) -> dict:
+def _policies(model, choices: dict) -> dict:
     if not isinstance(choices, dict):
         raise SarahImportError("Policy overrides must be a JSON object.")
-    policy = dict(profile["policies"])
-    if set(choices)-set(policy):
-        raise SarahImportError("Unknown THDM choices: " + ", ".join(sorted(set(choices)-set(policy))))
+    policy = {
+        **POLICY_DEFAULTS,
+        "counterterm": "none" if model.extra_polynomial in {"0", "0.0"} else "source_polynomial",
+        "phase_filter_field": model.fields[0], "phase_filter_threshold": None,
+        "symmetry_generators": [],
+    }
+    unknown = set(choices)-set(policy)
+    if unknown:
+        raise SarahImportError("Unknown choices: " + ", ".join(sorted(unknown)))
     policy.update(choices)
-    allowed = {"backend": {"cosmotransitions", "phasetracer"}, "resummation_scheme": {"none", "Parwani", "Arnold-Espinosa"},
-               "counterterm": {"none", "source_polynomial"}, "goldstone": {"included"}, "photon": {"retained"},
-               "phase_filter": {"none", "negative_field_threshold"}, "phase_filter_field": {"phi1", "phi2"},
-               "phasetracer_symmetry": {"none", "simultaneous"}, "cubic_power_policy": {"positive_part", "signed_abs"}}
+    allowed = {
+        "backend": {"cosmotransitions", "phasetracer"},
+        "resummation_scheme": {"none", "Parwani", "Arnold-Espinosa"},
+        "counterterm": {"none", "source_polynomial"},
+        "goldstone": {"included"}, "photon": {"retained"},
+        "phase_filter": {"none", "negative_field_threshold"},
+        "phasetracer_symmetry": {"none", "z2_reflection"},
+        "cubic_power_policy": {"positive_part", "signed_abs"},
+    }
     for key, options in allowed.items():
         if not isinstance(policy[key], str) or policy[key] not in options:
-            raise SarahImportError(f"Unsupported {key}={policy[key]!r} for this adapter; supported: {sorted(options)}. No substitute was selected.")
+            raise SarahImportError(f"Unsupported {key}={policy[key]!r}; supported: {sorted(options)}. Selective species removal needs an explicit reviewed contract, not a model-name shortcut.")
+    if policy["phase_filter_field"] not in model.fields:
+        raise SarahImportError("The phase-filter field must be in the imported background basis.")
     threshold = policy["phase_filter_threshold"]
-    if isinstance(threshold, bool) or not isinstance(threshold, (int, float)) or not math.isfinite(threshold) or threshold >= 0:
+    if threshold is not None and (isinstance(threshold, bool) or not isinstance(threshold, (int, float)) or not math.isfinite(threshold) or threshold >= 0):
         raise SarahImportError("The phase-filter threshold must be finite and strictly negative.")
+    if policy["phase_filter"] != "none" and threshold is None:
+        raise SarahImportError("Choose an explicit negative threshold after reviewing the scale-based suggestion; no filter was inferred.")
+    if policy["phase_filter"] == "none" and threshold is not None:
+        raise SarahImportError("A threshold was supplied with phase_filter=none; resolve this conflict explicitly.")
+    groups = policy["symmetry_generators"]
+    if not isinstance(groups, list) or any(not isinstance(group, list) or not group or any(not isinstance(f, str) or f not in model.fields for f in group) or len(set(group)) != len(group) for group in groups):
+        raise SarahImportError("symmetry_generators must be a list of nonempty field-name lists.")
+    if bool(groups) != (policy["phasetracer_symmetry"] == "z2_reflection"):
+        raise SarahImportError("Explicit symmetry generators are required exactly when z2_reflection is selected.")
     return policy
 
 
-def render_prepared_contract(model, profile: dict, policy: dict, values: dict, manifest: Path) -> str:
+def _numerical_checks(model) -> dict:
+    """Check the imported point; do not solve or replace the source parameters."""
+    proof = {"passed": True, "scope": "Verified import and finite point evaluation; not a proof of vacuum stability or physical suitability.",
+             "numerical_ready": model.numerical_ready, "thermal_ready": model.thermal_ready,
+             "unresolved_parameters": model.unresolved_parameters, "thermal_blockers": (model.thermal_result or {}).get("blockers", ["thermal_metadata_missing"])}
+    if not model.numerical_ready:
+        return proof
+    import numpy as np
+    import sympy as sp
+
+    values = dict(model.parameter_values)
+    vacuum = {field: evaluate_safe_expression(model.dsb_minimum.get(field, "0"), values) for field in model.fields}
+    values.update(vacuum)
+    tree = parse_safe_expression(model.tree_potential)
+    symbols = {name: sp.Symbol(name) for name in {*tree.names, *model.fields}}
+    potential = sp.sympify(tree.python, locals=symbols)
+    tadpoles = [evaluate_safe_expression(str(sp.diff(potential, symbols[f])), values) for f in model.fields]
+    spectra = {sector.name: np.linalg.eigvalsh([[evaluate_safe_expression(entry, values) for entry in row] for row in sector.matrix]).tolist() for sector in model.mass_sectors}
+    if not all(math.isfinite(v) for v in [*vacuum.values(), *tadpoles, *(x for masses in spectra.values() for x in masses)]):
+        raise SarahImportError("The imported reference point has non-finite tadpoles or masses.")
+    proof.update(reference_point=vacuum, tree_tadpoles=tadpoles, mass_squared_eigenvalues=spectra)
+    return proof
+
+
+def render_prepared_contract(model, policy: dict, radiation: dict, suggestion: dict, manifest: Path) -> str:
     text = build_sarah_contract(model)
-    for key, value in {"counterterm": "custom_expr" if policy["counterterm"] == "source_polynomial" else "none",
-                       "resummation_scheme": policy["resummation_scheme"], "daisy": "custom_expr" if policy["resummation_scheme"] == "Arnold-Espinosa" else "none",
-                       "goldstone": "included", "photon": "retained",
-                       "reviewer_notes": f"Proposed versioned preset {profile['id']}; review all defaults and explicit overrides together. No approval inferred."}.items():
-        text = _replace_model_card_value(text, key, value)
-    text = _insert_model_card_rows(text, [("sarah_profile_id", profile["id"], "Versioned source-checked configuration, not a fitted physical benchmark."),
-                                        ("sarah_preparation_manifest", str(manifest), "Locks construction choices and checks before compilation."),
-                                        ("compile_backend", policy["backend"], "Explicit override or fixed preset default.")])
-    # This first adapter freezes a point. New scan points go through preparation
-    # again so tree-vacuum and Goldstone checks cannot be silently bypassed.
-    constants = [[k, k, format(v, ".17g"), "Frozen source/SLHA/explicit binding; see preparation manifest."] for k, v in sorted(model.parameter_values.items()) if k in model.unresolved_parameters or k.startswith("SLHA_") or k in {"M112Tree", "M222Tree", "M112Loop", "M222Loop"}]
-    constants += [["renormScaleSq", "Q^2", format(model.renormalization_scale_sq, ".17g"), "Resolved scale squared; no backend fallback."]]
-    constants += [[k, k, format(values[k], ".17g"), "Versioned radiation prescription, subject to final approval."] for k in ("num_boson_dof", "num_fermion_dof")]
-    constants += [[k, k, str(v), "Fixed numerical derivative step."] for k, v in profile["numerics"].items()]
-    params = "### Public Inputs\n\nThis is a frozen numerical point. Supply a new parameter JSON to prepare another point.\n\n"
-    params += _table(["name", "latex", "confirmed", "test_value", "source_type", "description"], [])
-    params += "\n\n### Fixed Constants\n\n"+_table(["name", "latex", "value", "description"], constants)
-    params += "\n\n### Derived Quantities\n\nSymbolic tadpole solutions and their numerical bindings are recorded in sarah_preparation_checks.json.\n\n"+_table(["name", "latex", "expr", "expr_status", "description"], [])
-    text = _section(text, "## 3. Parameters", params)
-    text = _kv(text, "### Goldstone Handling", {"cw_policy": "included", "ct_derivative_policy": "not_applicable", "thermal_policy": "included", "regulator": "none", "replacement_formula": "0.0", "notes": "Goldstones are retained in complete imported scalar matrices; informational species below are not added twice."})
-    sectors = {sector.name: sector for sector in model.mass_sectors}
-    rows = []
-    for label, sector_name, dof in (("G0", "scalar_2_Ah", 1), ("Gcharged", "scalar_3_Hm", 2)):
-        a, b, d = sectors[sector_name].matrix[0][0], sectors[sector_name].matrix[0][1], sectors[sector_name].matrix[1][1]
-        expr = f"0.5*(({a})+({d})-np.sqrt((({a})-({d}))**2+4*({b})**2))"
-        rows.append(["true", label, expr, "agent_reviewed", dof, "included", "not_applicable", "included", "none", "0.0", "Smaller branch is Goldstone at the checked vacuum; full matrix is authoritative."])
-    text = _section(text, "### Goldstone Species Handling", _table(["enabled", "name", "mass_sq", "mass_sq_status", "dof", "cw_policy", "ct_policy", "thermal_policy", "regulator", "replacement_expr", "notes"], rows))
     scheme = policy["resummation_scheme"]
+    for key, value in {
+        "counterterm": "custom_expr" if policy["counterterm"] == "source_polynomial" else "none",
+        "resummation_scheme": scheme, "daisy": "custom_expr" if scheme == "Arnold-Espinosa" else "none",
+        "goldstone": policy["goldstone"], "photon": policy["photon"],
+        "reviewer_notes": "Source-first preparation. All defaults below are proposals until final human approval.",
+    }.items():
+        text = _replace_model_card_value(text, key, value)
+    text = _insert_model_card_rows(text, [
+        ("sarah_profile_id", DEFAULTS_ID, "The same source-first rules apply to all models."),
+        ("sarah_preparation_manifest", str(manifest), "Hash-bound inputs and decisions."),
+        ("compile_backend", policy["backend"], "Explicit choice or generic proposed backend."),
+    ])
+    parsed = parse_contract(text)
+    params = parsed["parameters"]
+    inputs = [row for row in params["public_inputs"] if row["name"] not in radiation]
+    text = _section(text, "### Public Inputs", _table(["name", "latex", "confirmed", "test_value", "source_type", "description"],
+        [[row.get(k, "") for k in ("name", "latex", "confirmed", "test_value", "source_type", "description")] for row in inputs]))
+    constants = [[row.get(k, "") for k in ("name", "latex", "value", "description")] for row in params["constants"]]
+    constants += [[name, name, value, "Explicit value or proposed retained-spectrum count; check additional bath species in the manifest."] for name, value in radiation.items()]
+    text = _section(text, "### Fixed Constants", _table(["name", "latex", "value", "description"], constants))
+    text = _kv(text, "### Goldstone Handling", {
+        "cw_policy": "included", "ct_derivative_policy": "not_applicable", "thermal_policy": "included",
+        "regulator": "none", "replacement_formula": "0.0",
+        "notes": "Retain the imported spectrum intact, including any Goldstone modes. No eigenvalue is identified or removed by name or ordering.",
+    })
     implementation = {"none": "none", "Parwani": "parwani_thermal_masses", "Arnold-Espinosa": "arnold_espinosa_explicit_daisy"}[scheme]
-    text = _kv(text, "### Daisy / Thermal-Mass Handling", {"scheme": scheme, "implementation": implementation, "longitudinal_vectors_only": "true", "scalar_thermal_masses": "Complete scalar matrices M0^2+Pi(T) in Section 5.", "gauge_thermal_masses": "Complete longitudinal gauge matrices M0^2+Pi(T) in Section 5; transverse modes unresummed.", "double_counting_guard": "Parwani replaces loop masses without a ring term; AE keeps ordinary loop masses and adds exactly one matrix ring subtraction.", "cubic_power_policy": policy["cubic_power_policy"]})
-    text = _replace_potential_compiler_expression(text, "V_daisy", "0.0", "The deterministic compiler owns the complete matrix ring subtraction for Arnold-Espinosa; this placeholder is not an additional term.")
-    text = _kv(text, "### CosmoTransitions Phase Filtering", {"mode": policy["phase_filter"], "custom_expr": "0.0", "notes": "Versioned preset convention for simultaneous reflection only; preserve the origin. Subject to approval."})
-    filter_rows = [["true", policy["phase_filter_field"], "<", policy["phase_filter_threshold"], "mirror_branch", "Simultaneous sign reflection checked for all matrices and thermal terms.", profile["id"]]] if policy["phase_filter"] != "none" else []
-    text = _section(text, "### CosmoTransitions Phase Filter Rules", _table(["enabled", "field", "comparison", "threshold", "phase_type", "reason", "source_reference"], filter_rows))
-    text = _kv(text, "### PhaseTracer Symmetry", {"mode": "z2_reflection" if policy["phasetracer_symmetry"] == "simultaneous" else "none", "notes": "Only simultaneous (phi1,phi2) reversal; not independent reflections. Subject to approval."})
-    symmetry_rows = [["true", "phi1,phi2", "sign_flip", "All source matrices and thermal corrections preserve the joint reflection.", profile["id"]]] if policy["phasetracer_symmetry"] == "simultaneous" else []
-    text = _section(text, "### PhaseTracer Symmetry Rules", _table(["enabled", "fields", "transformation", "reason", "source_reference"], symmetry_rows))
-    text += "\n## 11. Deterministic Preparation\n\n"+profile["scope"]+"\n\n"
-    text += "This contract uses fixed defaults unless explicitly overridden. They are not user-confirmed until final approval. See `proof_materials/sarah_preparation.json` for input precedence, source hashes, chosen parameters, policies and software versions. Local tree checks do not prove a global or loop-corrected vacuum. No physical-spectrum inverse fit or automatic scan was performed.\n"
-    return text
+    text = _kv(text, "### Daisy / Thermal-Mass Handling", {
+        "scheme": scheme, "implementation": implementation, "longitudinal_vectors_only": "true",
+        "scalar_thermal_masses": "Imported scalar M0^2+Pi(T) matrices in Section 5; missing metadata blocks resummation.",
+        "gauge_thermal_masses": "Imported longitudinal M0^2+Pi(T) matrices; transverse modes unresummed.",
+        "double_counting_guard": "Parwani replaces masses without a ring term; AE keeps ordinary loop masses and adds one matrix ring subtraction.",
+        "cubic_power_policy": policy["cubic_power_policy"],
+    })
+    text = _replace_potential_compiler_expression(text, "V_daisy", "0.0", "The matrix compiler owns the ring subtraction; no second contribution.")
+    text = _kv(text, "### CosmoTransitions Phase Filtering", {
+        "mode": policy["phase_filter"], "custom_expr": "0.0",
+        "notes": "No phase discarded by default. " + suggestion["reason"],
+    })
+    rows = [[str(policy["phase_filter"] != "none").lower(), policy["phase_filter_field"], "<",
+             policy["phase_filter_threshold"] if policy["phase_filter"] != "none" else suggestion["threshold"],
+             "negative_branch", "Review full-potential symmetry before filtering.", "Explicit choice or scale-based proposal."]]
+    text = _section(text, "### CosmoTransitions Phase Filter Rules",
+                    _table(["enabled", "field", "comparison", "threshold", "phase_type", "reason", "source_reference"], rows))
+    text = _kv(text, "### PhaseTracer Symmetry", {
+        "mode": policy["phasetracer_symmetry"], "notes": "Only explicitly listed generators; no equivalence inferred from model name. Review the full potential.",
+    })
+    text = _section(text, "### PhaseTracer Symmetry Rules", _table(["enabled", "fields", "transformation", "reason", "source_reference"],
+                    [["true", ",".join(group), "sign_flip", "Explicit field group; requires full-potential review.", "Explicit choices JSON."] for group in policy["symmetry_generators"]]))
+    return text + "\n## 11. Deterministic Preparation\n\n" + DEFAULT_RULES + "\n\nSee proof_materials/sarah_preparation.json for inputs, proposals and checks. No inverse fit or model-specific algebra was applied.\n"
 
 
-def prepare_sarah(*, vin_path, parameter_map_path, model_source, run_dir, parameters=None, choices=None, slha_path=None) -> dict:
+def prepare_sarah(*, vin_path, parameter_map_path, run_dir, model_source=None, thermal_metadata_path=None, parameters=None, choices=None, slha_path=None) -> dict:
     root = Path(run_dir).expanduser().resolve()
     contract_path = root / "contract_template.md"
     if contract_path.exists():
-        raise SarahImportError("Preparation never overwrites an existing contract. Use a fresh --run-dir; the approved/current task remains unchanged.")
-    source_dir = Path(model_source).expanduser().resolve()
-    profile, defaults = audit_source(source_dir)
-    policy = _policies(profile, choices or {})
-    model = import_sarah_model(vin_path=vin_path, parameter_map_path=parameter_map_path)
-    thermal, proof = derive_model(model, source_dir)
-    external = {"renormScaleSq": model.renormalization_scale_sq} if model.renormalization_scale_sq is not None else {}
-    if slha_path:
-        slha_model = import_sarah_model(vin_path=vin_path, parameter_map_path=parameter_map_path, slha_path=slha_path)
-        external.update({name: value for name, value in slha_model.parameter_values.items()
-                         if name in model.unresolved_parameters})
-        if slha_model.renormalization_scale_sq is not None:
-            external["renormScaleSq"] = slha_model.renormalization_scale_sq
+        raise SarahImportError("Preparation never overwrites an existing contract. Use a fresh --run-dir.")
     explicit = parameters or {}
     if not isinstance(explicit, dict):
         raise SarahImportError("Parameter overrides must be a JSON object.")
+    unbound = import_sarah_model(vin_path=vin_path, parameter_map_path=parameter_map_path)
+    radiation_keys = {"num_boson_dof", "num_fermion_dof"}
+    known = set(unbound.unresolved_parameters) | set(unbound.parameter_values) | set(unbound.derived_parameters) | set(unbound.block_references) | {"Q", "renormScaleSq"} | radiation_keys
+    if set(explicit)-known:
+        raise SarahImportError("Unknown parameter names; use the source/SLHA mapping, not model-specific aliases: " + ", ".join(sorted(set(explicit)-known)))
     if "Q" in explicit and "renormScaleSq" in explicit:
         if not isinstance(explicit["Q"], (int, float)) or explicit["Q"]**2 != explicit["renormScaleSq"]:
             raise SarahImportError("Conflicting Q and renormScaleSq inputs.")
-    # Normalize user aliases before merging, so explicit choices beat SLHA too.
-    aliases = {**{f"Lambda{i}": f"SLHA_HMIX_{30+i}" for i in range(1, 6)}, "M12": "SLHA_HMIX_22", "g1": "SLHA_GAUGE_1", "g2": "SLHA_GAUGE_2"}
-    for name, native in aliases.items():
-        if name in explicit:
-            if native in explicit and explicit[name] != explicit[native]:
-                raise SarahImportError(f"Conflicting aliases: {name} and {native}.")
-            external[native] = explicit[name]
-    if "Q" in explicit:
-        external.pop("renormScaleSq", None)
-    if "vSM" in explicit or "tanBeta" in explicit:
-        v = explicit.get("vSM", profile["parameters"]["vSM"])
-        tb = explicit.get("tanBeta", defaults["tanBeta"])
-        if any(isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(x) or x <= 0 for x in (v, tb)):
-            raise SarahImportError("vSM and tanBeta must be positive finite numbers.")
-        vevs = {"SLHA_HMIX_102": v/math.sqrt(1+tb**2), "SLHA_HMIX_103": v*tb/math.sqrt(1+tb**2)}
-        for name, value in vevs.items():
-            if name in explicit and not math.isclose(explicit[name], value, rel_tol=1e-12):
-                raise SarahImportError("Conflicting reference VEV and vSM/tanBeta inputs.")
-            external[name] = value
-    for group, names in (("YU", ("u", "c", "t")), ("YD", ("d", "s", "b")), ("YE", ("e", "mu", "tau"))):
-        for index, name in enumerate(names, 1):
-            if f"m_{name}" in explicit:
-                native = f"SLHA_{group}_{index}_{index}"
-                if native in explicit:
-                    raise SarahImportError(f"Choose a fermion mass or its native Yukawa input, not both: {name}.")
-                external.pop(native, None)
-    external.update(explicit)
-    bound, values = bind_parameters(model, profile, defaults, external, proof)
-    if policy["counterterm"] == "none" and any(bound[f"M{n}Loop"] != bound[f"M{n}Tree"] for n in ("112", "222")):
-        raise SarahImportError("Explicit loop/tree values imply a nonzero source polynomial. Choose counterterm=source_polynomial or supply consistent values; no input was discarded.")
-    if any(values[k] < 0 for k in ("num_boson_dof", "num_fermion_dof")):
-        raise SarahImportError("Radiation degrees of freedom must be nonnegative.")
-    proof = check_point(model, bound, proof)
+    model = import_sarah_model(vin_path=vin_path, parameter_map_path=parameter_map_path,
+        thermal_metadata_path=thermal_metadata_path, parameters={k: v for k, v in explicit.items() if k not in radiation_keys},
+        slha_path=slha_path)
+    policy = _policies(model, choices or {})
+    proof = _numerical_checks(model)
+    inventory = [{"sector": s.name, "kind": s.kind, "eigenvalues": len(s.basis), "dof_per_eigenvalue": s.dof_per_eigenvalue} for s in model.mass_sectors]
+    radiation = {key: sum(len(s.basis)*s.dof_per_eigenvalue for s in model.mass_sectors if (s.kind == "fermion") == (key == "num_fermion_dof")) for key in sorted(radiation_keys)}
+    radiation.update({k: explicit[k] for k in radiation_keys if k in explicit})
+    for value in radiation.values():
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+            raise SarahImportError("Radiation counts must be finite nonnegative numbers.")
+    field = policy["phase_filter_field"]
+    try:
+        scale = evaluate_safe_expression(model.dsb_minimum.get(field, "0"), model.parameter_values)
+    except (ValueError, KeyError):
+        scale = None
+    suggestion = phase_filter_suggestion(field, scale)
+    if model_source and not Path(model_source).expanduser().is_dir():
+        raise SarahImportError("The explicit SARAH model-source directory does not exist.")
+    result = run_sarah_import(vin_path=vin_path, parameter_map_path=parameter_map_path,
+        thermal_metadata_path=thermal_metadata_path, parameters={k: v for k, v in explicit.items() if k not in radiation_keys},
+        slha_path=slha_path, run_dir=root)
+    model = result.model
     input_dir, proof_dir = root / "input", root / "proof_materials"
-    input_dir.mkdir(parents=True, exist_ok=True)
-    proof_dir.mkdir(parents=True, exist_ok=True)
-    archived_source = input_dir / "sarah_model"
-    archived_source.mkdir(exist_ok=True)
-    for name in profile["source_signatures"]:
-        if (source_dir / name).resolve() != (archived_source / name).resolve():
-            shutil.copy2(source_dir / name, archived_source / name)
-    shutil.copy2(PROFILE_PATH, input_dir / PROFILE_PATH.name)
-    thermal_path = input_dir / "ptagent_thermal_metadata_completed.json"
-    write_json(thermal_path, thermal)
-    write_json(input_dir / "explicit_overrides.json", {"parameters": explicit, "choices": choices or {}})
-    result = run_sarah_import(vin_path=vin_path, parameter_map_path=parameter_map_path, thermal_metadata_path=thermal_path, parameters=bound, slha_path=slha_path, run_dir=root)
-    if not result.model.thermal_ready or not result.model.numerical_ready:
-        raise SarahImportError("Deterministic preparation did not resolve all thermal/numerical blockers.")
-    manifest_path = proof_dir / "sarah_preparation.json"
-    text = render_prepared_contract(result.model, profile, policy, values, manifest_path)
-    contract_path.write_text(text, encoding="utf-8")
-    checks_path = proof_dir / "sarah_preparation_checks.json"
+    if model_source:
+        source_dir = Path(model_source).expanduser().resolve()
+        if not source_dir.is_dir():
+            raise SarahImportError("The explicit SARAH model-source directory does not exist.")
+        archived = input_dir / "sarah_model"
+        archived.mkdir(exist_ok=True)
+        for path in sorted(source_dir.iterdir()):
+            if path.is_file() and path.suffix in {".m", ".wl"} and path.resolve() != (archived/path.name).resolve():
+                shutil.copy2(path, archived/path.name)
+    write_json(input_dir/"preparation_defaults.json", {"id": DEFAULTS_ID, "rules": DEFAULT_RULES, "policies": POLICY_DEFAULTS})
+    write_json(input_dir/"explicit_overrides.json", {"parameters": explicit, "choices": choices or {}})
+    manifest_path = proof_dir/"sarah_preparation.json"
+    contract_path.write_text(render_prepared_contract(model, policy, radiation, suggestion, manifest_path), encoding="utf-8")
+    checks_path = proof_dir/"sarah_preparation_checks.json"
     write_json(checks_path, proof)
     versions = {"python": platform.python_version()}
     for package in ("numpy", "sympy", "scipy", "cosmoTransitions"):
@@ -194,17 +234,24 @@ def prepare_sarah(*, vin_path, parameter_map_path, model_source, run_dir, parame
             versions[package] = importlib.metadata.version(package)
         except importlib.metadata.PackageNotFoundError:
             versions[package] = "not_installed"
-    source_files = [p for p in input_dir.rglob("*") if p.is_file()]
-    manifest = {"schema": "ptagent.sarah_preparation.v1", "profile": profile["id"], "profile_sha256": file_hash(PROFILE_PATH),
-                "contract_digest": contract_digest(parse_contract(text)), "input_sha256": {str(p.relative_to(root)): file_hash(p) for p in source_files},
-                "checks_sha256": file_hash(checks_path), "checks_file": str(checks_path), "passed": True,
-                "source_defaults": defaults, "preset_inputs_with_alias_overrides": values, "bound_parameters": bound, "policies": policy,
-                "explicit_overrides": {"parameters": explicit, "choices": choices or {}}, "software_versions": versions,
-                "adapter_sha256": {name: file_hash(Path(__file__).with_name(name)) for name in ("sarah_thdm.py", "sarah_prepare.py")},
-                "precedence": "explicit user inputs > SLHA bindings/scale > audited source example > versioned preset; existing contracts are never overwritten"}
+    manifest = {
+        "schema": "ptagent.sarah_preparation.v2", "profile": DEFAULTS_ID,
+        "contract_digest": contract_digest(parse_contract(contract_path.read_text())),
+        "input_sha256": {str(p.relative_to(root)): file_hash(p) for p in sorted(input_dir.rglob("*")) if p.is_file()},
+        "checks_sha256": file_hash(checks_path), "checks_file": str(checks_path), "passed": True,
+        "bound_parameters": model.parameter_values, "policies": policy,
+        "radiation": {"values": radiation, "inventory": inventory, "explicit": sorted(radiation_keys & set(explicit)),
+                      "status": "proposal_until_approval", "assumption": "Count the retained source modes only; no unlisted bath species. Review massless-vector polarization conventions and missing decoupled species."},
+        "phase_filter_suggestion": suggestion, "explicit_overrides": {"parameters": explicit, "choices": choices or {}},
+        "software_versions": versions, "adapter_sha256": {"sarah_prepare.py": file_hash(Path(__file__))},
+        "precedence": "explicit user inputs > SLHA > source parameter map; no guessed benchmark, scale, Yukawa type or tadpole solution",
+    }
     write_json(manifest_path, manifest)
-    refresh_review(contract_path)
-    return {**result.to_dict(), "preparation": str(manifest_path), "checks": str(checks_path), "profile": profile["id"], "contract_sha256": file_hash(contract_path), "approval_required": True, "graph": str(proof_dir / "contract_graph/contract_graph.png")}
+    validation = refresh_review(contract_path)
+    return {**result.to_dict(), "preparation": str(manifest_path), "checks": str(checks_path), "profile": DEFAULTS_ID,
+            "contract_sha256": file_hash(contract_path), "approval_required": True,
+            "construction_ready": not any(i.severity == "error" and i.code != "review_required" for i in validation.issues),
+            "graph": str(proof_dir/"contract_graph/contract_graph.png")}
 
 
 def preparation_errors(contract: dict) -> list[str]:
@@ -215,7 +262,7 @@ def preparation_errors(contract: dict) -> list[str]:
         manifest_path = Path(path)
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         root = manifest_path.parent.parent
-        if manifest.get("schema") != "ptagent.sarah_preparation.v1" or manifest.get("passed") is not True:
+        if manifest.get("schema") not in {"ptagent.sarah_preparation.v1", "ptagent.sarah_preparation.v2"} or manifest.get("passed") is not True:
             return ["Preparation has no successful machine-check record."]
         if manifest.get("contract_digest") != contract_digest(contract):
             return ["Prepared contract changed. Re-prepare the changed settings in a fresh task and obtain new approval."]
@@ -234,8 +281,9 @@ def preparation_errors(contract: dict) -> list[str]:
     return []
 
 
-def refresh_review(template: Path) -> None:
+def refresh_review(template: Path):
     from ptagent.review_graph import render_graph
+    from .user_guidance import build_user_guidance_markdown
     proof_dir = template.parent / "proof_materials"
     text = template.read_text(encoding="utf-8")
     contract = parse_contract(text)
@@ -244,45 +292,52 @@ def refresh_review(template: Path) -> None:
     write_resolved_contract_data(validation.contract, proof_dir/"contract_resolved.json")
     write_json(proof_dir/"model_ir.json", contract_to_model_ir(validation.contract, source_path=contract["model_card"]["source_vin_path"]).to_dict())
     write_json(proof_dir/"validation.json", validation.to_report().to_dict())
-    errors = [issue.message for issue in validation.issues if issue.severity == "error" and issue.code != "review_required"]
-    if errors:
-        raise SarahImportError("Prepared contract validation failed: " + "; ".join(errors))
-    approved = bool(contract["review"]["approved"])
-    (proof_dir/"user_questions.md").write_text("# Review\n\n"+("Approved: no pending questions.\n" if approved else "No unresolved construction choices. Review the versioned defaults, explicit overrides and checks together, then approve the exact contract hash. Defaults are not source-mandated physics choices.\n"), encoding="utf-8")
+    (proof_dir/"user_questions.md").write_text(build_user_guidance_markdown(
+        template_markdown=text, validation=validation.to_report(), compile_backend=backend), encoding="utf-8")
     spec = preparation_graph(template, contract)
     write_json(proof_dir/"contract_graph_spec.json", spec)
     render_graph(template, spec, proof_dir/"contract_graph")
+    return validation
 
 
 def preparation_graph(template: Path, contract: dict) -> dict:
     root = template.parent
-    def evidence(file, location):
-        return [{"file": str(root/file), "location": location}]
+    source_file = contract["model_card"]["source_vin_path"]
     def item(name, label, kind, refs, file, calculation=None):
-        row = {"id": name, "label": label, "kind": kind, "refs": refs, "evidence": evidence(file, name)}
+        row = {"id": name, "label": label, "kind": kind, "refs": refs,
+               "evidence": [{"file": str(file), "location": name}]}
         if calculation:
             row["calculation"] = calculation
         return row
-    source = item("source", "SARAH", "source", [], "input/sarah_model/THDM.m")
-    profile = item("preset", "Preset defaults", "proposal", [], f"input/{PROFILE_PATH.name}")
-    source.pop("refs"); profile.pop("refs")
-    policy_kind = "proposal"
-    policy_evidence = "input/"+PROFILE_PATH.name
-    approval_quote = None
+    source = item("source", "SARAH export", "source", [], source_file)
+    default_file = root/"input/preparation_defaults.json"
+    if not default_file.exists():
+        default_file = Path(contract["model_card"]["sarah_preparation_manifest"])
+    proposal = item("defaults", "Review proposals", "proposal", [], default_file)
+    source.pop("refs"); proposal.pop("refs")
+    policies = [item("policies", "Spectrum, radiation and physical prescriptions", "proposal",
+                     ["/parameters", "/implementation", "/loops", "/model_card/compile_backend"], root/"proof_materials/sarah_preparation.json")]
     if contract["review"]["approved"]:
         approval = json.loads((root/"proof_materials/sarah_approval.json").read_text())
-        approval_quote = approval["user_approval_quote"]
-        profile.update(label="User approval", kind="user")
-        policy_kind, policy_evidence = "user", "proof_materials/sarah_approval.txt"
-    policies = [item("numeric_defaults", "Numerical point, scale and radiation", policy_kind, ["/parameters"], policy_evidence),
-                item("policies", "Resummation, modes and phase handling", policy_kind, ["/implementation", "/loops", "/model_card/compile_backend"], policy_evidence)]
-    if approval_quote:
+        proposal.update(label="User approval", kind="user")
         for row in policies:
-            row["user_quote"] = approval_quote
-    return {"version": 1, "template_sha256": file_hash(template), "sources": [source, profile], "branches": [
-        {"source": "source", "operation": "Model algebra", "inputs": [item("tree", "Tree potential and field definitions", "source", ["/potential/V0", "/fields/0/name", "/fields/1/name"], "input/"+Path(contract["model_card"]["source_vin_path"]).name)], "outputs": [item("point", "Tadpoles and reference vacuum", "derived", ["/fields"], "proof_materials/sarah_preparation_checks.json", "Symbolic differentiation, unique quadratic solution and frozen bindings")]},
-        {"source": "source", "operation": "Thermal matrices", "inputs": [item("spectrum", "Source matrices and full multiplets", "source", ["/masses/fermion_matrices"], "input/"+Path(contract["model_card"]["source_vin_path"]).name)], "outputs": [item("thermal", "Scalar and longitudinal self energies", "derived", ["/masses/boson_matrices"], "proof_materials/sarah_preparation_checks.json", "Full-multiplet tensor contraction and independent high-T supertrace")]},
-        {"source": "preset", "inputs": policies, "outputs": []}], "links": [["numeric_defaults", "point"]]}
+            row.update(kind="user", user_quote=approval["user_approval_quote"],
+                       evidence=[{"file": str(root/"proof_materials/sarah_approval.txt"), "location": "approval"}])
+    branches = [
+        {"source": "source", "inputs": [
+            item("tree", "Tree potential and background fields", "source", ["/potential/V0", "/fields"], source_file),
+            item("spectrum", "Imported scalar, gauge and fermion matrices", "source", ["/masses"], source_file)], "outputs": []},
+        {"source": "defaults", "inputs": policies, "outputs": []},
+    ]
+    thermal_file = root/"proof_materials/thermal_derivation.json"
+    thermal_hash = contract["model_card"].get("source_thermal_metadata_sha256")
+    metadata_file = next((p for p in sorted((root/"input").rglob("*.json")) if file_hash(p) == thermal_hash), None)
+    if str(contract["model_card"].get("thermal_ready")).lower() == "true" and thermal_file.exists() and metadata_file:
+        branches.insert(1, {"source": "source", "operation": "Thermal matrices", "inputs": [
+            item("metadata", "Companion invariants and basis mappings", "source", ["/model_card/source_thermal_metadata_sha256"], metadata_file)],
+            "outputs": [item("thermal", "Scalar and longitudinal self energies", "derived", ["/masses/boson_matrices"],
+                thermal_file, "Model-independent one-loop tensor contractions and alignment checks")]})
+    return {"version": 1, "template_sha256": file_hash(template), "sources": [source, proposal], "branches": branches, "links": []}
 
 
 def approve_sarah(template: Path, expected_sha256: str, user_approval_quote: str) -> dict:

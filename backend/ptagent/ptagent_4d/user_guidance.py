@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .artifact_layout import proof_materials_dir
+from .model_defaults import DEFAULT_RULES, FILTER_GUIDANCE, POLICY_DEFAULTS
 from .backends import (
     COMPARE_BACKENDS_SENTINEL,
     SUPPORTED_COMPILE_BACKENDS,
@@ -478,9 +479,9 @@ def _packet_recommendation(packet: QuestionPacket, target: dict[str, str], memor
     if packet.key == "parameters.public_inputs":
         return "ask this as one mandatory input-basis gate; fixed conventions should be moved out before bothering the user."
     if packet.key == "model_card.physics_conventions":
-        return "auto-fill choices that are explicitly stated in the source or reference code, then ask only for rows that remain ambiguous or mutually inconsistent."
+        return "auto-fill choices explicitly stated in the source or by the user. " + DEFAULT_RULES
     if packet.key == "implementation.phase_filter":
-        return "recommend `mode=none` unless the paper/reference code explicitly removes a duplicate or unphysical traced branch. For reviewed xSM-like mirror-branch removal, use `negative_field_threshold` with a tolerance-style threshold such as `field < -5.0`, not a zero threshold."
+        return "recommend `mode=none` unless a full-potential duplicate or unphysical branch has been established. " + FILTER_GUIDANCE
     if packet.key == "implementation.symmetry":
         return "recommend `mode=none` unless the user confirms PhaseTracer should merge reviewed symmetry-equivalent field points. Use `z2_reflection` only for an explicitly reviewed sign-flip invariance and list the field group(s)."
     if packet.key.startswith("masses."):
@@ -619,7 +620,7 @@ def _question_target(field_key: str, contract: dict[str, Any]) -> dict[str, str]
                 "title": f"Radiation d.o.f. `{row_name}`",
                 "edit_target": f"Section 3 `Fixed Constants`, row `{row_name}`, column `value`.",
                 "format": "Numeric total radiation d.o.f. used by standard thermal integrals.",
-                "notes": "Ask the user to confirm the total count. Use SM baseline `num_boson_dof=28`, `num_fermion_dof=90`; add reviewed BSM d.o.f. beyond the one SM Higgs scalar already in the baseline, and state what was added.",
+                "notes": "Count the reviewed spectrum and any additional radiation bath explicitly. State spin, multiplicity and polarization conventions; no model-specific baseline is assumed.",
                 "symbol": row_name,
             }
         return {
@@ -650,7 +651,7 @@ def _question_target(field_key: str, contract: dict[str, Any]) -> dict[str, str]
             "title": f"Radiation d.o.f. `{name}`",
             "edit_target": "Section 3 `Fixed Constants` or `Derived Quantities`, rows `num_boson_dof` and `num_fermion_dof`.",
             "format": "Numeric total radiation d.o.f. used by standard thermal integrals.",
-            "notes": "These are total thermal-radiation d.o.f.; backend V1T implementations subtract explicit species internally. Use SM baseline `num_boson_dof=28`, `num_fermion_dof=90`; add reviewed BSM d.o.f. beyond the one SM Higgs scalar already in the baseline and tell the user what was added.",
+            "notes": "These are total thermal-radiation d.o.f.; backend V1T implementations subtract explicit species internally. Count the reviewed inventory and any additional bath, without assuming Standard Model content.",
             "symbol": name,
         }
     if field_key == "potential.V0.python":
@@ -735,14 +736,14 @@ def _question_target(field_key: str, contract: dict[str, Any]) -> dict[str, str]
                 "title": "CosmoTransitions phase filter rule",
                 "edit_target": "Section 6 `CosmoTransitions Phase Filter Rules`.",
                 "format": "One row per discarded phase branch: `field`, comparison `<`/`<=`/`>`/`>=`, numeric `threshold`, `phase_type`, and reason.",
-                "notes": "The CosmoTransitions phase-filter hook discards a traced phase when it returns true. xSM-style example: discard negative mirror branches with `h < -5.0` and/or `s < -5.0`, not `h < 0`, so phases at zero survive floating-point noise.",
+                "notes": "The CosmoTransitions phase-filter hook discards a phase when true. " + FILTER_GUIDANCE,
             }
         return {
             **base,
             "title": "CosmoTransitions phase filtering policy",
             "edit_target": "Section 6 `CosmoTransitions Phase Filtering`.",
             "format": "`none`, `negative_field_threshold`, or `custom_expr`; if filtering is enabled, fill the rule rows with phase type and threshold.",
-            "notes": "This affects CosmoTransitions phase tracing only; it does not change the effective potential. PhaseTracer does not consume this section. For PhaseTracer symmetry-equivalent field points, use the PhaseTracer Symmetry section instead of a phase filter. Custom expressions may use natural Python `and`/`or`; the compiler renders them as backend-safe boolean logic. xSM.py-style hint for CosmoTransitions: `h < -5.0` and/or `s < -5.0` discards negative mirror branches while preserving phases at zero.",
+            "notes": "This affects CosmoTransitions phase tracing, not the effective potential. For PhaseTracer use the Symmetry section. Custom and/or expressions compile to backend-safe boolean logic. " + FILTER_GUIDANCE,
         }
     if field_key.startswith("implementation.symmetry"):
         if ".rules" in field_key:
@@ -821,7 +822,7 @@ def _question_prompt(issue: ValidationIssue, target: dict[str, str]) -> str:
     if target["title"].startswith("Tree-level potential"):
         return "Please give the tree-level potential as a Python expression using the declared field names."
     if target["title"].startswith("Radiation"):
-        return "What total radiation degrees of freedom should V1T use? State the SM baseline and any extra model particles added."
+        return "What total radiation degrees of freedom should V1T use? Confirm the retained species inventory and any additional bath."
     if target["title"].startswith("Boson mass matrix"):
         return "Please confirm this matrix route, give the missing field-dependent matrix entries, and state the d.o.f. per eigenvalue."
     if target["title"].startswith("Model Card"):
@@ -839,7 +840,7 @@ def _question_prompt(issue: ValidationIssue, target: dict[str, str]) -> str:
     if target["title"].startswith("CosmoTransitions phase filtering"):
         return "Should the selected backend discard any traced phase branches? If yes, which field direction/type should be removed and what tolerance threshold should be used?"
     if target["title"].startswith("CosmoTransitions phase filter rule"):
-        return "Which phase branch should be forbidden, and at what field threshold? For CosmoTransitions xSM-like Z2 duplicates, a typical answer is `h < -5.0` and/or `s < -5.0` for the negative branch."
+        return "Which phase branch should be forbidden? " + FILTER_GUIDANCE
     if target["title"].startswith("PhaseTracer symmetry policy"):
         return "Should PhaseTracer identify symmetry-equivalent field points with `apply_symmetry(phi)` to avoid duplicate phase counting? If yes, which field sign flips are reviewed symmetries?"
     if target["title"].startswith("PhaseTracer symmetry rule"):
@@ -859,7 +860,7 @@ def _recommendation_line(field_key: str, target: dict[str, str], memory: PaperMe
     if title.startswith("Model short name"):
         return "use the paper's common model acronym if available, such as `XSM` or `2HDM`; if several potentials are present, ask for the branch before asking branch-specific parameters."
     if title.startswith("Radiation"):
-        return "start from the SM thermal-integral baseline `num_boson_dof=28`, `num_fermion_dof=90`, then add only reviewed extra model degrees of freedom."
+        return "propose the sum of the retained species inventory, explicitly reviewing polarization conventions and any unlisted radiation bath; no Standard Model baseline is assumed."
     if title.startswith("Boson mass matrix"):
         return "use the matrix route when the source or Hessian has mixing/off-diagonal entries; diagonalize direct eigenvalues only after they are explicitly reviewed."
     if title.startswith("Counterterm"):
@@ -928,7 +929,7 @@ def _daisy_recommendation(memory: PaperMemory | None) -> str:
         return "the source mentions Parwani; ask whether V1/V1T should use thermal-mass replacement and whether a separate V_daisy is absent."
     if "arnold" in text or "espinosa" in text or "ring" in text or "daisy" in text:
         return "the source mentions daisy/ring resummation; ask whether it is explicit Arnold-Espinosa V_daisy, Parwani replacement, or a paper-specific custom rule."
-    return "ask for the route explicitly; Daisy thermal masses and V1T assembly differ between Parwani and Arnold-Espinosa."
+    return f"without a source/user prescription, propose {POLICY_DEFAULTS['resummation_scheme']} as the shared default, subject to review. Missing thermal matrices block this proposal; never silently substitute an unresummed theory."
 
 
 def _memory_search_text(memory: PaperMemory | None) -> str:

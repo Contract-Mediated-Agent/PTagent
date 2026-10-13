@@ -158,8 +158,11 @@ or pass it to PhaseTracer compile commands as `--phasetracer-root`.
      used by `apply_symmetry` / `get_symmetry_axes`. One contract row creates
      one generated symmetry partner: `h,s` means `h -> -h and s -> -s`, while
      two separate rows `h` and `s` mean `h -> -h or s -> -s`. Do not encode
-     independent alternatives as `h,s`. Show reference-code/paper hints, such
-     as xSM-style `field < -5.0`, only as suggestions.
+     independent alternatives as `h,s`. For a confirmed duplicate-branch filter,
+     suggest `field < -epsilon` with `epsilon=0.01*L` for a sourced reference
+     field scale L, and at least ten numerical field steps when known. Check
+     sensitivity to a factor-of-two change; without a field scale ask for one.
+     This is a disabled numerical proposal, not an automatic physics choice.
    - Compile approval: after the Markdown template has no blockers, stop and
      ask the user to review the rendered `contract_template.md` and explicitly
      approve backend code generation/compilation. Do not treat a request like
@@ -415,7 +418,7 @@ truth. Derived JSON must not be hand-edited:
   `confirmed=true` and a numeric `test_value`; code generation must block until
   the user confirms both the input list and each test value. Fixed conventions
   and solved parameters must be moved out of this table.
-- `parameters.constants`: fixed conventions such as `vh=246`.
+- `parameters.constants`: numerical values with explicit source/user evidence.
 - `parameters.derived`: formulas solved from inputs/constants, in dependency order.
 - renormalization scale: when the zero-temperature loop route is
   `standard_CW_V1`, or when explicit counterterms use a CW source, exactly one
@@ -509,9 +512,9 @@ truth. Derived JSON must not be hand-edited:
   used. These are total radiation d.o.f.; backend `V1T` implementations subtract
   explicit species internally. Derive or use the total count from source/user
   evidence when available, and ask only when the total count is not reviewed.
-  Start from SM baseline 28/90. For scalar extensions, add
-  reviewed BSM real-scalar d.o.f. beyond the one SM Higgs scalar already in that
-  baseline, and tell the user what was added. If Goldstones or photons are
+  Start from the retained species inventory, stating spin, multiplicity and
+  polarization conventions, and explicitly add any unlisted radiation bath.
+  Do not assume a Standard Model baseline. If Goldstones or photons are
   explicitly included/excluded, keep the total d.o.f. and explicit species list
   consistent.
   If there are no reviewed enabled fermion mass rows, keep `fermion_massSq`

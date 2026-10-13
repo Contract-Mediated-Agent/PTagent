@@ -3,66 +3,71 @@
 Use this route only for deterministic SARAH model exports. PTagent does not
 infer a SARAH model from prose or a free-form Lagrangian.
 
-## Deterministic THDM Preparation
+## Source-First Preparation For All Models
 
-The audited real type-I THDM distributed with SARAH 4.14.5 has a complete
-code-driven route. It is not a generic adapter for every model called THDM.
-`references/sarah/thdm-type-i-v1.json` versions its defaults and source
-signatures. The backend checks the source files and all eight exported mass
-sectors, differentiates the full eight-real-scalar potential, solves the tree
-tadpoles, contracts thermal tensors, and independently checks the high-T
-supertrace. The original exports remain unchanged.
-
-For existing exports, no Wolfram execution is needed:
+`prepare-sarah` consumes the actual exported tree potential, parameter map,
+mass sectors and optional companion metadata. It does not branch on model
+names or supply a reconstructed model-specific potential. The same
+`source-first-4d-v1` rules apply to paper workflows as review recommendations.
 
 ```bash
 python <skill-dir>/scripts/ptagent_cli.py prepare-sarah \
-  --vin /path/to/THDM.vin --parameter-map /path/to/ScaleAndBlock.xml \
-  --model-source /path/to/SARAH/Models/THDM --run-dir /path/to/fresh-task
+  --vin MODEL.vin --parameter-map ScaleAndBlock.xml \
+  --slha spectrum.slha --thermal-metadata ptagent_thermal_metadata.json \
+  --run-dir /path/to/fresh-task \
+  --choices '{"backend":"cosmotransitions"}'
 ```
 
-This reads scalar example inputs from the audited `SPheno.m` numeric
-`DefaultInputValues` list. It does not execute arbitrary Wolfram source during
-import. Remaining defaults are v=246 GeV, Q=246 GeV, fixed illustrative SM inputs,
-MSbar/Landau, Arnold-Espinosa with positive-part cubic powers, Loop=Tree and no
-finite counterterms, all exported modes retained including Goldstones and the
-thermal photon, and radiation d.o.f. 32/90. The CT mirror filter is phi2 < -1 GeV;
-PhaseTracer uses simultaneous reflection only. The full matrices and thermal
-terms are checked for that symmetry. These are reviewable preset conventions,
-not source-mandated physics or an experimentally fitted benchmark.
+The SLHA, metadata and `--model-source` archival directory are optional for a
+partial import. Missing data remains visible in the generated contract and the
+consolidated questions. Missing thermal matrices block Parwani/Arnold-Espinosa;
+missing numerical parameters or renormalization scale block numerical execution.
+A successful import is not a claim that the model is ready to run.
 
-Explicit user choices take precedence. Example:
+The deterministic precedence is explicit parameter JSON > SLHA > source
+parameter mapping. Use names in the imported expressions or normalized SLHA
+names. There are no hard-coded Yukawa types, electroweak values, source-example
+benchmarks, mass-to-coupling inversions or tree/loop parameter equalities.
+Unknown names fail instead of being ignored. An unresolved input requires
+source evidence or a user value, not an LLM fit.
 
-```bash
-python <skill-dir>/scripts/ptagent_cli.py prepare-sarah \
-  --vin /path/to/THDM.vin --parameter-map /path/to/ScaleAndBlock.xml \
-  --model-source /path/to/SARAH/Models/THDM --run-dir /path/to/another-task \
-  --parameters '{"Lambda1":0.12,"Q":200}' \
-  --choices '{"backend":"phasetracer","resummation_scheme":"Parwani"}'
-```
+Generic physical proposals, subordinate to source/user choices, are:
 
-Both JSON arguments also accept files. Native SLHA symbols are supported;
-explicit aliases override SLHA, which overrides source/preset defaults. Do not
-invent physical-mass inverse relations. Inputs such as mh/mH/mA need a separately
-validated inverse adapter and are currently rejected by this route. Unsupported
-particle exclusions, counterterms or modified source conventions stop with an
-error instead of falling back to different physics. `source_polynomial` is the
-available counterterm override when supplied loop/tree values define a nonzero
-ExtraPolynomialPart. Paper and manual-contract routes remain available for
-other reviewed prescriptions.
+- Arnold-Espinosa with positive-part cubic powers. Missing thermal data does not
+  silently select an unresummed theory.
+- Retain the complete imported spectrum, without special Goldstone/photon
+  removal. Selective removal needs a separately reviewed contract; do not
+  identify a Goldstone from a model name or smallest eigenvalue.
+- Propose the nonzero imported extra polynomial as a separate correction;
+  otherwise propose no counterterm. Its physical interpretation still needs review.
+- Radiation counts are the retained-mode inventory, not an assumed SM bath.
+  The manifest lists every count. Explicitly review massless-vector polarization
+  conventions and unlisted decoupled particles. `num_boson_dof` and
+  `num_fermion_dof` in parameter JSON override the proposal.
+- No phase filter or symmetry merge by default. For a reviewed reflection,
+  suggest a negative threshold with tolerance `0.01*L`, where L is a sourced
+  nonzero reference field scale. If the field step is known, use at least ten
+  steps. Check factor-of-two sensitivity. No reference scale means no guessed
+  threshold. Suggestions stay disabled until confirmed.
 
-Preparation writes `sarah_preparation.json`, `sarah_preparation_checks.json`, a
-complete contract, validation, a pending-question checklist, and a matching
-provenance graph under `proof_materials/`. Check the command exit status and
-machine reports. Matrix shape/symmetry alone is not a physical check. The point
-must pass tadpole residual, scalar curvature, Goldstone and tree quartic checks;
-these do not establish the global or loop-corrected vacuum. A failed fit or check
-does not prove that a requested spectrum is impossible.
+Supported `--choices` keys are `backend`, `resummation_scheme`,
+`counterterm` (`none` or `source_polynomial`), `goldstone` (`included`),
+`photon` (`retained`), `cubic_power_policy` (`positive_part` or `signed_abs`),
+`phase_filter` (`none` or `negative_field_threshold`),
+`phase_filter_field`, `phase_filter_threshold`,
+`phasetracer_symmetry` (`none` or `z2_reflection`), and
+`symmetry_generators` (a list of field-name lists, one simultaneous flip per list).
+Unsupported choices fail; they are never replaced with a different prescription.
 
-Show the contract and graph together with the preset summary and any explicit
-overrides. There are no incremental policy questions when the preset covers all
-inputs: request one final approval of the complete specification. Never claim
-defaults were already confirmed. Only after the user actually approves:
+Preparation records source/configuration hashes, the bound point, raw tadpole
+residuals and mass eigenvalues when evaluable, proposals and software versions.
+These checks do not solve tadpoles, establish vacuum stability or reconstruct
+thermal tensors from missing representation data. The companion metadata must
+supply the model's invariants and basis mappings. There is no hidden THDM
+completion path.
+
+Present the contract, graph and all remaining questions together. Once blockers
+are resolved, obtain final approval of the exact contract hash:
 
 ```bash
 python <skill-dir>/scripts/ptagent_cli.py approve-sarah \
@@ -71,13 +76,10 @@ python <skill-dir>/scripts/ptagent_cli.py approve-sarah \
   --user-approval-quote '<actual user approval>'
 ```
 
-Then use the existing `compile`, `check-model` and `run` workflow. Approval updates
-the graph, resolved contract and validation together. Compilation rejects stale
-prepared inputs or changed construction choices. This first adapter freezes a
-numerical point: new inputs require another prepared task and approval, not edits
-to generated constants. Preparation never overwrites an existing contract.
-Do not generate ad hoc derivation, fitting or completion scripts to bypass a
-failure. Report unsupported cases in one batch and retain the diagnostic files.
+Defaults are proposals, not prior confirmation. Only a real user approval may
+unlock compilation. Changed inputs invalidate approval; use a fresh prepared
+task for revised parameters or policies. Existing prepared v1 contracts retain
+hash verification, but no new v1 model-specific preset is generated.
 
 ## Import Existing Output
 
@@ -126,7 +128,7 @@ before standard Wolfram/Mathematica Applications directories. If necessary, a
 bounded read-only Wolfram query checks ``FindFile["SARAH`"]`` and `$Path`. An
 unversioned SARAH package/alias is preferred, followed by numerically ordered
 versioned directories; the selected root is recorded in the export manifest.
-Discovery does not override the audited preset's source-version checks.
+The same import and provenance checks apply to every discovered model.
 
 When SARAH is missing, report the search results and tell the user to install it
 in their Wolfram/Mathematica Applications directory or configure an existing
@@ -147,11 +149,9 @@ python <skill-dir>/scripts/ptagent_cli.py export-sarah \
 ```
 
 The wrapper runs `MakeVevacious[Version -> "++"]`, then the bundled companion
-exporter. For `--model THDM`, its default `--preset auto` invokes the audited
-preparation route above, including source archival and fixed defaults. Pass
-`--parameters` and `--choices` to preserve explicit user inputs. `--preset none`
-explicitly retains symbolic-only import. Other models invoke the same importer
-used by `import-sarah`. The wrapper does not modify SARAH. If a model does not expose the tensor data required by the
+exporter. The default `--preset auto` prepares every model with the same rules above.
+Pass `--parameters` and `--choices` to preserve explicit inputs. `--preset none`
+retains the raw-import worksheet. The wrapper does not modify SARAH. If a model does not expose the tensor data required by the
 companion schema, the metadata records a deterministic blocker instead of
 inventing thermal masses; the zero-temperature contract is still produced.
 
@@ -166,8 +166,7 @@ fails.
 
 ## Review Boundary
 
-The fixed THDM route above uses one final preset review. The following partial
-import rules apply to other models and explicit symbolic-only imports.
+The following review boundary applies to every model, including partial imports.
 
 Follow `contract_review.md`: show the current Markdown contract and its
 evidence-bound graph together, including a partial import's unavailable thermal

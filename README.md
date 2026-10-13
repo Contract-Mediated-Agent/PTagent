@@ -40,9 +40,9 @@ own invocation syntax.
   source hashes, and keeps unresolved values as visible compile blockers.
 - Accepts optional companion thermal metadata and deterministically constructs
   scalar thermal self-energies and longitudinal gauge Debye matrices.
-- Provides a versioned, source-checked SARAH type-I THDM preset that binds the
-  example point, derives/checks tadpoles and thermal matrices, and generates a
-  complete contract and review graph without agent-authored algebra scripts.
+- Prepares every supported SARAH export using the same source-first rules,
+  records parameter bindings and physical proposals, and produces a contract,
+  review graph and consolidated blockers without a model-name preset.
 - Reads reviewed DRalgo/3DEFT Mathematica/Wolfram sources when the user clearly
   asks for 3DEFT or supplies a DRalgo-style `.m`/`.wl` file.
 - Builds evidence packets, asks all currently unresolved physics questions
@@ -151,26 +151,30 @@ python scripts/ptagent_cli.py export-sarah \
 ```
 
 `export-sarah` runs the companion exporter and immediately feeds the generated
-files through the deterministic importer. For the audited SARAH 4.14.5 THDM,
-the default `--preset auto` also completes the fixed preparation below. Other
-models retain the partial-import workflow. If generic thermal tensors
+files through the deterministic importer. The default `--preset auto` applies
+the same source-first preparation to every model. If generic thermal tensors
 cannot be established from the loaded model, the export remains useful but is
 marked partial and resummed compilation stays blocked.
 
-For existing THDM exports plus their original model files:
+For existing exports (no local SARAH installation required):
 
 ```bash
 python scripts/ptagent_cli.py prepare-sarah \
-  --vin /path/to/THDM.vin --parameter-map /path/to/ScaleAndBlock.xml \
-  --model-source /path/to/SARAH/Models/THDM --run-dir /path/to/fresh-run
+  --vin /path/to/MODEL.vin --parameter-map /path/to/ScaleAndBlock.xml \
+  --slha /path/to/spectrum.slha \
+  --thermal-metadata /path/to/ptagent_thermal_metadata.json \
+  --run-dir /path/to/fresh-run
 ```
 
-The `sarah-thdm-type-i-v1` preset uses the source scalar example values,
-v=Q=246 GeV, fixed illustrative SM inputs, MSbar/Landau, Arnold-Espinosa,
-no finite counterterms, the complete source spectrum and radiation d.o.f. 32/90.
-It is a reproducible pipeline example, not a fitted 125 GeV Higgs benchmark.
-Explicit `--parameters` and `--choices` JSON overrides take precedence; unknown
-or unsupported choices fail instead of being replaced. Complete defaults,
+Numerical parameters and the renormalization scale come only from the source,
+SLHA or explicit JSON. There is no universal benchmark or electroweak baseline.
+Generic proposals are Arnold-Espinosa, the intact source spectrum, a separately
+reviewed imported polynomial correction, radiation counts from the retained
+inventory, and no phase filtering or symmetry merging. These are proposals,
+not SARAH-mandated physics. Missing thermal data blocks resummation; missing
+parameters block numerical execution. Source/user choices take priority.
+Explicit `--parameters` and `--choices` overrides are recorded; unknown or
+unsupported choices fail instead of being replaced. Default rules,
 supported overrides and approval instructions are in
 [the SARAH workflow](references/ptagent_sarah_workflow.md).
 
