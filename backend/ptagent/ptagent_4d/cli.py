@@ -415,24 +415,7 @@ def main(argv: list[str] | None = None) -> int:
         template = template_path.read_text(encoding="utf-8")
         output_dir = Path(args.output_dir) if args.output_dir else generated_models_dir(template_path)
         try:
-            if backend == "phasetracer":
-                result = agent.compile_phasetracer_template(
-                    template,
-                    output_dir=output_dir,
-                    run_smoke=not args.no_smoke,
-                    run_transition_smoke=args.transition_smoke and not args.no_smoke,
-                    phasetracer_root=args.phasetracer_root or "",
-                    linux_runner=_linux_runner(args),
-                    wsl_distro=_wsl_distro(args),
-                    clang_format=not args.no_clang_format,
-                )
-            else:
-                _runtime_python(settings)
-                result = agent.compile_cosmotransitions_template(
-                    template,
-                    output_dir=output_dir,
-                    run_import_check=not args.no_smoke,
-                )
+            result = _compile_template(args, settings, template, output_dir, backend)
         except CompileBlocked as exc:
             raise SystemExit(str(exc)) from exc
         resolved_path = write_resolved_contract_data(validate_contract_template(template, review_required=True).contract, proof_materials_dir(template_path) / "contract_resolved.json")
@@ -551,6 +534,21 @@ def _require_compile_backend(value: str) -> str:
     if backend not in SUPPORTED_COMPILE_BACKENDS:
         raise SystemExit(f"Backend {value!r} is not supported yet. Supported backends: {supported}.")
     return backend
+
+
+def _compile_template(args, settings, template, output_dir, backend):
+    """Shared dispatch for the CLI and the legacy JSON skill wrapper."""
+    agent = PhaseTransitionAgent(settings)
+    if backend == "phasetracer":
+        return agent.compile_phasetracer_template(
+            template, output_dir=output_dir, run_smoke=not args.no_smoke,
+            run_transition_smoke=args.transition_smoke and not args.no_smoke,
+            phasetracer_root=args.phasetracer_root or "", linux_runner=_linux_runner(args),
+            wsl_distro=_wsl_distro(args), clang_format=not args.no_clang_format,
+        )
+    return agent.compile_cosmotransitions_template(
+        template, output_dir=output_dir, run_import_check=not args.no_smoke,
+    )
 
 
 def _reject_phasetracer_only_options_for_cosmotransitions(args: argparse.Namespace, backend: str) -> None:

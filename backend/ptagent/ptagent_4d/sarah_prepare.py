@@ -181,7 +181,8 @@ def prepare_sarah(*, vin_path, parameter_map_path, run_dir, model_source=None, t
     explicit = parameters or {}
     if not isinstance(explicit, dict):
         raise SarahImportError("Parameter overrides must be a JSON object.")
-    unbound = import_sarah_model(vin_path=vin_path, parameter_map_path=parameter_map_path)
+    unbound = import_sarah_model(vin_path=vin_path, parameter_map_path=parameter_map_path,
+                                thermal_metadata_path=thermal_metadata_path)
     radiation_keys = {"num_boson_dof", "num_fermion_dof"}
     known = set(unbound.unresolved_parameters) | set(unbound.parameter_values) | set(unbound.derived_parameters) | set(unbound.block_references) | {"Q", "renormScaleSq"} | radiation_keys
     if set(explicit)-known:

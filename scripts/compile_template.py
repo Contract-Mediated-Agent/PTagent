@@ -39,7 +39,11 @@ def main() -> int:
     from ptagent.ptagent_4d.artifact_layout import generated_models_dir, proof_materials_dir
     from ptagent.ptagent_4d.backends import COMPARE_BACKENDS_SENTINEL
     from ptagent.ptagent_4d.compiler import CompileBlocked
-    from ptagent.ptagent_4d.template_contract import contract_to_model_ir, compile_contract_template, validate_contract_template, write_resolved_contract_data
+    from ptagent.ptagent_4d.template_contract import contract_to_model_ir, validate_contract_template, write_resolved_contract_data
+    from ptagent.ptagent_4d.cli import (
+        _compile_template, _require_compile_backend,
+        _reject_phasetracer_only_options_for_cosmotransitions, _linux_runner, _wsl_distro,
+    )
     from ptagent.ptagent_4d.user_guidance import build_user_guidance_markdown
     settings = get_settings()
 
@@ -128,28 +132,7 @@ def main() -> int:
         return 0
 
     try:
-        if backend == "phasetracer":
-            from ptagent.ptagent_4d.phasetracer_backend import compile_phasetracer_template
-
-            result = compile_phasetracer_template(
-                template,
-                settings,
-                output_dir=output_dir,
-                run_smoke=not args.no_smoke,
-                run_transition_smoke=args.transition_smoke and not args.no_smoke,
-                phasetracer_root=_phasetracer_root(args, settings),
-                linux_runner=_linux_runner(args),
-                wsl_distro=_wsl_distro(args),
-                clang_format=not args.no_clang_format,
-            )
-        else:
-            _runtime_python(settings)
-            result = compile_contract_template(
-                template,
-                settings,
-                output_dir=output_dir,
-                run_import_check=not args.no_smoke,
-            )
+        result = _compile_template(args, settings, template, output_dir, backend)
     except CompileBlocked as exc:
         raise SystemExit(str(exc)) from exc
     print(
@@ -170,67 +153,6 @@ def main() -> int:
         )
     )
     return 0
-
-
-def _require_compile_backend(value: str) -> str:
-    from ptagent.ptagent_4d.backends import SUPPORTED_COMPILE_BACKENDS, normalize_compile_backend, supported_backends_text
-
-    backend = normalize_compile_backend(value)
-    supported = supported_backends_text()
-    if not backend:
-        raise SystemExit(
-            "No compile backend specified. Please choose one explicitly with "
-            "`--backend cosmotransitions` or `--backend phasetracer`. "
-            f"Supported backends: {supported}."
-        )
-    if backend not in SUPPORTED_COMPILE_BACKENDS:
-        raise SystemExit(f"Backend {value!r} is not supported yet. Supported backends: {supported}.")
-    return backend
-
-
-def _reject_phasetracer_only_options_for_cosmotransitions(args: argparse.Namespace, backend: str) -> None:
-    if backend != "cosmotransitions":
-        return
-    supplied: list[str] = []
-    if args.phasetracer_root:
-        supplied.append("--phasetracer-root")
-    if args.linux_runner:
-        supplied.append("--linux-runner")
-    if args.wsl_distro:
-        supplied.append("--wsl-distro")
-    if args.transition_smoke:
-        supplied.append("--transition-smoke")
-    if args.no_clang_format:
-        supplied.append("--no-clang-format")
-    if supplied:
-        options = ", ".join(supplied)
-        raise SystemExit(f"PhaseTracer-only option(s) {options} are only valid with --backend phasetracer. Remove them or choose `--backend phasetracer`.")
-
-
-def _runtime_python(settings) -> None:
-    from ptagent.ptagent_4d.config import ConfigurationError, require_configured_runtime_python
-
-    try:
-        require_configured_runtime_python(settings)
-    except ConfigurationError as exc:
-        raise SystemExit(str(exc)) from exc
-
-
-def _phasetracer_root(args: argparse.Namespace, settings) -> str:
-    from ptagent.ptagent_4d.config import ConfigurationError, require_configured_phasetracer_root
-
-    try:
-        return require_configured_phasetracer_root(settings, args.phasetracer_root)
-    except ConfigurationError as exc:
-        raise SystemExit(str(exc)) from exc
-
-
-def _linux_runner(args: argparse.Namespace) -> str:
-    return args.linux_runner or "native"
-
-
-def _wsl_distro(args: argparse.Namespace) -> str:
-    return args.wsl_distro or ""
 
 
 if __name__ == "__main__":

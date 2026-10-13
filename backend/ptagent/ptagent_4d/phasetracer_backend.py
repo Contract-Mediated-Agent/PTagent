@@ -134,6 +134,21 @@ def _compare_detailed_smoke_output(
         point = parsed[index]
         scalars = _dict(point.get("scalars"))
         vectors = _dict(point.get("vectors"))
+        for name in ("T", "V0", "V"):
+            if name not in scalars:
+                errors.append(f"point {index} missing {name}")
+        for name, value in scalars.items():
+            if not math.isfinite(value):
+                errors.append(f"point {index} {name} is non-finite")
+        for name, values in vectors.items():
+            if not all(math.isfinite(value) for value in values):
+                errors.append(f"point {index} {name} is non-finite")
+        if "T" in scalars:
+            _append_scalar_error(errors, f"point {index} T", temperature, scalars["T"], abs_tol=abs_tol, rel_tol=rel_tol)
+        if "phi" not in vectors:
+            errors.append(f"point {index} missing phi")
+        else:
+            _append_vector_error(errors, f"point {index} phi", phi, vectors["phi"], abs_tol=abs_tol, rel_tol=rel_tol)
         if "V0" in scalars:
             _append_scalar_error(errors, f"point {index} V0", evaluate_contract_v0(contract, phi, temperature), scalars["V0"], abs_tol=abs_tol, rel_tol=rel_tol)
         if compare_total and "V" in scalars:
@@ -161,6 +176,8 @@ def _compare_detailed_smoke_output(
             "fermion_dofs": _fermion_dofs(contract),
         }
         for name, expected in expected_vectors.items():
+            if expected and name not in vectors:
+                errors.append(f"point {index} missing {name}")
             if name in vectors:
                 _append_vector_error(
                     errors,
@@ -2195,17 +2212,6 @@ def _fermion_dofs(contract: dict[str, Any]) -> list[float]:
         else:
             values.extend([float(spec["dof"])] * len(_list(_dict(spec["matrix"]).get("basis"))))
     return values
-
-
-def _aligned_thermal_mass_exprs(contract: dict[str, Any], kind: str, *, required: bool) -> list[str]:
-    exprs: list[str] = []
-    for spec in _aligned_thermal_mass_specs(contract, kind, required=required):
-        if spec["source"] != "direct":
-            raise CompileBlocked(
-                f"PhaseTracer {kind} thermal masses include matrix row {spec['name']!r}; use structured thermal specs instead."
-            )
-        exprs.append(str(spec["expr"]))
-    return exprs
 
 
 def _aligned_thermal_mass_specs(contract: dict[str, Any], kind: str, *, required: bool) -> list[dict[str, Any]]:

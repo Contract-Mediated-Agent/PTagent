@@ -200,7 +200,7 @@ def _thermal_matrix_for_sector(
     sector: SarahMassSector,
     model: SarahImportedModel,
 ) -> list[list[str]]:
-    if sector.kind not in {"scalar", "gauge"} or not model.thermal_result:
+    if sector.kind not in {"scalar", "gauge"} or not model.thermal_ready:
         return []
     mappings = model.thermal_result.get("sector_mappings", {}).get(sector.kind, [])
     mapping = next(
@@ -293,6 +293,8 @@ def _referenced_parameter_names(model: SarahImportedModel) -> set[str]:
     names: set[str] = set(model.unresolved_parameters)
     expressions = [model.tree_potential, model.extra_polynomial, *model.dsb_minimum.values()]
     expressions.extend(entry for sector in model.mass_sectors for row in sector.matrix for entry in row)
+    for key in ("scalar_pi_over_t2", "gauge_longitudinal_pi_over_t2"):
+        expressions.extend(str(entry) for row in (model.thermal_result or {}).get(key, []) for entry in row)
     from .safe_expression import parse_safe_expression
 
     for expression in expressions:

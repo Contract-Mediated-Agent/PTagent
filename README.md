@@ -76,14 +76,17 @@ operations are blocked in `operation_blockers`.
 
 Python and CosmoTransitions are reported separately:
 
-- Python must be usable for the requested workflow.
+- Python 3.11 or newer must be usable for the requested workflow. The gate
+  imports dependencies to detect missing packages and broken installations.
 - CosmoTransitions is required for 4D CosmoTransitions compile/check/run
   operations.
 - PhaseTracer is optional until PhaseTracer compilation, backend comparison, or
   generated PhaseTracer model checks are requested.
   On Windows, Linux-style roots such as `/home/user/src/PhaseTracer` are
   validated inside installed WSL distributions.
-- `import-sarah` requires `defusedxml`, but does not require Wolfram or SARAH.
+- `import-sarah` requires `numpy`, `sympy`, and `defusedxml`, but does not
+  require Wolfram or SARAH. `prepare-sarah` also renders a review graph using
+  `matplotlib`.
 - `export-sarah` requires an existing SARAH installation and `wolframscript`.
   PTagent locates SARAH in Wolfram/Mathematica package directories automatically;
   if absent, it reports the missing dependency and asks you to install it.
@@ -100,6 +103,12 @@ python3 -m pip install -r requirements.txt
 If Homebrew Python reports `externally-managed-environment`, use a conda
 environment or another user-managed Python instead of forcing system-wide
 installation.
+
+The gate reports current-interpreter and configured-runtime dependencies
+separately in `python_modules`. PDF inputs need at least one working PDF reader;
+Markdown/TeX and SARAH imports do not. Backend comparison evaluates generated
+CosmoTransitions models in the configured runtime, even when the skill itself
+runs under a different Python. No packages are installed by the gate.
 
 ## Examples
 

@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import hashlib
-import importlib.util
 import json
 import re
+import subprocess
 import textwrap
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -16,6 +16,7 @@ from .compiler import CompileBlocked, CompileResult, compile_usage_instructions
 from .config import ConfigurationError, Settings, require_configured_phasetracer_root, require_configured_runtime_python
 from .phasetracer_runner import run_phasetracer_smoke
 from .smoke_output import parse_detailed_smoke_output
+from ._model_probe import evaluate_vtot, load_model
 
 
 BACKEND_COMPARE_ABS_TOL = 1e-8
@@ -121,7 +122,8 @@ def compare_backends_template(
     if not smoke_result.ok:
         raise CompileBlocked(f"Generated PhaseTracer project failed cross-backend smoke check: {smoke_result.status}\n{smoke_result.stderr or smoke_result.stdout}")
     contract_reference_status = compare_phasetracer_smoke_output(contract, smoke_result.stdout)
-    python_model_status, comparison_points = _compare_phasetracer_smoke_output_to_python_model_details(contract, python_result.model_path, smoke_result.stdout)
+    python_model_status, comparison_points = _compare_phasetracer_smoke_output_to_python_model_details(
+        contract, python_result.model_path, smoke_result.stdout, runtime_python=settings.runtime_python)
     warnings = list(python_result.warnings) + list(phasetracer_result.warnings)
     if smoke_result.stderr.strip():
         warnings.append("PhaseTracer smoke emitted stderr output.")
@@ -280,6 +282,7 @@ def compare_phasetracer_smoke_output_to_python_model(
     *,
     abs_tol: float = BACKEND_COMPARE_ABS_TOL,
     rel_tol: float = BACKEND_COMPARE_REL_TOL,
+    runtime_python: str | Path | None = None,
 ) -> str:
     status, _points = _compare_phasetracer_smoke_output_to_python_model_details(
         contract,
@@ -287,6 +290,7 @@ def compare_phasetracer_smoke_output_to_python_model(
         stdout,
         abs_tol=abs_tol,
         rel_tol=rel_tol,
+        runtime_python=runtime_python,
     )
     return status
 
@@ -298,6 +302,7 @@ def _compare_phasetracer_smoke_output_to_python_model_details(
     *,
     abs_tol: float = BACKEND_COMPARE_ABS_TOL,
     rel_tol: float = BACKEND_COMPARE_REL_TOL,
+    runtime_python: str | Path | None = None,
 ) -> tuple[str, list[dict[str, Any]]]:
     """Compare a generated CosmoTransitions Python model to PhaseTracer smoke output.
 
@@ -306,13 +311,15 @@ def _compare_phasetracer_smoke_output_to_python_model_details(
     cross-backend referee.
     """
     _ = contract
-    model = load_generated_python_model(Path(python_model_path))
     detailed = parse_detailed_smoke_output(stdout)
     indices = sorted(detailed)
     errors: list[str] = []
     comparison_points: list[dict[str, Any]] = []
     if not indices:
         raise CompileBlocked("PhaseTracer/Python-model numerical comparison failed: no PTAGENT_POINT smoke output found; regenerate and run the current run_model.cpp.")
+    model = None if runtime_python else load_generated_python_model(Path(python_model_path))
+    runtime_values = (_evaluate_in_runtime(runtime_python, Path(python_model_path), detailed)
+                      if runtime_python else {})
     for index in indices:
         point_location = _point_location_from_smoke(detailed.get(index))
         if point_location is None:
@@ -328,8 +335,9 @@ def _compare_phasetracer_smoke_output_to_python_model_details(
         if "V" not in scalars:
             errors.append(f"missing smoke point {index} V")
             continue
-        cpp_value = float(scalars["V"])
-        py_value = evaluate_python_model_vtot(model, phi, temperature, include_radiation=True)
+        cpp_value = _finite_float(scalars["V"])
+        py_value = (runtime_values[str(index)] if runtime_python
+                    else evaluate_python_model_vtot(model, phi, temperature, include_radiation=True))
         abs_diff = abs(float(py_value) - float(cpp_value))
         rel_diff = abs_diff / max(abs(float(py_value)), abs(float(cpp_value)), 1.0)
         comparison_points.append(
@@ -363,6 +371,31 @@ def _compare_phasetracer_smoke_output_to_python_model_details(
     if errors:
         raise CompileBlocked("PhaseTracer/Python-model numerical comparison failed: " + "; ".join(errors[:8]))
     return f"python-model comparison ok ({len(indices)} points, abs_tol={abs_tol:g}, rel_tol={rel_tol:g})", comparison_points
+
+
+def _evaluate_in_runtime(runtime_python, model_path, detailed):
+    points = []
+    for index, point in sorted(detailed.items()):
+        location = _point_location_from_smoke(point)
+        if location is not None:
+            phi, temperature = location
+            points.append({"index": index, "phi": phi, "T": temperature})
+    request = {"model_path": str(model_path.resolve()), "points": points}
+    try:
+        result = subprocess.run(
+            [str(Path(runtime_python).expanduser()), str(Path(__file__).with_name("_model_probe.py"))],
+            input=json.dumps(request, allow_nan=False), capture_output=True, text=True,
+            encoding="utf-8", timeout=120, check=False,
+        )
+        if result.returncode:
+            raise CompileBlocked(f"Configured Python comparison failed ({runtime_python}): {result.stderr or result.stdout}")
+        values = json.loads(result.stdout)
+        expected = {str(point["index"]) for point in points}
+        if not isinstance(values, dict) or set(values) != expected:
+            raise ValueError("incomplete runtime comparison response")
+        return {key: _finite_float(value) for key, value in values.items()}
+    except (OSError, subprocess.TimeoutExpired, TypeError, ValueError) as exc:
+        raise CompileBlocked(f"Configured Python comparison failed ({runtime_python}): {exc}") from exc
 
 
 def _write_backend_compare_reports(result: BackendCompareResult) -> None:
@@ -460,24 +493,17 @@ def _format_compare_number(value: Any) -> str:
 
 
 def load_generated_python_model(model_path: Path) -> Any:
-    path = model_path.resolve()
-    module_name = f"_ptagent_python_model_{hashlib.sha256(str(path).encode('utf-8')).hexdigest()[:16]}"
-    spec = importlib.util.spec_from_file_location(module_name, path)
-    if spec is None or spec.loader is None:
-        raise CompileBlocked(f"Could not import generated Python model from {path}.")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    if not hasattr(module, "build_model"):
-        raise CompileBlocked(f"Generated Python model {path} has no build_model() function.")
     try:
-        return module.build_model(run_tc=False, print_tc=False)
-    except TypeError:
-        return module.build_model()
+        return load_model(model_path)
+    except (ImportError, OSError, ValueError) as exc:
+        raise CompileBlocked(str(exc)) from exc
 
 
 def evaluate_python_model_vtot(model: Any, phi: list[float], temperature: float, *, include_radiation: bool = True) -> float:
-    value = model.Vtot(np.asarray(phi, dtype=float), np.asarray(float(temperature), dtype=float), include_radiation=include_radiation)
-    return _finite_float(np.asarray(value, dtype=float).item())
+    try:
+        return evaluate_vtot(model, phi, temperature, include_radiation=include_radiation)
+    except ValueError as exc:
+        raise CompileBlocked(str(exc)) from exc
 
 
 def _point_location_from_smoke(point: dict[str, Any] | None) -> tuple[list[float], float] | None:
@@ -488,7 +514,7 @@ def _point_location_from_smoke(point: dict[str, Any] | None) -> tuple[list[float
     phi = vectors.get("phi")
     if "T" not in scalars or not isinstance(phi, list):
         return None
-    return [float(value) for value in phi], float(scalars["T"])
+    return [_finite_float(value) for value in phi], _finite_float(scalars["T"])
 
 
 def _python_model_raddof(model: Any) -> float:
@@ -523,6 +549,7 @@ def _append_scalar_error(
     abs_tol: float,
     rel_tol: float,
 ) -> None:
+    expected, actual = _finite_float(expected), _finite_float(actual)
     abs_err = abs(float(expected) - float(actual))
     scale = max(abs(float(expected)), abs(float(actual)), 1.0)
     rel_err = abs_err / scale

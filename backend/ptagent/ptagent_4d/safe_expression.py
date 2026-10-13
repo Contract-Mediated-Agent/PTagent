@@ -12,6 +12,20 @@ class SafeExpressionError(ValueError):
     """Raised when an imported expression is outside PTagent's safe grammar."""
 
 
+def expressions_equivalent(left: str, right: str) -> bool:
+    """Check imported scalar expressions, failing closed when not provable."""
+    try:
+        import sympy as sp
+
+        left_expr = parse_safe_expression(left)
+        right_expr = parse_safe_expression(right)
+        if left_expr.python == right_expr.python:
+            return True
+        return bool(sp.simplify(sp.sympify(left_expr.python) - sp.sympify(right_expr.python)) == 0)
+    except Exception:
+        return False
+
+
 _ALLOWED_FUNCTIONS = {
     "abs": abs,
     "cos": None,

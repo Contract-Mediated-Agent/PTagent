@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from .safe_expression import SafeExpressionError, parse_safe_expression
+from .safe_expression import expressions_equivalent as _expressions_equivalent
 
 
 class ThermalMetadataError(ValueError):
@@ -227,14 +228,3 @@ def _matrices_equivalent(left: list[list[str]], right: list[list[str]]) -> bool:
             if sp.simplify(sp.sympify(expression) - sp.sympify(right[row_index][column_index])) != 0:
                 return False
     return True
-
-
-def _expressions_equivalent(left: str, right: str) -> bool:
-    if left == right:
-        return True
-    try:
-        import sympy as sp
-
-        return bool(sp.simplify(sp.sympify(left) - sp.sympify(right)) == 0)
-    except Exception:
-        return False

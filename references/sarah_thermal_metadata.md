@@ -97,3 +97,10 @@ two-doublet models are tested using actual SARAH 4.14.5 exports.
 When the loaded model already supplies complete `PTagent...` companion
 variables, the legacy metadata interface is retained. Ordinary `.vin` import
 without thermal metadata also retains its existing partial-import behavior.
+
+Direct metadata imports obey the same sector-closure rule: scalar and gauge
+thermal matrices must not mix a mapped mass sector with another sector or an
+unmapped mode. Duplicate/overlapping mappings are blocked. Nonzero off-block
+entries require a merged source mass sector; they are never dropped by taking
+independent submatrices. Such an import remains inspectable, but its thermal
+data cannot authorize resummed compilation.

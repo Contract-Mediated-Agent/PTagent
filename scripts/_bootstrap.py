@@ -52,8 +52,8 @@ def _bundled_backend_candidates() -> list[Path]:
     skills_root = skill_dir.parent
     return _unique_candidates(
         [
-            skills_root / "ptagent" / "backend",
             skill_dir / "backend",
+            skills_root / "ptagent" / "backend",
             skills_root / "ptagent-4d" / "backend",
             skills_root / "ptagent-3deft" / "backend",
         ]
@@ -100,8 +100,9 @@ def _require_project_root(value: str | Path, source: str) -> Path:
 
 def _prepend_sys_path(root: Path) -> None:
     root_str = str(root)
-    if root_str not in sys.path:
-        sys.path.insert(0, root_str)
+    if root_str in sys.path:
+        sys.path.remove(root_str)
+    sys.path.insert(0, root_str)
 
 
 def _unique_candidates(candidates: list[Path]) -> list[Path]:

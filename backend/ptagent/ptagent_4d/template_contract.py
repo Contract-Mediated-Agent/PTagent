@@ -1540,12 +1540,6 @@ def _named_matrix_entry_block_map(matrix_block: str, heading_prefix: str) -> dic
     return expressions
 
 
-def _parse_boson_matrices(section_text: str) -> list[dict[str, Any]]:
-    """Backward-compatible private alias used by older callers/tests."""
-
-    return _parse_mass_matrices(section_text)
-
-
 def _parse_matrix_entries(
     matrix_block: str,
     headers: list[str],

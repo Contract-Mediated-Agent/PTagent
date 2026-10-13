@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass
 
 from .formula_extractor import classify_formula_kind
-from .latex_display import clean_latex_evidence_for_markdown
+from .latex_display import clean_latex_evidence_for_markdown, normalize_alignment_rows as _normalize_alignment_rows
 from .schemas import FormulaRecord
 
 
@@ -149,43 +149,6 @@ def _clean_formula_block(value: str, *, env: str) -> str:
     if not already_aligned and (env.startswith(("align", "gather", "eqnarray")) or r"\\" in text or "&" in text):
         text = r"\begin{aligned} " + text + r" \end{aligned}"
     return clean_latex_evidence_for_markdown(text, max_chars=1800)
-
-
-def _normalize_alignment_rows(text: str) -> str:
-    rows = _split_rows(text)
-    cleaned: list[str] = []
-    for row in rows:
-        row = row.strip()
-        row = re.sub(r"(?<!\\)&", " & ", row)
-        row = re.sub(r"\s+", " ", row).strip()
-        if row:
-            cleaned.append(row)
-    return r" \\ ".join(cleaned) if len(cleaned) > 1 else (cleaned[0] if cleaned else "")
-
-
-def _split_rows(text: str) -> list[str]:
-    rows: list[str] = []
-    start = 0
-    depth = 0
-    index = 0
-    while index < len(text):
-        char = text[index]
-        if char == "{":
-            depth += 1
-        elif char == "}":
-            depth = max(0, depth - 1)
-        elif text.startswith(r"\\", index) and depth == 0:
-            rows.append(text[start:index])
-            index += 2
-            if index < len(text) and text[index] == "[":
-                end = text.find("]", index)
-                if end != -1:
-                    index = end + 1
-            start = index
-            continue
-        index += 1
-    rows.append(text[start:])
-    return rows
 
 
 def _strip_comments(text: str) -> str:

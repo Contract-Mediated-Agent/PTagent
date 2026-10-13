@@ -567,17 +567,6 @@ def _rule_rows(value: Any, *, source: str) -> list[dict[str, str]]:
     return rows
 
 
-def _selected_effective_potential(output: dict[str, Any], contract: dict[str, Any]) -> tuple[str, str] | None:
-    terms = _selected_effective_potential_terms(output, contract)
-    if terms:
-        if len(terms) == 1:
-            return terms[0][2], terms[0][1]
-        expression = " + ".join(f"({term})" for _order, _label, term in terms)
-        label = "+".join(label for _order, label, _term in terms)
-        return expression, label
-    return None
-
-
 def _selected_effective_potential_terms(output: dict[str, Any], contract: dict[str, Any]) -> list[tuple[str, str, str]]:
     potentials = output.get("effective_potential_phase_tracer")
     if not potentials:

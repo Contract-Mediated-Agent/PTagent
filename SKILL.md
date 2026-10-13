@@ -62,6 +62,12 @@ flag. The `ready` field only means baseline 4D extraction can start; before any
 specific operation, inspect `operation_blockers[<operation>]` and continue only
 when that list is empty.
 
+Check `4d_extract_pdf` for PDF inputs, `sarah_prepare` for deterministic SARAH
+preparation, and `review_graph` before rendering the contract graph. Inspect
+`python_modules.current` and `python_modules.runtime` for failed imports and
+their diagnostics. A working skill interpreter does not imply a working
+CosmoTransitions runtime (or vice versa). Use Python 3.11 or newer.
+
 If `ready` is false, stop. Do not continue to extraction, question mode, compilation, or code generation
 until the reported baseline blockers are resolved. A true `ready` value does
 not override a nonempty blocker list for the requested operation.

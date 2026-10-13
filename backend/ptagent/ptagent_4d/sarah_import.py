@@ -14,6 +14,7 @@ from defusedxml import ElementTree as SafeElementTree
 from defusedxml.common import DefusedXmlException
 
 from .safe_expression import SafeExpressionError, evaluate_safe_expression, parse_safe_expression
+from .safe_expression import expressions_equivalent as _expressions_equivalent
 from .slha import SlhaDocument, parse_slha_file
 
 
@@ -779,17 +780,6 @@ def _require_real_symmetric_sectors(sectors: list[SarahMassSector]) -> None:
                     )
 
 
-def _expressions_equivalent(left: str, right: str) -> bool:
-    if left == right:
-        return True
-    try:
-        import sympy as sp
-
-        return bool(sp.simplify(sp.sympify(left) - sp.sympify(right)) == 0)
-    except Exception:
-        return False
-
-
 def _validate_thermal_sector_mappings(
     thermal_result: dict[str, Any],
     sectors: list[SarahMassSector],
@@ -810,6 +800,12 @@ def _validate_thermal_sector_mappings(
             for row in rows
             if isinstance(row, dict) and str(row.get("sector", ""))
         }
+        named_rows = [str(row.get("sector", "")) for row in rows if isinstance(row, dict)]
+        if len(set(named_rows)) != len(named_rows):
+            blockers.append(f"thermal_mapping_duplicate_sector:{kind}")
+        owners: dict[int, str] = {}
+        coefficient_key = "scalar_pi_over_t2" if kind == "scalar" else "gauge_longitudinal_pi_over_t2"
+        coefficients = thermal_result.get(coefficient_key, [])
         for sector in (item for item in sectors if item.kind == kind):
             mapping = by_sector.get(sector.name)
             if not mapping:
@@ -817,13 +813,28 @@ def _validate_thermal_sector_mappings(
                 continue
             indices = mapping.get("indices")
             if not isinstance(indices, list) or len(indices) != len(sector.matrix) or any(
-                not isinstance(index, int) or index < 0 for index in indices
+                type(index) is not int or index < 0 for index in indices
             ):
                 blockers.append(f"thermal_mapping_invalid:{sector.name}")
                 continue
             basis_size = len(thermal_result.get("scalar_basis" if kind == "scalar" else "gauge_basis", []))
             if len(set(indices)) != len(indices) or any(index >= basis_size for index in indices):
                 blockers.append(f"thermal_mapping_out_of_range:{sector.name}")
+                continue
+            if any(index in owners for index in indices):
+                blockers.append(f"thermal_mapping_overlap:{sector.name}")
+            owners.update({index: sector.name for index in indices})
+            if len(coefficients) != basis_size or any(len(row) != basis_size for row in coefficients):
+                blockers.append(f"thermal_matrix_shape_invalid:{kind}")
+                continue
+            # A separate eigenproblem cannot retain mixing with another block
+            # (or with an unmapped mode). Require a merged source mass sector.
+            outside = set(range(basis_size)) - set(indices)
+            if any(
+                not _expressions_equivalent(str(coefficients[row][column]), "0")
+                for row in indices for column in outside
+            ):
+                blockers.append(f"thermal_cross_sector_mixing:{sector.name}:merge_mass_sectors_required")
     thermal_result["ready"] = not blockers
 
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from .latex_display import clean_latex_evidence_for_markdown
+from .latex_display import clean_latex_evidence_for_markdown, normalize_alignment_rows as _normalize_alignment_rows
 from .schemas import FormulaRecord, SourceSpan
 
 
@@ -217,43 +217,6 @@ def _needs_aligned_wrapper(text: str) -> bool:
     if re.search(r"\\begin\{(?:aligned|array|pmatrix|bmatrix|matrix)\}", text):
         return False
     return "&" in text or r"\\" in text
-
-
-def _normalize_alignment_rows(text: str) -> str:
-    rows = _split_rows(text)
-    cleaned: list[str] = []
-    for row in rows:
-        row = row.strip()
-        row = re.sub(r"(?<!\\)&", " & ", row)
-        row = re.sub(r"\s+", " ", row).strip()
-        if row:
-            cleaned.append(row)
-    return r" \\ ".join(cleaned) if len(cleaned) > 1 else (cleaned[0] if cleaned else "")
-
-
-def _split_rows(text: str) -> list[str]:
-    rows: list[str] = []
-    start = 0
-    depth = 0
-    index = 0
-    while index < len(text):
-        char = text[index]
-        if char == "{":
-            depth += 1
-        elif char == "}":
-            depth = max(0, depth - 1)
-        elif text.startswith(r"\\", index) and depth == 0:
-            rows.append(text[start:index])
-            index += 2
-            if index < len(text) and text[index] == "[":
-                end = text.find("]", index)
-                if end != -1:
-                    index = end + 1
-            start = index
-            continue
-        index += 1
-    rows.append(text[start:])
-    return rows
 
 
 def _line_ranges(text: str) -> list[tuple[int, int, str]]:

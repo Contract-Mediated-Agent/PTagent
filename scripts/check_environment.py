@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import json
 import shlex
 import subprocess
@@ -13,6 +12,8 @@ sys.dont_write_bytecode = True
 
 PHASETRACER_DOWNLOAD_BRANCH = "main"
 PHASETRACER_DOWNLOAD_URL = "https://github.com/PhaseTracer/PhaseTracer.git"
+CURRENT_MODULES = ("numpy", "sympy", "scipy", "matplotlib", "pypdf", "pymupdf", "pdfplumber", "defusedxml", "cosmoTransitions")
+RUNTIME_MODULES = ("numpy", "scipy", "sympy", "cosmoTransitions")
 
 
 def main() -> int:
@@ -27,6 +28,12 @@ def main() -> int:
     parser.add_argument("--sarah-model", default="", help="Optional SARAH model name/directory, including the documentation placeholder path.")
     args = parser.parse_args()
 
+    if sys.version_info < (3, 11):
+        print(json.dumps({"ready": False, "current_python_ok": False,
+                          "missing": ["python_current"],
+                          "advisories": ["PTagent requires Python 3.11 or newer; select a supported interpreter."]}))
+        return 1
+
     from _bootstrap import ensure_ptagent_backend
 
     project_root = ensure_ptagent_backend(args.project_root)
@@ -40,15 +47,16 @@ def main() -> int:
 
     current_python = Path(sys.executable).resolve()
     current_python_ok = True
-    current_has_cosmo = importlib.util.find_spec("cosmoTransitions") is not None
-    current_has_defusedxml = importlib.util.find_spec("defusedxml") is not None
+    current_modules = _probe_modules(current_python, CURRENT_MODULES)
+    current_has_cosmo = current_modules["cosmoTransitions"]["ok"]
+    current_has_defusedxml = current_modules["defusedxml"]["ok"]
     runtime_ok, runtime_message = _check_python_executable(settings.runtime_python)
-    runtime_has_cosmo, runtime_cosmo_message = _check_python_module(
-        settings.runtime_python,
-        "cosmoTransitions",
-        python_ready=runtime_ok,
-        python_message=runtime_message,
-    )
+    runtime_modules = ({name: current_modules[name] for name in RUNTIME_MODULES}
+                       if Path(settings.runtime_python).expanduser().resolve() == current_python
+                       else _probe_modules(settings.runtime_python, RUNTIME_MODULES,
+                                           python_ready=runtime_ok, python_message=runtime_message))
+    runtime_has_cosmo = runtime_modules["cosmoTransitions"]["ok"]
+    runtime_cosmo_message = runtime_modules["cosmoTransitions"]["message"]
 
     explicit_phase_root = str(args.phasetracer_root or "").strip()
     configured_phase_root = explicit_phase_root or str(settings.phasetracer_root or "").strip()
@@ -61,7 +69,7 @@ def main() -> int:
     phasetracer_ready = configured_phase_ok or bool(project_phase_candidates)
 
     wolfram_status = _check_wolfram_and_dralgo()
-    wolfram_ready = bool(wolfram_status["wolframscript_path"])
+    wolfram_ready = bool(wolfram_status.get("wolfram_ready", wolfram_status["dralgo_available"]))
     dralgo_ready = bool(wolfram_status["dralgo_available"])
     sarah_options = {"sarah_root": args.sarah_root, "wolframscript": wolfram_status["wolframscript_path"]}
     if args.sarah_model:
@@ -85,6 +93,8 @@ def main() -> int:
         wolfram_ready=wolfram_ready,
         dralgo_ready=dralgo_ready,
         sarah_ready=sarah_ready,
+        current_modules={name: row["ok"] for name, row in current_modules.items()},
+        runtime_modules={name: row["ok"] for name, row in runtime_modules.items()},
     )
     missing = _missing_components(
         runtime_python_ok=runtime_ok,
@@ -104,6 +114,14 @@ def main() -> int:
         sarah_root=str(sarah_status.get("root") or ""),
     )
     advisories.extend(sarah_status.get("diagnostics", []))
+    for label, modules, python in (("current", current_modules, current_python),
+                                   ("runtime", runtime_modules, settings.runtime_python)):
+        failed = [name for name, row in modules.items() if not row["ok"]]
+        missing.extend(f"{name} ({label})" for name in failed)
+        if failed:
+            command = " ".join(shlex.quote(str(part)) for part in [python, "-m", "pip", "install", *failed])
+            advisories.append(f"Missing or broken imports in {label} Python: {', '.join(failed)}. "
+                              f"After user approval, install in that environment: {command}")
 
     phasetracer_download_dir = project_root / "PhaseTracer"
     payload: dict[str, Any] = {
@@ -115,6 +133,7 @@ def main() -> int:
         "current_python_ok": current_python_ok,
         "current_python_has_cosmoTransitions": current_has_cosmo,
         "current_python_has_defusedxml": current_has_defusedxml,
+        "python_modules": {"current": current_modules, "runtime": runtime_modules},
         "runtime_python": str(settings.runtime_python),
         "runtime_python_configured": settings.runtime_python_configured,
         "runtime_python_check_ok": runtime_ok,
@@ -133,7 +152,8 @@ def main() -> int:
         "phasetracer_download_command": _phasetracer_download_command(project_root),
         "wolfram": {
             "wolframscript_path": wolfram_status["wolframscript_path"],
-            "wolframscript_found": wolfram_ready,
+            "wolframscript_found": bool(wolfram_status["wolframscript_path"]),
+            "wolfram_ready": wolfram_ready,
             "dralgo_available": dralgo_ready,
             "message": wolfram_status["message"],
         },
@@ -208,6 +228,18 @@ def _check_python_module(
     return True, "ok"
 
 
+def _probe_modules(python_path, modules, *, python_ready=True, python_message="ok"):
+    results = {}
+    for module in modules:
+        # Import the same interface used by the PDF reader, not just a package
+        # spec: an installed distribution can still have broken binary imports.
+        import_name = "fitz" if module == "pymupdf" else module
+        ok, message = _check_python_module(python_path, import_name,
+                                          python_ready=python_ready, python_message=python_message)
+        results[module] = {"ok": ok, "message": message}
+    return results
+
+
 def _check_wolfram_and_dralgo() -> dict[str, Any]:
     try:
         from ptagent.ptagent_3deft.environment import check_wolfram_and_dralgo
@@ -215,12 +247,14 @@ def _check_wolfram_and_dralgo() -> dict[str, Any]:
         result = check_wolfram_and_dralgo()
         return {
             "wolframscript_path": result.wolframscript_path,
+            "wolfram_ready": result.ok or "PTAGENT_DRALGO_MISSING" in result.stdout,
             "dralgo_available": result.dralgo_available,
             "message": result.message,
         }
     except Exception as exc:
         return {
             "wolframscript_path": "",
+            "wolfram_ready": False,
             "dralgo_available": False,
             "message": f"{type(exc).__name__}: {exc}",
         }
@@ -236,6 +270,8 @@ def _operation_blockers(
     wolfram_ready: bool,
     dralgo_ready: bool,
     sarah_ready: bool,
+    current_modules: dict[str, bool] | None = None,
+    runtime_modules: dict[str, bool] | None = None,
 ) -> dict[str, list[str]]:
     python_blockers = [] if current_python_ok else ["python_current"]
     xml_blockers = [] if defusedxml_ready else ["defusedxml"]
@@ -245,7 +281,7 @@ def _operation_blockers(
     wolfram_blockers = [] if wolfram_ready else ["wolfram"]
     dralgo_blockers = [] if dralgo_ready else ["dralgo"]
     sarah_blockers = [] if sarah_ready else ["sarah"]
-    return {
+    operations = {
         "4d_extract": python_blockers,
         "sarah_import": python_blockers + xml_blockers,
         "sarah_export": python_blockers + xml_blockers + wolfram_blockers + sarah_blockers,
@@ -266,6 +302,24 @@ def _operation_blockers(
         "3deft_compare_mathematica": python_blockers + wolfram_blockers,
         "3deft_install_dralgo": python_blockers + wolfram_blockers,
     }
+    # Missing optional arguments retain compatibility for external callers of
+    # this helper; main always supplies the actual import-probe results.
+    if current_modules is not None:
+        core = [name for name in ("numpy", "sympy") if not current_modules.get(name, False)]
+        for operation in ("4d_extract", "sarah_import", "sarah_export", "4d_validate", "4d_resolve",
+                          "cosmotransitions_compile", "phasetracer_compile", "compare_backends"):
+            operations[operation] = operations[operation] + core
+    if runtime_modules is not None:
+        missing_runtime = [f"{name} (runtime)" for name in ("numpy", "scipy", "sympy")
+                           if not runtime_modules.get(name, False)]
+        for operation in ("cosmotransitions_compile", "4d_check_model", "4d_run", "compare_backends"):
+            operations[operation] = operations[operation] + missing_runtime
+    pdf_ready = current_modules is None or any(current_modules.get(name, False)
+                                               for name in ("pypdf", "pymupdf", "pdfplumber"))
+    operations["4d_extract_pdf"] = operations["4d_extract"] + ([] if pdf_ready else ["pdf_reader"])
+    operations["review_graph"] = python_blockers + ([] if current_modules is None or current_modules.get("matplotlib", False) else ["matplotlib"])
+    operations["sarah_prepare"] = list(dict.fromkeys(operations["sarah_import"] + operations["review_graph"]))
+    return operations
 
 
 def _missing_components(
