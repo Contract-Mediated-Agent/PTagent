@@ -324,6 +324,8 @@ contract only when its role is clear and it passes physics checks:
 
 - Highest priority: user-provided reference code for the same paper/model,
   source-exact TeX equations, and explicit paper prose near those equations.
+  Cite only source-displayed equation numbers verified as described in
+  `contract_review.md`; extraction ids and TeX block counts are not citations.
 - Medium priority: agent-cleaned formulas with nearby source context and
   consistent symbols.
 - Low priority: PDF/OCR fragments, isolated formula candidates, section headers,

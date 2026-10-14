@@ -219,6 +219,12 @@ policy suggestions), and gray is unavailable/blocked. Never label an agent's
 interpretation or approval as the user's confirmation. A graph is a review
 artifact, not approval to compile or evidence of a completed numerical run.
 
+Use the source document's displayed equation numbers, including section and
+appendix prefixes, in contracts and graphs. Internal formula ids and extraction
+order are never equation numbers. Follow the equation-reference verification
+in `references/contract_review.md`; if unresolved, cite a page or TeX label
+instead of guessing. This applies to every paper, not just a named example.
+
 ## Backend Lookup
 
 Wrapper scripts use this order:

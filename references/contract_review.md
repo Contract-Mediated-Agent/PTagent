@@ -80,6 +80,43 @@ not junctions unless marked. Labels stay outside boxes, smaller than box names.
 
 ## Rendering
 
+### Source Equation Numbers
+
+Use the numbers displayed in the exact source version, not `formula_id`,
+`:codexN`, `:fN`, a PDF block index, or the ordinal position of an equation.
+Section resets, appendices, subequations and explicit tags can change numbering.
+Never infer the numbering from a count of `equation` environments; a style file
+may define the counters. An empty extracted `equation_number` means unresolved,
+not permission to invent one. Check the formula's content and nearby prose as
+well as its number against the source PDF. Keep these citations consistent in
+the contract, evidence notes and graph; do not alter the physics to fix a label.
+
+Every graph label or evidence location containing `Eq.`/`Eqs.`/`Equation(s)`
+and a number requires matching `equation_refs` on that item's evidence record:
+
+```json
+{
+  "file": "input/paper-v2.pdf",
+  "location": "Eq. (3.1), PDF page 7",
+  "equation_refs": [{"number": "3.1", "page": 7}]
+}
+```
+
+`page` is the 1-based PDF page, including front matter, not the printed page
+label. For TeX evidence, a reference may set `verification_file` to a matching
+compiled `.aux` file and `tex_label` to its original label; an explicit
+`\tag{...}` can instead be checked in a `.tex` verification file. Verification
+files are read as data, never executed. Do not compile untrusted TeX just to
+recover numbering; prefer the paper PDF. Record the version and retain the
+actual verification file. The renderer checks number presence/label mapping
+and records its hash; formula association and source-version consistency still
+require review. Supply a record for each cited number (both range endpoints).
+
+When the number cannot be verified, omit `Eq.` and cite a source page, section,
+or literal TeX label with file/line location. Do not block model construction
+solely because a displayed number is unavailable, and do not substitute an
+internal index. Existing unverified graph specs must be corrected before reuse.
+
 Inspect the current Markdown using the installed skill's backend:
 
 ```bash

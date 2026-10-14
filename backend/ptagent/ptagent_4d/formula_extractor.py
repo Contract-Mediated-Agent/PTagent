@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from ..equation_references import NUMBER, explicit_tex_tags
 from .latex_display import clean_latex_evidence_for_markdown, normalize_alignment_rows as _normalize_alignment_rows
 from .schemas import FormulaRecord, SourceSpan
 
@@ -125,7 +126,7 @@ def _formula_from_block(span: SourceSpan, block: dict[str, object], *, index: in
         page_number=span.page_number,
         parser=span.parser or "codex_span_parser",
         heading=span.heading,
-        equation_number=_extract_equation_number(raw),
+        equation_number=_extract_equation_number(raw, allow_printed=str(block.get("env")) == "plain_formula"),
         context=context,
         kind=kind,
         evidence_level="source_inferred" if span.parser.startswith(("pdf", "pdf2md", "paper_md")) else "source_exact",
@@ -199,7 +200,7 @@ def _plain_formula_blocks(text: str, occupied: list[tuple[int, int]]) -> list[di
 def _clean_formula(value: str, *, env: str) -> str:
     text = value.strip()
     text = re.sub(r"\\(?:label|notag|nonumber)\b(?:\{[^{}]*\})?", " ", text)
-    text = re.sub(r"\\tag\{[^{}]*\}", " ", text)
+    text = re.sub(r"\\tag\*?\s*\{[^{}]*\}", " ", text)
     text = re.sub(r"\\\\\s*\[[^\]]+\]", r"\\", text)
     text = _drop_trailing_narrative(text)
     if env.startswith(("align", "gather", "eqnarray")) or _needs_aligned_wrapper(text):
@@ -251,11 +252,15 @@ def _nearby_context(text: str, start: int, end: int, window: int = 420) -> str:
     return re.sub(r"\s+", " ", context).strip()[:900]
 
 
-def _extract_equation_number(raw: str) -> str:
-    tag = re.search(r"\\tag\{([^{}]+)\}", raw)
-    if tag:
-        return tag.group(1).strip()
-    match = re.search(r"\(\s*(\d+(?:\.\d+)*)\s*\)", raw)
+def _extract_equation_number(raw: str, *, allow_printed: bool = False) -> str:
+    tags = explicit_tex_tags(raw)
+    if tags:
+        return tags[0] if len(tags) == 1 else ""
+    if not allow_printed:
+        return ""
+    # A function argument such as V(0) is not a displayed equation number.
+    # Ambiguous PDF layouts stay unnumbered until checked against the page.
+    match = re.search(r"(?:\n|[^\S\n]{2,})\(\s*(" + NUMBER + r")\s*\)\s*$", raw)
     return match.group(1) if match else ""
 
 

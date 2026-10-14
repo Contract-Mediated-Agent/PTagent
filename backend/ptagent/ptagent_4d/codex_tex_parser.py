@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from ..equation_references import explicit_tex_tags
 from .formula_extractor import classify_formula_kind
 from .latex_display import clean_latex_evidence_for_markdown, normalize_alignment_rows as _normalize_alignment_rows
 from .schemas import FormulaRecord
@@ -141,7 +142,7 @@ def _iter_math_blocks(text: str) -> list[dict[str, object]]:
 def _clean_formula_block(value: str, *, env: str) -> str:
     text = value.strip()
     text = re.sub(r"\\(?:label|notag|nonumber)\b(?:\{[^{}]*\})?", " ", text)
-    text = re.sub(r"\\tag\{[^{}]*\}", " ", text)
+    text = re.sub(r"\\tag\*?\s*\{[^{}]*\}", " ", text)
     text = re.sub(r"\\qquad|\\quad|\\,", " ", text)
     text = re.sub(r"\\\\\s*\[[^\]]+\]", r"\\", text)
     text = _normalize_alignment_rows(text)
@@ -254,8 +255,8 @@ def _nearby_context(text: str, start: int, end: int, window: int = 420) -> str:
 
 
 def _extract_equation_number(raw: str) -> str:
-    match = re.search(r"\\tag\{([^{}]+)\}", raw)
-    return match.group(1).strip() if match else ""
+    tags = explicit_tex_tags(raw)
+    return tags[0] if len(tags) == 1 else ""
 
 
 def _useful_formula(value: str) -> bool:

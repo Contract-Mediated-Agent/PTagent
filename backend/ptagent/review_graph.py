@@ -7,6 +7,8 @@ import textwrap
 from pathlib import Path
 from typing import Any
 
+from .equation_references import cited_equation_numbers, verify_equation_reference
+
 COLORS = {
     "source": ("#DFF2E7", "#2F8A61", "#17613E"),
     "derived": ("#DCEBFA", "#337DBD", "#174D78"),
@@ -94,6 +96,7 @@ def validate_spec(template: Path, spec: dict[str, Any]) -> dict[str, Any]:
     ids: set[str] = set()
     evidence_hashes: dict[str, str] = {}
     bindings: dict[str, Any] = {}
+    equation_checks: dict[str, list[dict[str, Any]]] = {}
     refs: list[str] = []
     parents: dict[str, list[str]] = {}
 
@@ -111,6 +114,8 @@ def validate_spec(template: Path, spec: dict[str, Any]) -> dict[str, Any]:
         if required and not records:
             raise ValueError(f"{item['id']}: evidence file and location are required")
         paths = []
+        verified: set[str] = set()
+        checks: list[dict[str, Any]] = []
         for record in records:
             if not record.get("file") or not record.get("location"):
                 raise ValueError(f"{item['id']}: evidence requires file and location")
@@ -122,6 +127,28 @@ def validate_spec(template: Path, spec: dict[str, Any]) -> dict[str, Any]:
                 raise ValueError(f"Missing evidence file: {path}")
             evidence_hashes[str(path)] = sha256(path)
             paths.append(path)
+            record_numbers: set[str] = set()
+            for reference in record.get("equation_refs", []):
+                proof = Path(reference.get("verification_file", record["file"])).expanduser()
+                if not proof.is_absolute():
+                    proof = template.parent / proof
+                proof = proof.resolve()
+                if not proof.is_file():
+                    raise ValueError(f"Missing equation verification file: {proof}")
+                number = verify_equation_reference(reference, proof)
+                evidence_hashes[str(proof)] = sha256(proof)
+                record_numbers.add(number)
+                checks.append({**reference, "verification_file": str(proof)})
+            missing = cited_equation_numbers(record["location"]) - record_numbers
+            if missing:
+                raise ValueError(f"{item['id']}: unverified equation numbers {sorted(missing)}; "
+                                 "provide equation_refs or cite a source page/TeX label instead")
+            verified.update(record_numbers)
+        missing = cited_equation_numbers(item["label"]) - verified
+        if missing:
+            raise ValueError(f"{item['id']}: unverified equation numbers {sorted(missing)} in label")
+        if checks:
+            equation_checks[item["id"]] = checks
         return paths
 
     source_by_id = {}
@@ -194,6 +221,7 @@ def validate_spec(template: Path, spec: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("Unrepresented review sections: " + ", ".join(missing))
     return {"template_sha256": snapshot["template_sha256"], "engine": snapshot["engine"],
             "bindings": bindings, "evidence_sha256": evidence_hashes,
+            "equation_checks": equation_checks,
             "review_sections": snapshot["review_sections"],
             "note": "Bindings checked; evidence labels and scientific interpretations require agent review."}
 
