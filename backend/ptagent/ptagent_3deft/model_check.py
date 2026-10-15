@@ -1,16 +1,48 @@
 from __future__ import annotations
 
 import os
+import json
+import math
 import subprocess
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
 from .contract import ThreeDeftBlocked
+from ..runtime_metadata import collect_software_versions
 
 
 USER_CONFIG_ENV = "PTAGENT_CONFIG"
 PHASETRACER_ROOT_ENV = "PTAGENT_PHASETRACER_ROOT"
+DEFAULT_ATOL = 1.0e-9
+DEFAULT_RTOL = 1.0e-8
+
+
+def validate_tolerances(atol: float, rtol: float) -> None:
+    if not all(math.isfinite(value) and value >= 0 for value in (atol, rtol)):
+        raise ThreeDeftBlocked("atol and rtol must be finite, nonnegative numbers.")
+
+
+def json_safe_numbers(value):
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if isinstance(value, dict):
+        return {key: json_safe_numbers(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [json_safe_numbers(item) for item in value]
+    return value
+
+
+def finite_comparison(actual: float | None, expected: float | None, *, atol: float, rtol: float) -> dict:
+    validate_tolerances(atol, rtol)
+    finite = all(value is not None and math.isfinite(value) for value in (actual, expected))
+    difference = abs(actual - expected) if finite else None
+    limit = atol + rtol * max(abs(actual), abs(expected), 1.0) if finite else None
+    valid_error = finite and math.isfinite(difference) and math.isfinite(limit)
+    return {"actual": actual if actual is not None and math.isfinite(actual) else None,
+            "expected": expected if expected is not None and math.isfinite(expected) else None,
+            "finite": finite, "abs_diff": difference if valid_error else None, "limit": limit if valid_error else None,
+            "ok": bool(valid_error and difference <= limit)}
 
 
 @dataclass(frozen=True)
@@ -22,6 +54,8 @@ class ModelRunResult:
     ran: bool
     stdout_preview: str
     stderr_preview: str
+    validation_status: str = "generated_unverified"
+    report_path: Path | None = None
 
 
 def configure_build_run_phasetracer_model(
@@ -32,26 +66,65 @@ def configure_build_run_phasetracer_model(
     configure_only: bool = False,
     no_run: bool = False,
     timeout_seconds: int = 300,
+    atol: float | None = None,
+    rtol: float | None = None,
 ) -> ModelRunResult:
     """Configure, build, and optionally run the generated PhaseTracer run_model target."""
 
-    project = Path(project_dir)
+    project = Path(project_dir).resolve()
+    metadata_path = project / "metadata.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8")) if metadata_path.exists() else {}
+    tolerances = metadata.get("numerical_validation", {})
+    atol = tolerances.get("atol", DEFAULT_ATOL) if atol is None else atol
+    rtol = tolerances.get("rtol", DEFAULT_RTOL) if rtol is None else rtol
+    validate_tolerances(atol, rtol)
     if not (project / "CMakeLists.txt").exists():
         raise ThreeDeftBlocked(f"Generated PhaseTracer project is missing CMakeLists.txt: {project}")
     root = resolve_phasetracer_root(phasetracer_root)
-    build = Path(build_dir) if build_dir else project / "build"
+    build = Path(build_dir).resolve() if build_dir else project / "build"
     build.mkdir(parents=True, exist_ok=True)
 
+    supports_cli_tolerances = bool(metadata.get("numerical_validation"))
+    # An interrupted or failed rebuild must not leave the previous success current.
+    report_path = project / "model_check.json"
+    pending = {"schema": "ptagent.3deft.model_check.v1", "status": "generated_unverified",
+               "reason": "New verification attempt; no successful numerical run recorded yet.",
+               "atol": atol, "rtol": rtol, "configured": False, "built": False, "ran": False}
+    report_path.write_text(json.dumps(pending, indent=2), encoding="utf-8")
+    if metadata:
+        metadata.setdefault("numerical_validation", {}).update(
+            status="generated_unverified", report_path=str(report_path))
+        metadata_path.write_text(json.dumps(json_safe_numbers(metadata), indent=2, allow_nan=False), encoding="utf-8")
+
     _run(["cmake", "-S", str(project), "-B", str(build), f"-DPHASETRACER_ROOT={root}"], timeout_seconds=timeout_seconds)
+    pending["configured"] = True
+    report_path.write_text(json.dumps(pending, indent=2), encoding="utf-8")
     if configure_only:
-        return _result(project, build, configured=True, built=False, ran=False)
+        return _result(project, build, configured=True, built=False, ran=False, report_path=report_path)
 
     _run(["cmake", "--build", str(build), "--target", "run_model"], timeout_seconds=timeout_seconds)
+    pending["built"] = True
+    report_path.write_text(json.dumps(pending, indent=2), encoding="utf-8")
     if no_run:
-        return _result(project, build, configured=True, built=True, ran=False)
+        return _result(project, build, configured=True, built=True, ran=False, report_path=report_path)
 
     exe = _run_model_executable(build)
-    completed = _run([str(exe)], timeout_seconds=timeout_seconds)
+    command = [str(exe)]
+    if supports_cli_tolerances:
+        command += ["--tolerances", str(atol), str(rtol)]
+    completed = _run(command, timeout_seconds=timeout_seconds, require_success=False)
+    report = check_reference_output(metadata, completed.stdout, atol=atol, rtol=rtol)
+    if completed.returncode not in (0, 3) or (completed.returncode == 3 and report["status"] == "passed"):
+        report["status"] = "failed"
+    report.update(configured=True, built=True, ran=True, returncode=completed.returncode,
+                  stdout=completed.stdout, stderr=completed.stderr, command=command,
+                  phasetracer_root=str(root), timeout_seconds=timeout_seconds)
+    report["software_versions"] = collect_software_versions(phasetracer_root=root)
+    report_path = project / "model_check.json"
+    report_path.write_text(json.dumps(report, indent=2, allow_nan=False), encoding="utf-8")
+    metadata.setdefault("numerical_validation", {}).update(
+        status=report["status"], atol=atol, rtol=rtol, report_path=str(report_path))
+    metadata_path.write_text(json.dumps(json_safe_numbers(metadata), indent=2, allow_nan=False), encoding="utf-8")
     return _result(
         project,
         build,
@@ -60,7 +133,39 @@ def configure_build_run_phasetracer_model(
         ran=True,
         stdout=completed.stdout,
         stderr=completed.stderr,
+        validation_status=report["status"],
+        report_path=report_path,
     )
+
+
+def check_reference_output(metadata: dict, stdout: str, *, atol: float, rtol: float) -> dict:
+    """Check against metadata, not the executable's self-reported success/expected values."""
+    validate_tolerances(atol, rtol)
+    pairs = {
+        "DirectV3D": "v3d_reference_value_python",
+        "DirectPrefactor": "prefactor_reference_value_python",
+        "V": "reference_value_python",
+        "FullPathVDiagnostic": "full_pipeline_reference_value_python",
+    }
+    report = {"schema": "ptagent.3deft.model_check.v1", "status": "generated_unverified",
+              "atol": atol, "rtol": rtol, "comparisons": {},
+              "full_path_layer": "generated_runtime_vs_python_runtime_not_independent_dralgo",
+              "downstream_policy": "Do not use an unverified/failed model for production phase scans."}
+    if not metadata.get("reference_point_valid"):
+        report["reason"] = "No finite valid reference point; generation is not numerical verification."
+        return report
+    values = {}
+    for line in stdout.splitlines():
+        tokens = line.split()
+        if len(tokens) == 2 and tokens[0].startswith("Reference."):
+            try:
+                values[tokens[0].split(".", 1)[1]] = float(tokens[1])
+            except ValueError:
+                pass
+    for label, key in pairs.items():
+        report["comparisons"][label] = finite_comparison(values.get(label), metadata.get(key), atol=atol, rtol=rtol)
+    report["status"] = "passed" if all(row["ok"] for row in report["comparisons"].values()) else "failed"
+    return report
 
 
 def resolve_phasetracer_root(override: str | Path | None = None) -> Path:
@@ -126,6 +231,8 @@ def _result(
     ran: bool,
     stdout: str = "",
     stderr: str = "",
+    validation_status: str = "generated_unverified",
+    report_path: Path | None = None,
 ) -> ModelRunResult:
     return ModelRunResult(
         project_dir=project,
@@ -135,10 +242,12 @@ def _result(
         ran=ran,
         stdout_preview=stdout[:2000],
         stderr_preview=stderr[:2000],
+        validation_status=validation_status,
+        report_path=report_path,
     )
 
 
-def _run(command: list[str], *, timeout_seconds: int) -> subprocess.CompletedProcess[str]:
+def _run(command: list[str], *, timeout_seconds: int, require_success: bool = True) -> subprocess.CompletedProcess[str]:
     try:
         completed = subprocess.run(
             command,
@@ -152,7 +261,7 @@ def _run(command: list[str], *, timeout_seconds: int) -> subprocess.CompletedPro
         raise ThreeDeftBlocked(f"Required executable was not found while running: {' '.join(command)}") from exc
     except subprocess.TimeoutExpired as exc:
         raise ThreeDeftBlocked(f"Command timed out after {timeout_seconds} seconds: {' '.join(command)}") from exc
-    if completed.returncode != 0:
+    if require_success and completed.returncode != 0:
         details = "\n".join(part for part in (completed.stdout.strip(), completed.stderr.strip()) if part)
         raise ThreeDeftBlocked(f"Command failed with code {completed.returncode}: {' '.join(command)}" + (f"\n{details}" if details else ""))
     return completed

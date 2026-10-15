@@ -3,6 +3,8 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import math
+import operator
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,6 +22,21 @@ from .mathematica_expr import (
 
 CONTRACT_MARKER = "<!-- PTAGENT 3DEFT contract_v1 -->"
 CONTRACT_SCHEMA = "ptagent.3deft.contract.v1"
+PHYSICAL_SPEC_DIGEST_SCHEMA = "ptagent.3deft.physical_spec.v1"
+
+# Exclusions are path-specific: a physical parameter named source_hash is still bound.
+_DIGEST_EXCLUDED_KEYS = {
+    (): {"source_hash", "physical_spec_hash", "marker_present"},
+    ("phasetracer",): {"approve_compile", "approval_record", "approval_spec_hash", "output_dir"},
+    ("runner",): {"wolframscript_path"},
+}
+_DIGEST_EXPRESSION_KEYS = {
+    "expression", "expression_or_interpolator", "beta_expression", "potential_term",
+    "potential_prefactor", "v3d_expression", "v_phase_tracer_expression",
+    "four_d_to_three_d_matching_scale", "four_d_to_three_d_matching_scale_variation",
+    "mu_3_scale", "mu_3_us_scale", "test_value", "input_scale", "input_scale_gev",
+    "reference_temperature", "reference_fields", "reference_expected_v", "field_scale", "temperature_scale",
+}
 
 RESOLVED_CONTRACT_NAME = "three_deft_contract_resolved.json"
 VALIDATION_NAME = "three_deft_validation.json"
@@ -232,7 +249,11 @@ class ValidationReport:
             return False
         phasetracer = self.contract.get("phasetracer", {})
         approval = _as_bool(phasetracer.get("approve_compile"))
-        return bool(approval and not _missing(phasetracer.get("approval_record")))
+        return bool(
+            approval
+            and looks_like_compile_approval_text(phasetracer.get("approval_record"))
+            and phasetracer.get("approval_spec_hash") == physical_spec_hash(self.contract)
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -465,7 +486,7 @@ def build_contract_template(
             "| temperature_scale | none | reviewed | Use PhaseTracer base default temperature scale. |",
             "| field_3d_to_phasetracer_map | field_i_3d=phi[i]/sqrt(T) | reviewed | Default 3DEFT map used by the generated renderer. |",
             "| potential_prefactor_policy | V(phi,T)=T*V3D(fields_3d,T) | reviewed | Default conversion from 3D EFT potential to PhaseTracer energy density. |",
-            "| symmetry_hook | none | ASK_USER | Mandatory PhaseTracer apply_symmetry() policy. Agent recommendation: none unless the reviewed source/V3D has an explicitly intended field-reflection equivalence. Supported: none, z2_reflection. |",
+            "| symmetry_hook | none | ASK_USER | Mandatory PhaseTracer apply_symmetry() policy. Here none is an unconfirmed placeholder. Recommend z2_reflection with the detected minimal sign-flip generators when available, preserving explicit prior choices. Review loop, thermal, counterterm, gauge, and matching contributions for symmetry-breaking terms before user confirmation; use none when no applicable equivalence is established. Supported: none, z2_reflection. |",
             "| symmetry_rules | none | ASK_USER | Mandatory confirmation with symmetry_hook. Required when symmetry_hook=z2_reflection; use semicolon-separated field groups from 3D Fields, e.g. `s` or `phi,s`. |",
             "| low_t_phase_guesses | none | ASK_USER | Mandatory confirmation for get_low_t_phases(). Agent recommendation: none unless numeric low-T phase hints are intentionally supplied. |",
             "",
@@ -490,6 +511,7 @@ def build_contract_template(
             "| backend | phasetracer | The only backend supported by 3DEFT v1. |",
             "| approve_compile | false | Must become true only after explicit user approval. |",
             "| approval_record | ASK_USER | Written by the approve command after the user says they reviewed the merged contract and approve PhaseTracer generation. |",
+            "| approval_spec_hash | ASK_USER | SHA-256 of the normalized physical specification, recorded by approve; model changes require fresh review and approval. |",
             f"| output_dir | {model_name}_phasetracer | Independent 3DEFT output folder. |",
             "| reference_fields | ASK_USER | Comma-separated field values in 3D field order. |",
             "| reference_temperature | ASK_USER | Test temperature for generated V(phi,T). |",
@@ -537,7 +559,46 @@ def parse_contract(markdown: str) -> dict[str, Any]:
         "runner": _key_value_table(markdown, "DRalgo Runner"),
         "phasetracer": _key_value_table(markdown, "PhaseTracer"),
     }
+    contract["physical_spec_hash"] = physical_spec_hash(contract)
     return contract
+
+
+def physical_spec_hash(contract: dict[str, Any]) -> str:
+    """Hash parsed content, not Markdown layout or approval/runtime bookkeeping.
+
+    Mapping keys are sorted, row order is retained, and surrounding
+    whitespace is removed. Known scalar expressions use ASTs (not algebraic
+    simplification), so operator spacing and redundant parentheses are harmless.
+    All remaining parsed cells, including provenance/review cells, are bound
+    conservatively. Source files are not read or monitored by this digest.
+    """
+    def normalize(value: Any, path: tuple[str, ...] = ()) -> Any:
+        if isinstance(value, dict):
+            excluded = _DIGEST_EXCLUDED_KEYS.get(path, set())
+            return {
+                key: normalize(item, (*path, str(value.get("key", key)) if key == "value" else key))
+                for key, item in value.items() if key not in excluded
+            }
+        if isinstance(value, list):
+            return [normalize(item, (*path, "[]")) for item in value]
+        if isinstance(value, str):
+            text = value.strip()
+            if path and path[-1] in _DIGEST_EXPRESSION_KEYS:
+                try:
+                    return {"expression_ast": ast.dump(ast.parse(text, mode="eval"), include_attributes=False)}
+                except SyntaxError:
+                    try:
+                        tree = ast.parse(text, mode="exec")
+                        if len(tree.body) == 1 and isinstance(tree.body[0], ast.Assign):
+                            return {"assignment_ast": ast.dump(tree, include_attributes=False)}
+                    except SyntaxError:
+                        pass
+            return text
+        return value
+
+    payload = {"schema": PHYSICAL_SPEC_DIGEST_SCHEMA, "contract": normalize(contract)}
+    encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 def validate_contract_template(markdown: str, *, require_compile_approval: bool = False) -> ValidationReport:
@@ -713,7 +774,7 @@ def build_review_gate_report(report: ValidationReport, *, template_path: str, ga
         gate = "dralgo_run"
     if gate == "phasetracer_compile":
         title = "PhaseTracer Compile Approval"
-        approval_cell = "`PhaseTracer.approve_compile=true` and `PhaseTracer.approval_record=<exact user sentence>`"
+        approval_cell = "`PhaseTracer.approve_compile=true`, `PhaseTracer.approval_record=<exact user sentence>`, and a matching `PhaseTracer.approval_spec_hash` recorded by `approve`"
         next_action = (
             "`python -m ptagent --ptagent-engine 3deft approve --template <merged-contract> "
             "--gate phasetracer_compile --user-approval \"<exact user sentence>\"`, "
@@ -747,6 +808,8 @@ def build_review_gate_report(report: ValidationReport, *, template_path: str, ga
         gate_open = report.ready_for_dralgo_run
 
     blocking = list(report.compile_blocking_issues if gate == "phasetracer_compile" else report.dralgo_blocking_issues)
+    approval_issues = [issue for issue in blocking if _issue_stage(issue) == "gate"]
+    blocking = [issue for issue in blocking if _issue_stage(issue) != "gate"]
     lines = [
         f"# {title}",
         "",
@@ -779,6 +842,10 @@ def build_review_gate_report(report: ValidationReport, *, template_path: str, ga
         lines.append("")
         return "\n".join(lines)
 
+    if approval_issues:
+        lines.extend(["## Approval Needs Renewal", ""])
+        lines.extend(f"- `{issue.field_key}`: {issue.message}" for issue in approval_issues)
+        lines.append("")
     lines.extend(
         [
             "## User Review",
@@ -983,7 +1050,11 @@ def _validate_input_parameters(contract: dict[str, Any], issues: list[Validation
             if _missing(row.get(key)):
                 issues.append(_issue(f"{prefix}.{key}", "required_input_parameter_metadata", f"Input parameter {name or index} needs {key}."))
         if not _is_number(row.get("test_value")):
-            issues.append(_issue(f"{prefix}.test_value", "invalid_test_value", "test_value must be numeric for reference evaluation."))
+            issues.append(_issue(f"{prefix}.test_value", "invalid_test_value", f"Input parameter {name or index}: test_value must be finite and numeric (not NaN or Inf)."))
+        elif _is_scale_control_input_row(row) and float(row["test_value"]) <= 0:
+            issues.append(_issue(f"{prefix}.test_value", "invalid_scale", "Scale-control test_value must be strictly positive."))
+        if not _is_scale_control_input_row(row) and not _missing(row.get("input_scale")):
+            _validate_scale_expression_symbols(contract, f"{prefix}.input_scale", row["input_scale"], issues)
 
 
 def _validate_rg_matching(contract: dict[str, Any], issues: list[ValidationIssue]) -> None:
@@ -996,6 +1067,9 @@ def _validate_rg_matching(contract: dict[str, Any], issues: list[ValidationIssue
         rg.get("four_d_to_three_d_matching_scale", ""),
         issues,
     )
+    variation = rg.get("four_d_to_three_d_matching_scale_variation", "")
+    if not _missing(variation) and _norm(variation) not in {"not_applicable", "none"}:
+        _validate_scale_expression_symbols(contract, "rg_matching.four_d_to_three_d_matching_scale_variation", variation, issues)
     if not _evidence_reviewed_status(rg.get("scale_policy_review_status")):
         issues.append(
             _issue(
@@ -1065,7 +1139,7 @@ def _validate_rg_beta_functions(contract: dict[str, Any], issues: list[Validatio
         )
     for index, row in enumerate(inputs):
         if not _is_number(row.get("input_scale")):
-            issues.append(_issue(f"input_parameters[{index}].input_scale", "invalid_runtime_rg_input_scale", "4D running needs numeric input_scale values."))
+            issues.append(_issue(f"input_parameters[{index}].input_scale", "invalid_runtime_rg_input_scale", "4D running needs finite numeric input_scale values (not NaN or Inf)."))
 
     rows = contract.get("rg_beta_functions", [])
     if not rows or _rows_have_placeholders(rows):
@@ -1185,7 +1259,7 @@ def _validate_3d_consumption(contract: dict[str, Any], issues: list[ValidationIs
                     _issue(
                         f"three_d_fields[{index}].normalization",
                         "unsupported_field_normalization",
-                        "Field normalization must be a reviewed enum such as canonical_3d, identity, or phase_tracer_times_sqrt_t; do not store raw formulas like phi[i]/sqrt(T).",
+                        "Unsupported field normalization. Supported enums are canonical_3d (phi/sqrt(T)), identity, and phase_tracer_times_sqrt_t (phi*sqrt(T)). Extra temperature-dependent wave-function factors such as Z(T) are not implemented and block compilation; do not replace them with a leading-order map or store raw formulas here.",
                     )
                 )
             if _missing(row.get("dralgo_background_symbol")):
@@ -1221,7 +1295,7 @@ def _validate_3d_consumption(contract: dict[str, Any], issues: list[ValidationIs
             _issue(
                 "three_d_consumption.field_normalization",
                 "unsupported_field_normalization",
-                "field_normalization must be a reviewed enum such as canonical_3d or identity; the detailed per-field map belongs in 3D Fields.",
+                "Unsupported field normalization: use a reviewed canonical_3d, identity, or phase_tracer_times_sqrt_t enum. Additional factors such as Z(T) are not implemented and block compilation; no leading-order fallback is allowed. The per-field map belongs in 3D Fields.",
             )
         )
     _validate_3d_consumption_symbols(contract, issues)
@@ -1644,6 +1718,14 @@ def _validate_phasetracer_interface(contract: dict[str, Any], issues: list[Valid
         return
 
     by_key = {str(row.get("key", "")).strip(): row for row in rows if not _missing(row.get("key"))}
+    for key in ("field_scale", "temperature_scale"):
+        value = by_key.get(key, {}).get("value")
+        if not _missing(value) and _norm(value) not in {"none", "default", "not_applicable"}:
+            if not _is_number(value) or float(value) <= 0:
+                issues.append(_issue(f"phasetracer_interface.{key}", "invalid_scale", f"{key} must be finite and strictly positive, or none for the backend default."))
+    field_map = str(by_key.get("field_3d_to_phasetracer_map", {}).get("value", ""))
+    if re.search(r"\b(?:Z\w*\s*[\[(]|wave[_ -]?function|field[_ -]?renormalization)", field_map, flags=re.IGNORECASE):
+        issues.append(_issue("phasetracer_interface.field_3d_to_phasetracer_map", "unsupported_field_normalization", "Additional field-renormalization factors such as Z(T) are not supported by the 3DEFT renderer. Compilation is blocked; do not silently use the leading-order field map."))
     for key in PHASETRACER_INTERFACE_KEYS:
         row = by_key.get(key)
         if row is None:
@@ -1722,11 +1804,27 @@ def _validate_phasetracer_policy(contract: dict[str, Any], issues: list[Validati
         issues.append(_issue("phasetracer.backend", "unsupported_backend", "3DEFT v1 supports only backend=phasetracer."))
     for key in ("reference_fields", "reference_temperature"):
         _require_value(issues, pt, key, f"phasetracer.{key}")
-    if not _is_number(pt.get("reference_temperature")):
-        issues.append(_issue("phasetracer.reference_temperature", "invalid_reference_temperature", "reference_temperature must be numeric."))
+    if not _is_number(pt.get("reference_temperature")) or float(pt["reference_temperature"]) <= 0:
+        issues.append(_issue("phasetracer.reference_temperature", "invalid_reference_temperature", "3DEFT reference_temperature must be finite and strictly positive (T > 0)."))
     reference_fields = _csv(pt.get("reference_fields", ""))
     if not reference_fields or not all(_is_number(item) for item in reference_fields):
-        issues.append(_issue("phasetracer.reference_fields", "invalid_reference_fields", "reference_fields must be comma-separated numbers."))
+        issues.append(_issue("phasetracer.reference_fields", "invalid_reference_fields", "reference_fields must be comma-separated finite numbers (not NaN or Inf)."))
+    expected = pt.get("reference_expected_v")
+    if not _missing(expected) and _norm(expected) not in {"none", "not_applicable", "not applicable", "n/a", "na", "no"} and not _is_number(expected):
+        issues.append(_issue("phasetracer.reference_expected_v", "invalid_reference_expected_v", "reference_expected_v must be finite and numeric, or not_applicable."))
+    _validate_compile_approval(contract, issues, require_compile_approval=require_compile_approval)
+
+
+def ensure_compile_approval(contract: dict[str, Any]) -> None:
+    """Recheck consent and the live digest, including for direct dictionary callers."""
+    issues: list[ValidationIssue] = []
+    _validate_compile_approval(contract, issues, require_compile_approval=True)
+    if issues:
+        raise ThreeDeftBlocked("; ".join(f"{issue.field_key}: {issue.message}" for issue in issues))
+
+
+def _validate_compile_approval(contract: dict[str, Any], issues: list[ValidationIssue], *, require_compile_approval: bool) -> None:
+    pt = contract.get("phasetracer", {})
     if require_compile_approval and not _as_bool(pt.get("approve_compile")):
         issues.append(_issue("phasetracer.approve_compile", "compile_approval_required", "Explicit PhaseTracer compile approval is required."))
     if _as_bool(pt.get("approve_compile")):
@@ -1747,6 +1845,12 @@ def _validate_phasetracer_policy(contract: dict[str, Any], issues: list[Validati
                     "PhaseTracer approval_record must contain the user's explicit review and approval sentence.",
                 )
             )
+        approved_hash = str(pt.get("approval_spec_hash", "")).strip()
+        current_hash = physical_spec_hash(contract)
+        if not re.fullmatch(r"[0-9a-f]{64}", approved_hash):
+            issues.append(_issue("phasetracer.approval_spec_hash", "missing_approval_spec_hash", "Compile approval is not bound to a physical specification. Review the current merged contract and run approve with fresh explicit user confirmation."))
+        elif approved_hash != current_hash:
+            issues.append(_issue("phasetracer.approval_spec_hash", "stale_compile_approval", f"Physical specification changed since approval (approved {approved_hash}, current {current_hash}). Review the changed parameters, expressions, mappings, scales/orders, and generation options, then approve again; the old approval cannot be reused."))
 
 
 def _issue(field_key: str, code: str, message: str) -> ValidationIssue:
@@ -1760,6 +1864,10 @@ def _issue_blocks_dralgo_run(issue: ValidationIssue) -> bool:
 def _issue_stage(issue: ValidationIssue) -> str:
     key = issue.field_key
     code = issue.code
+    if code in {"compile_approval_required", "missing_approval_record", "invalid_approval_record", "missing_approval_spec_hash", "stale_compile_approval"}:
+        return "gate"
+    if code == "invalid_scale" and key.startswith("rg_matching."):
+        return "pre_dralgo"
     if key == "model_policy.source_model_audit_status":
         return "pre_dralgo"
     if key.startswith(("schema", "marker", "model_policy")):
@@ -1787,8 +1895,6 @@ def _issue_stage(issue: ValidationIssue) -> str:
         return "compile"
     if key.startswith("phasetracer."):
         return "compile"
-    if code in {"compile_approval_required"}:
-        return "gate"
     return "pre_dralgo"
 
 
@@ -1990,7 +2096,7 @@ def _packet_recommendation(packet: QuestionPacket) -> str:
     if packet.key == "phasetracer.v3d_mapping":
         return "use the pipeline default map field_i_3d=phi[i]/sqrt(T) and V(phi,T)=T*V3D unless the contract is deliberately edited later."
     if packet.key == "phasetracer.hooks":
-        return "recommend `symmetry_hook=none` unless the reviewed V3D/source shows an intended field-reflection equivalence; if all terms are even in a field, report it only as a candidate and ask the user before using `z2_reflection`. Keep low-T guesses `none` unless numeric phase hints are intentionally supplied."
+        return "preserve explicit prior symmetry choices. When sign-flip generators are detected, recommend `symmetry_hook=z2_reflection` with those minimal generators in `symmetry_rules`, including correlated field flips. Treat tree-level generators as candidates: check loop, thermal, counterterm, gauge, and matching terms for symmetry breaking before user confirmation. When no equivalence is established, report the missing evidence or specific breaking term instead of a blanket disabled recommendation. Keep low-T guesses `none` unless numeric phase hints are intentionally supplied."
     if packet.key == "phasetracer.reference_point":
         return "use fields around 100 and T around 100 for a stable reference point when the model scale allows it; otherwise ask the user for a source-program test point."
     recommendations = [_question_recommendation(issue) for issue in packet.issues]
@@ -2345,6 +2451,60 @@ def _validate_scale_expression_symbols(
                 f"Unmapped symbol(s): {', '.join(unmapped)}.",
             )
         )
+    _validate_scale_numeric_domain(contract, field_key, normalized, issues)
+
+
+def _static_scale_value(node: ast.AST, env: dict[str, float]) -> float:
+    """Evaluate only simple known scale arithmetic; unresolved running inputs defer to runtime."""
+    if isinstance(node, ast.Constant) and type(node.value) in {int, float}:
+        return float(node.value)
+    if isinstance(node, ast.Name):
+        return env[node.id]
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+        value = _static_scale_value(node.operand, env)
+        return -value if isinstance(node.op, ast.USub) else value
+    operations = {ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul, ast.Div: operator.truediv, ast.Pow: operator.pow}
+    if isinstance(node, ast.BinOp) and type(node.op) in operations:
+        left = _static_scale_value(node.left, env)
+        right = _static_scale_value(node.right, env)
+        return operations[type(node.op)](left, right)
+    if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id in {"math", "np"}:
+        return env[node.attr]
+    if isinstance(node, ast.Call) and not node.keywords:
+        functions = {"sqrt": math.sqrt, "log": math.log, "exp": math.exp, "sin": math.sin, "cos": math.cos, "tan": math.tan, "abs": abs, "fabs": abs, "pow": pow, "min": min, "max": max}
+        name = node.func.id if isinstance(node.func, ast.Name) else ""
+        if isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name) and node.func.value.id in {"math", "np"}:
+            name = node.func.attr
+        if name in functions:
+            return functions[name](*[_static_scale_value(arg, env) for arg in node.args])
+    raise KeyError("unresolved scale expression")
+
+
+def _validate_scale_numeric_domain(contract: dict[str, Any], field_key: str, expression: str, issues: list[ValidationIssue]) -> None:
+    tree = ast.parse(expression, mode="eval")
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Constant) and isinstance(node.value, (int, float)) and not _is_number(node.value)) or (
+            isinstance(node, ast.Name) and node.id.casefold() in {"nan", "inf", "infinity"}
+        ):
+            issues.append(_issue(field_key, "invalid_scale", "Scale expression contains a non-finite value (NaN or Inf)."))
+            return
+    env = {"pi": math.pi, "EulerGamma": 0.5772156649015329}
+    temperature = contract.get("phasetracer", {}).get("reference_temperature")
+    if _is_number(temperature) and float(temperature) > 0:
+        env["T"] = float(temperature)
+    # Do not substitute running masses/couplings at the wrong RG scale.
+    for row in _contract_input_parameters(contract):
+        if str(row.get("name", "")) in {"xi4", "xi_4"} and _is_number(row.get("test_value")):
+            env[str(row["name"])] = float(row["test_value"])
+    try:
+        value = _static_scale_value(tree.body, env)
+    except KeyError:
+        return
+    except (ValueError, TypeError, OverflowError, ZeroDivisionError) as exc:
+        issues.append(_issue(field_key, "invalid_scale", f"Scale expression is outside its numeric domain: {exc}."))
+        return
+    if not _is_number(value) or float(value) <= 0:
+        issues.append(_issue(field_key, "invalid_scale", f"Scale must evaluate to a finite, strictly positive value; got {value!r} at the reference temperature when applicable."))
 
 
 def _scale_expression_rhs(field_key: str, text: str, issues: list[ValidationIssue]) -> str:
@@ -2383,6 +2543,13 @@ def _scale_assignment_lhs(field_key: str) -> set[str]:
 
 
 def _field_normalization_mode(value: Any) -> str:
+    raw = re.sub(r"\s+", "", str(value or "").strip().casefold())
+    if re.fullmatch(r"(?:phi|phase_tracer|phasetracer|pt|1)/sqrt\(t\)", raw):
+        return "phase_tracer_over_sqrt_t"
+    if re.fullmatch(r"(?:phi|phase_tracer|phasetracer|pt)\*sqrt\(t\)|sqrt\(t\)\*(?:phi|phase_tracer|phasetracer|pt)", raw):
+        return "phase_tracer_times_sqrt_t"
+    if any(operator in raw for operator in "*/()[]+"):
+        return "unsupported"
     normalized = re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().casefold()).strip("_")
     return FIELD_NORMALIZATION_VALUES.get(normalized, "unsupported")
 
@@ -2440,17 +2607,25 @@ def _as_bool(value: Any) -> bool | None:
 
 def looks_like_compile_approval_text(text: Any) -> bool:
     normalized = _norm(text)
-    return any(word in normalized for word in APPROVAL_WORDS) and any(word in normalized for word in REVIEW_WORDS)
+    normalized = normalized.replace("\u2019", "'")
+    # Fail closed for refusals, uncertainty, questions, and future/conditional consent.
+    if re.search(r"\b(?:no|not|never|neither|false|cannot|can['\u2019]?t|don['\u2019]?t|doesn['\u2019]?t|didn['\u2019]?t|won['\u2019]?t|haven['\u2019]?t|hasn['\u2019]?t|unapproved|disapprov\w*|reject\w*|refus\w*|withhold\w*|withdr\w*|revok\w*|rescind\w*|den(?:y|ied)|defer\w*|without|pending|if|unless|until|whether|might|maybe|would|could|should|will)\b|[?\uff1f]", normalized):
+        return False
+    if re.search(r"(?:\u4e0d|\u672a|\u6ca1\u6709|\u62d2\u7edd|\u6682\u7f13|\u6682\u4e0d|\u7b49\u5f85|\u5982\u679c|\u82e5|\u5c1a\u672a|\u662f\u5426|\u5c06\u6765)", normalized):
+        return False
+    affirmative = r"(?:^|[.!;,:]\s*|\band\s+)(?:(?:i|we|(?:the\s+)?user)\s+)?(?:(?:have|has|hereby|explicitly|now)\s+)*approve(?:d)?\b"
+    english = bool(re.search(r"\breviewed\b", normalized) and re.search(affirmative, normalized))
+    chinese = any(word in normalized for word in APPROVAL_WORDS[2:]) and any(word in normalized for word in REVIEW_WORDS[2:])
+    return english or chinese
 
 
 def _is_number(value: Any) -> bool:
     if _missing(value):
         return False
     try:
-        float(str(value).strip())
-    except (TypeError, ValueError):
+        return math.isfinite(float(str(value).strip()))
+    except (TypeError, ValueError, OverflowError):
         return False
-    return True
 
 
 def _is_positive_int(value: Any) -> bool:

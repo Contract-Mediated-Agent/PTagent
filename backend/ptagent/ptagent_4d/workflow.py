@@ -227,6 +227,7 @@ class PhaseTransitionAgent:
         *,
         source_path: str = "",
         compile_backend: str = "",
+        phase_tracing: bool | None = None,
     ) -> tuple[ModelIR, ValidationReport, list[dict[str, Any]]]:
         backend = normalize_compile_backend(compile_backend)
         questions = []
@@ -242,15 +243,14 @@ class PhaseTransitionAgent:
             [issue for issue in validation.issues if issue.severity == "error"],
             key=lambda issue: (99 if issue.field_key == "review.approved" else 0, issue.field_key),
         )
-        if blocking:
-            contract = parse_contract(template_markdown)
-            if questions or any(issue.field_key != "review.approved" for issue in blocking):
-                blocking = [issue for issue in blocking if issue.field_key != "review.approved"]
-            packets = build_question_packets(blocking, contract)
-            questions.extend(
-                question_packet_to_dict(packet, contract, compile_backend=backend)
-                for packet in packets
-            )
+        contract = parse_contract(template_markdown)
+        if questions or any(issue.field_key != "review.approved" for issue in blocking):
+            blocking = [issue for issue in blocking if issue.field_key != "review.approved"]
+        packets = build_question_packets(blocking, contract, phase_tracing=phase_tracing)
+        questions.extend(
+            question_packet_to_dict(packet, contract, compile_backend=backend)
+            for packet in packets
+        )
         return ir, validation, questions
 
     def compile_cosmotransitions_template(

@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from .contract import ThreeDeftBlocked, looks_like_compile_approval_text, validate_contract_template, write_resolved_artifacts
+from .contract import ThreeDeftBlocked, looks_like_compile_approval_text, physical_spec_hash, validate_contract_template, write_resolved_artifacts
 from .merge import MERGED_CONTRACT_NAME
 
 
@@ -45,7 +45,9 @@ def approve_contract_gate(
             "Pass --user-approval with the user's review/approval sentence after they inspect the merged contract."
         )
     markdown = template_path.read_text(encoding="utf-8")
-    report = validate_contract_template(markdown)
+    # A fresh explicit approval may replace a stale one, but cannot bypass model blockers.
+    review_markdown = _replace_key_value(markdown, heading=heading, key=key, value="false")
+    report = validate_contract_template(review_markdown)
     if key == "approve_compile":
         blocking = report.compile_blocking_issues
         ready = not blocking
@@ -65,9 +67,19 @@ def approve_contract_gate(
             value=_approval_record(user_approval),
             notes="Explicit user approval text recorded by the approve command.",
         )
+        updated = _replace_or_insert_key_value(
+            updated,
+            heading=heading,
+            key="approval_spec_hash",
+            value=physical_spec_hash(report.contract),
+            notes="Normalized physical specification approved by the user; changes require fresh approval.",
+        )
+    validation = validate_contract_template(updated, require_compile_approval=True)
+    if not validation.ready_for_compile:
+        preview = "; ".join(f"{issue.field_key}: {issue.message}" for issue in validation.compile_blocking_issues[:5])
+        raise ThreeDeftBlocked(f"Cannot record compile approval: {preview}")
     target.write_text(updated, encoding="utf-8")
-    write_resolved_artifacts(target, gate=review_gate)
-    validation = validate_contract_template(target.read_text(encoding="utf-8"), require_compile_approval=True)
+    write_resolved_artifacts(target, gate=review_gate, require_compile_approval=True)
     validation_ok = validation.ready_for_compile
     return ApprovalResult(output_path=target, gate=review_gate, key=key, validation_ok=validation_ok)
 
@@ -114,8 +126,7 @@ def _replace_or_insert_key_value(markdown: str, *, heading: str, key: str, value
 
 def _approval_record(text: str) -> str:
     compact = " ".join(text.strip().split())
-    compact = compact.replace("|", "/")
-    return compact[:240] if compact else "user reviewed and approved"
+    return compact.replace("|", "&#124;")
 
 
 def _find_heading(lines: list[str], heading: str) -> int | None:

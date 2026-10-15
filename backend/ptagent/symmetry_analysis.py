@@ -120,6 +120,29 @@ def format_sign_flip_generators(analysis: SignFlipAnalysis) -> str:
     )
 
 
+def fundamental_domain_fields(groups: list[list[str]], fields: list[str]) -> list[str]:
+    """Choose pivot signs for a fundamental region of a diagonal Z2 subgroup.
+
+    Row reduction over GF(2) selects one sign constraint per independent
+    generator. A simultaneous (h,s) reflection constrains h only, never both.
+    Zero pivot fields stay on the boundary, so no orbit is lost there.
+    """
+    rows = [sum(1 << fields.index(f) for f in set(group)) for group in groups]
+    rank = 0
+    pivots = []
+    for index, field in enumerate(fields):
+        pivot = next((j for j in range(rank, len(rows)) if rows[j] & (1 << index)), None)
+        if pivot is None:
+            continue
+        rows[rank], rows[pivot] = rows[pivot], rows[rank]
+        for j in range(len(rows)):
+            if j != rank and rows[j] & (1 << index):
+                rows[j] ^= rows[rank]
+        rank += 1
+        pivots.append(field)
+    return pivots
+
+
 def _parse_compiler_block(expression: str) -> tuple[dict[str, ast.expr], ast.expr]:
     text = str(expression or "").strip()
     if not text:

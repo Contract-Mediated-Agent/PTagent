@@ -39,6 +39,7 @@ def main() -> int:
     project_root = ensure_ptagent_backend(args.project_root)
 
     from ptagent import get_settings
+    from ptagent.runtime_metadata import collect_software_versions
     from ptagent.ptagent_4d.config import validate_phasetracer_root
     from ptagent.ptagent_4d.sarah_discovery import SarahDiscoveryError, discover_sarah, resolve_sarah_model
 
@@ -134,6 +135,12 @@ def main() -> int:
         "current_python_has_cosmoTransitions": current_has_cosmo,
         "current_python_has_defusedxml": current_has_defusedxml,
         "python_modules": {"current": current_modules, "runtime": runtime_modules},
+        "software_versions": collect_software_versions(
+            runtime_python=settings.runtime_python,
+            phasetracer_root=configured_phase_root,
+            sarah_root=sarah_status.get("root"),
+            wolframscript=wolfram_status["wolframscript_path"],
+        ),
         "runtime_python": str(settings.runtime_python),
         "runtime_python_configured": settings.runtime_python_configured,
         "runtime_python_check_ok": runtime_ok,

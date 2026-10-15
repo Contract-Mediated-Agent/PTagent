@@ -70,6 +70,20 @@ that must identify the newly exposed ambiguity. Final compilation still needs
 explicit approval of the completed contract. Each review includes a graph
 ending at that contract, not a claim that phase-transition calculations ran.
 
+For detected sign symmetries, PTagent proposes PhaseTracer generators or
+CosmoTransitions duplicate removal. Coupled reflections use trajectory
+comparisons instead of pointwise cuts that could erase a physical branch.
+The grouped history is for presentation; numerical Tc/Tn searches retain all
+relative-orientation channels.
+The complete potential and these rules remain subject to review.
+
+The 4D temperature search limit is a separate numerical choice. PTagent explains
+its proposed `Tmax` and requests confirmation before scanning; constructing and
+evaluating the potential does not require scan approval. The numerical field
+step `x_eps` is configurable. 3DEFT compilation approval is bound to the reviewed
+physical specification: changing it requires renewed approval. Generated,
+numerically verified, and failed artifacts are reported separately.
+
 On first use, PTagent checks the local environment before doing heavy work.
 The check reports missing software as advisories and lists exactly which
 operations are blocked in `operation_blockers`.
@@ -109,6 +123,26 @@ separately in `python_modules`. PDF inputs need at least one working PDF reader;
 Markdown/TeX and SARAH imports do not. Backend comparison evaluates generated
 CosmoTransitions models in the configured runtime, even when the skill itself
 runs under a different Python. No packages are installed by the gate.
+
+`requirements.txt` remains the only Python dependency configuration. Its minimum
+versions are installation constraints, not a lock or a claim that every newer
+release has been validated. The environment report's `software_versions` records
+installed distribution versions separately for the current and configured runtime
+interpreters; `python_modules` independently reports whether imports work.
+SARAH import reports also record the importing interpreter's versions in
+`provenance.software_versions`; no numerical runtime is claimed for symbolic import.
+Preparation manifests use the same schema: the former flat package entries now
+live under `software_versions.python.current.distributions`, with the Python
+version under `software_versions.python.current.version`.
+
+External-tool provenance records the selected path and, when available, its
+Git commit and tracked-change status or declared package version. A missing
+version is explicitly `null` with a status such as `path_only`, `not_recorded`,
+or `unavailable`; it is never inferred from a directory name or download branch.
+Wolfram/DRalgo runtime versions can be recorded by callers from the running
+kernel without launching another licensed session. Existing installations remain
+usable without version enforcement. Downloading PhaseTracer `main` does not
+establish reproduction of a particular paper's software version.
 
 ## Examples
 
@@ -192,11 +226,42 @@ python scripts/ptagent_cli.py prepare-sarah \
   --run-dir /path/to/fresh-run
 ```
 
-Numerical parameters and the renormalization scale come only from the source,
-SLHA or explicit JSON. There is no universal benchmark or electroweak baseline.
+When no numerical benchmark is specified, PTagent first recommends the selected
+model's `SPheno.m` `DefaultInputValues`, if available. Reading these example
+inputs does not require running SPheno. `export-sarah` archives the model source;
+for existing exports, pass `--model-source /path/to/model` to `prepare-sarah`.
+The report records the file hash, safely resolved default inputs, MINPAR/EXTPAR
+mapping, boundary/matching relations and parameters designated for tadpole solving.
+This is a source-based proposal, not an automatic spectrum calculation. It does
+not override an explicit benchmark or apply values before review.
+
+The default inputs may still need source-defined parameter conversions, tree
+tadpole solutions and additional SM inputs, a renormalization scale or physical
+prescriptions. PTagent distinguishes these from values actually in `SPheno.m`;
+it does not assume tree and loop parameters coincide. Review the proposed point
+and any missing settings together. Accepted numerical bindings use `--slha` or
+`--parameters` (a JSON object or file) with source-defined names. There is no
+hard-coded THDM point or universal electroweak baseline.
+All supplied numbers must be finite; `Q` and `renormScaleSq` must be positive.
+Negative physical mass-squared parameters and couplings remain allowed.
+
+When inputs are incomplete, the CLI and `sarah_import.json` include one
+`benchmark_request` listing all unresolved quantities, including the scale when
+missing, plus source/SLHA mappings and derived expressions. Preparation also
+writes `proof_materials/spheno_benchmark.json` and presents the source example
+in the question guide. The static reader does not execute Wolfram code or solve
+tadpoles; unsupported/computed defaults are reported rather than guessed.
+Confirm the proposed point and resolve remaining inputs in one response.
+Symbolic import and partial contract generation continue,
+but numerical compilation and phase-transition execution remain blocked until
+the inputs and the reviewed contract are complete.
+
 Generic proposals are Arnold-Espinosa, the intact source spectrum, a separately
 reviewed imported polynomial correction, radiation counts from the retained
-inventory, and no phase filtering or symmetry merging. These are proposals,
+inventory, and backend-specific handling of detected sign-flip symmetries:
+PhaseTracer symmetry generators or a representative field region for
+CosmoTransitions. Check these against the full potential before approval.
+These are proposals,
 not SARAH-mandated physics. Missing thermal data blocks resummation; missing
 parameters block numerical execution. Source/user choices take priority.
 Explicit `--parameters` and `--choices` overrides are recorded; unknown or
@@ -243,6 +308,25 @@ Compile an already reviewed contract:
 ```text
 $ptagent compile /path/to/contract_template.md with PhaseTracer
 ```
+
+Shared CLI commands identify the workflow from the contract's schema/marker
+before considering backend options. Recognized legacy contract filenames remain
+supported. For example, this selects 3DEFT, not 4D:
+
+```bash
+python scripts/ptagent_cli.py compile \
+  --template /path/to/three_deft_contract_merged.md --backend phasetracer
+```
+
+`--backend phasetracer` selects only the output backend. A renamed contract with
+its 4D or 3DEFT marker retains its workflow; ambiguous contracts require
+`--ptagent-engine 4d` or `--ptagent-engine 3deft`. An explicit engine overrides
+automatic detection; `--ptagent-engine auto` uses detection.
+
+The bundled xSM example removes only a duplicate fermion-representation
+assignment and an unused comment, leaving tensor construction and evaluation
+order unchanged. Its source hash therefore changes; regenerate example run
+records for this revision rather than reusing older source-hash records.
 
 ## Repository Layout
 

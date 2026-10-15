@@ -7,6 +7,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from ptagent.runtime_metadata import collect_software_versions
+
 from .sarah_discovery import SarahDiscoveryError, resolve_sarah_model
 
 
@@ -141,6 +143,10 @@ def export_sarah_model(
         "slha": _record(copied_slha) if copied_slha and copied_slha.is_file() else None,
         "driver": _record(driver),
         "companion_exporter": _record(companion),
+        "software_versions": collect_software_versions(
+            sarah_root=root, wolframscript=executable,
+            wolfram_version=_export_wolfram_version(completed.stdout),
+        ),
     }
     if source_directory.is_dir():
         archived = input_dir / "sarah_model"
@@ -152,6 +158,19 @@ def export_sarah_model(
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     manifest["manifest"] = str(manifest_path)
     return manifest
+
+
+def _export_wolfram_version(stdout: str) -> str | None:
+    prefix = "PTAGENT_WOLFRAM_VERSION="
+    for line in stdout.splitlines():
+        if line.startswith(prefix):
+            try:
+                value = json.loads(line[len(prefix):])
+            except ValueError:
+                continue
+            if isinstance(value, str):
+                return value
+    return None
 
 
 def _render_driver(
@@ -172,7 +191,8 @@ def _render_driver(
         )
     return (
         f'SetDirectory["{_wl_path(output_dir)}"];\n'
-        f'Get["{_wl_path(sarah_main)}"];\n'
+        + 'Print["PTAGENT_WOLFRAM_VERSION=" <> ExportString[$Version, "RawJSON"]];\n'
+        + f'Get["{_wl_path(sarah_main)}"];\n'
         + f'SARAH[OutputDirectory] = "{_wl_path(output_dir)}";\n'
         + search_line
         + f'Start["{model}"];\n'

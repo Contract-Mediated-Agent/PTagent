@@ -422,6 +422,11 @@ m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 with open(params_path, 'r', encoding='utf-8') as handle:
     params = json.load(handle)
+numerical = getattr(m, 'NUMERICAL_SETTINGS', {{}})
+if numerical and not numerical.get('Tmax_approved', False):
+    print(json.dumps({{'status': 'waiting_for_Tmax_approval', 'parameters': params,
+                      'summary': m.TMAX_APPROVAL_MESSAGE, 'numerical_settings': numerical}}))
+    raise SystemExit(0)
 if isinstance(params, dict) and params:
     try:
         result = m.run_transitions(**params)
@@ -458,6 +463,13 @@ print(json.dumps(result, ensure_ascii=False))
             model_path=str(model_path),
             inputs=parameters or {},
             summary=f"Could not parse runtime JSON: {exc}: {result.stdout[:400]}",
+        )
+    if payload.get("status") == "waiting_for_Tmax_approval":
+        return PhaseHistoryResult(
+            status="waiting_for_Tmax_approval",
+            model_path=str(model_path),
+            inputs=parameters or {},
+            summary=payload["summary"],
         )
     transitions = payload.get("transitions", [])
     tc_list = [item.get("Tc") for item in transitions]

@@ -3,19 +3,21 @@ from __future__ import annotations
 
 import copy
 import hashlib
-import importlib.metadata
 import json
 import math
-import platform
 import re
 import shutil
 from pathlib import Path
 from typing import Any
 
-from .model_defaults import DEFAULTS_ID, DEFAULT_RULES, POLICY_DEFAULTS, phase_filter_suggestion
+from ptagent.runtime_metadata import collect_software_versions
+
+from .model_defaults import DEFAULTS_ID, DEFAULT_RULES, POLICY_DEFAULTS, phase_filter_suggestion, phase_handling_recommendation
+from ..symmetry_analysis import analyze_sign_flip_symmetries
 from .safe_expression import evaluate_safe_expression, parse_safe_expression
 from .sarah_contract import build_sarah_contract, _insert_model_card_rows, _replace_model_card_value, _replace_potential_compiler_expression
 from .sarah_import import SarahImportError, import_sarah_model, run_sarah_import
+from .spheno_benchmark import read_spheno_benchmark
 from .template_contract import contract_to_model_ir, parse_contract, validate_contract_template, write_resolved_contract_data
 
 
@@ -28,9 +30,9 @@ def write_json(path: Path, payload: Any) -> None:
 
 
 def contract_digest(contract: dict) -> str:
-    """Only approval state may change without repeating deterministic preparation."""
+    """Bind prepared physics; downstream numerical scans have a separate approval."""
     payload = copy.deepcopy(contract)
-    for key in ("review", "status", "source_hash"):
+    for key in ("review", "status", "source_hash", "numerical_settings"):
         payload.pop(key, None)
     for row in payload.get("parameters", {}).get("public_inputs", []):
         row["confirmed"] = False
@@ -66,25 +68,46 @@ def _policies(model, choices: dict) -> dict:
     if unknown:
         raise SarahImportError("Unknown choices: " + ", ".join(sorted(unknown)))
     policy.update(choices)
+    field_rows = []
+    for field in model.fields:
+        try:
+            scale = evaluate_safe_expression(model.dsb_minimum.get(field, "0"), model.parameter_values)
+        except (ValueError, KeyError):
+            scale = None
+        field_rows.append({"name": field, "zeroT_default": scale})
+    analysis = analyze_sign_flip_symmetries(parse_safe_expression(model.tree_potential).python, model.fields)
+    proposal = phase_handling_recommendation({"fields": field_rows, "symmetry_analysis": analysis.to_dict()}, policy["backend"])
+    proposed_filter_rows = []
+    if proposal["status"] == "pending_review":
+        if policy["backend"] == "phasetracer" and not {"phasetracer_symmetry", "symmetry_generators"} & choices.keys():
+            policy["phasetracer_symmetry"] = proposal["mode"]
+            policy["symmetry_generators"] = [row["fields"].split(",") for row in proposal["rules"]]
+        elif policy["backend"] == "cosmotransitions" and not {"phase_filter", "phase_filter_field", "phase_filter_threshold"} & choices.keys():
+            policy["phase_filter"] = proposal["mode"]
+            proposed_filter_rows = proposal["rules"]
+            policy["phase_filter_field"] = proposed_filter_rows[0]["field"]
+            policy["phase_filter_threshold"] = proposed_filter_rows[0]["threshold"]
     allowed = {
         "backend": {"cosmotransitions", "phasetracer"},
         "resummation_scheme": {"none", "Parwani", "Arnold-Espinosa"},
         "counterterm": {"none", "source_polynomial"},
         "goldstone": {"included"}, "photon": {"retained"},
-        "phase_filter": {"none", "negative_field_threshold"},
+        "phase_filter": {"none", "negative_field_threshold", "symmetry_orbits"},
         "phasetracer_symmetry": {"none", "z2_reflection"},
         "cubic_power_policy": {"positive_part", "signed_abs"},
     }
     for key, options in allowed.items():
         if not isinstance(policy[key], str) or policy[key] not in options:
             raise SarahImportError(f"Unsupported {key}={policy[key]!r}; supported: {sorted(options)}. Selective species removal needs an explicit reviewed contract, not a model-name shortcut.")
-    if policy["phase_filter_field"] not in model.fields:
+    filter_fields = [field.strip() for field in str(policy["phase_filter_field"]).split(",")] if policy["phase_filter"] == "symmetry_orbits" else [policy["phase_filter_field"]]
+    if not filter_fields or len(set(filter_fields)) != len(filter_fields) or any(field not in model.fields for field in filter_fields):
         raise SarahImportError("The phase-filter field must be in the imported background basis.")
     threshold = policy["phase_filter_threshold"]
-    if threshold is not None and (isinstance(threshold, bool) or not isinstance(threshold, (int, float)) or not math.isfinite(threshold) or threshold >= 0):
-        raise SarahImportError("The phase-filter threshold must be finite and strictly negative.")
+    orbit_mode = policy["phase_filter"] == "symmetry_orbits"
+    if threshold is not None and (isinstance(threshold, bool) or not isinstance(threshold, (int, float)) or not math.isfinite(threshold) or (threshold <= 0 if orbit_mode else threshold > 0)):
+        raise SarahImportError("The phase-filter threshold must be finite and nonpositive for a spatial cut, or positive for an orbit-comparison tolerance.")
     if policy["phase_filter"] != "none" and threshold is None:
-        raise SarahImportError("Choose an explicit negative threshold after reviewing the scale-based suggestion; no filter was inferred.")
+        raise SarahImportError("Choose an explicit spatial-cut threshold or orbit-comparison tolerance after reviewing the proposed rules.")
     if policy["phase_filter"] == "none" and threshold is not None:
         raise SarahImportError("A threshold was supplied with phase_filter=none; resolve this conflict explicitly.")
     groups = policy["symmetry_generators"]
@@ -92,6 +115,8 @@ def _policies(model, choices: dict) -> dict:
         raise SarahImportError("symmetry_generators must be a list of nonempty field-name lists.")
     if bool(groups) != (policy["phasetracer_symmetry"] == "z2_reflection"):
         raise SarahImportError("Explicit symmetry generators are required exactly when z2_reflection is selected.")
+    policy["proposed_filter_rows"] = proposed_filter_rows
+    policy["symmetry_proposal"] = proposal
     return policy
 
 
@@ -158,19 +183,23 @@ def render_prepared_contract(model, policy: dict, radiation: dict, suggestion: d
     text = _replace_potential_compiler_expression(text, "V_daisy", "0.0", "The matrix compiler owns the ring subtraction; no second contribution.")
     text = _kv(text, "### CosmoTransitions Phase Filtering", {
         "mode": policy["phase_filter"], "custom_expr": "0.0",
-        "notes": "No phase discarded by default. " + suggestion["reason"],
+        "notes": "Source-derived representative-region proposal or explicit user choice; approval is still required. " + suggestion["reason"],
     })
-    rows = [[str(policy["phase_filter"] != "none").lower(), policy["phase_filter_field"], "<",
+    rows = [[str(policy["phase_filter"] != "none").lower(), policy["phase_filter_field"], "orbit" if policy["phase_filter"] == "symmetry_orbits" else "<",
              policy["phase_filter_threshold"] if policy["phase_filter"] != "none" else suggestion["threshold"],
-             "negative_branch", "Review full-potential symmetry before filtering.", "Explicit choice or scale-based proposal."]]
+             "symmetry_duplicate" if policy["phase_filter"] == "symmetry_orbits" else "negative_branch",
+             "Review full-potential symmetry before filtering.", "Explicit choice or scale-based proposal."]]
+    if policy.get("proposed_filter_rows"):
+        rows = [["true", row["field"], row["comparison"], row["threshold"], row["phase_type"], row["reason"], row["source_reference"]]
+                for row in policy["proposed_filter_rows"]]
     text = _section(text, "### CosmoTransitions Phase Filter Rules",
                     _table(["enabled", "field", "comparison", "threshold", "phase_type", "reason", "source_reference"], rows))
     text = _kv(text, "### PhaseTracer Symmetry", {
-        "mode": policy["phasetracer_symmetry"], "notes": "Only explicitly listed generators; no equivalence inferred from model name. Review the full potential.",
+        "mode": policy["phasetracer_symmetry"], "notes": "Detected or explicitly supplied generators, never inferred from model name. Review the complete potential before approval.",
     })
     text = _section(text, "### PhaseTracer Symmetry Rules", _table(["enabled", "fields", "transformation", "reason", "source_reference"],
-                    [["true", ",".join(group), "sign_flip", "Explicit field group; requires full-potential review.", "Explicit choices JSON."] for group in policy["symmetry_generators"]]))
-    return text + "\n## 11. Deterministic Preparation\n\n" + DEFAULT_RULES + "\n\nSee proof_materials/sarah_preparation.json for inputs, proposals and checks. No inverse fit or model-specific algebra was applied.\n"
+                    [["true", ",".join(group), "sign_flip", "Detected or explicit field group; requires full-potential review.", "V0 parity check or explicit choices JSON; see manifest."] for group in policy["symmetry_generators"]]))
+    return text + "\n## 12. Deterministic Preparation\n\n" + DEFAULT_RULES + "\n\nSee proof_materials/sarah_preparation.json for inputs, proposals and checks. No inverse fit or model-specific algebra was applied.\n"
 
 
 def prepare_sarah(*, vin_path, parameter_map_path, run_dir, model_source=None, thermal_metadata_path=None, parameters=None, choices=None, slha_path=None) -> dict:
@@ -207,6 +236,10 @@ def prepare_sarah(*, vin_path, parameter_map_path, run_dir, model_source=None, t
     except (ValueError, KeyError):
         scale = None
     suggestion = phase_filter_suggestion(field, scale)
+    if policy["phase_filter"] == "symmetry_orbits":
+        suggestion = {**suggestion, "mode": "symmetry_orbits", "threshold": policy["phase_filter_threshold"],
+                      "rules": policy["proposed_filter_rows"],
+                      "reason": "Compare complete traced trajectories under the reviewed sign-flip group. Do not discard coupled-symmetry phases with pointwise sign cuts."}
     if model_source and not Path(model_source).expanduser().is_dir():
         raise SarahImportError("The explicit SARAH model-source directory does not exist.")
     result = run_sarah_import(vin_path=vin_path, parameter_map_path=parameter_map_path,
@@ -225,31 +258,33 @@ def prepare_sarah(*, vin_path, parameter_map_path, run_dir, model_source=None, t
                 shutil.copy2(path, archived/path.name)
     write_json(input_dir/"preparation_defaults.json", {"id": DEFAULTS_ID, "rules": DEFAULT_RULES, "policies": POLICY_DEFAULTS})
     write_json(input_dir/"explicit_overrides.json", {"parameters": explicit, "choices": choices or {}})
+    benchmark = read_spheno_benchmark(input_dir / "sarah_model" if model_source else None)
+    benchmark["missing_inputs"] = model.benchmark_request["missing_inputs"]
+    if not model.unresolved_parameters:
+        benchmark.update(status="not_needed", message="Preserve the resolved benchmark. Do not replace it with SPheno example values; review any remaining scale or policy choices separately.")
+    write_json(proof_dir/"spheno_benchmark.json", benchmark)
     manifest_path = proof_dir/"sarah_preparation.json"
     contract_path.write_text(render_prepared_contract(model, policy, radiation, suggestion, manifest_path), encoding="utf-8")
     checks_path = proof_dir/"sarah_preparation_checks.json"
     write_json(checks_path, proof)
-    versions = {"python": platform.python_version()}
-    for package in ("numpy", "sympy", "scipy", "cosmoTransitions"):
-        try:
-            versions[package] = importlib.metadata.version(package)
-        except importlib.metadata.PackageNotFoundError:
-            versions[package] = "not_installed"
+    versions = collect_software_versions()
     manifest = {
         "schema": "ptagent.sarah_preparation.v2", "profile": DEFAULTS_ID,
         "contract_digest": contract_digest(parse_contract(contract_path.read_text())),
         "input_sha256": {str(p.relative_to(root)): file_hash(p) for p in sorted(input_dir.rglob("*")) if p.is_file()},
         "checks_sha256": file_hash(checks_path), "checks_file": str(checks_path), "passed": True,
         "bound_parameters": model.parameter_values, "policies": policy,
+        "benchmark_recommendation": benchmark,
         "radiation": {"values": radiation, "inventory": inventory, "explicit": sorted(radiation_keys & set(explicit)),
                       "status": "proposal_until_approval", "assumption": "Count the retained source modes only; no unlisted bath species. Review massless-vector polarization conventions and missing decoupled species."},
         "phase_filter_suggestion": suggestion, "explicit_overrides": {"parameters": explicit, "choices": choices or {}},
         "software_versions": versions, "adapter_sha256": {"sarah_prepare.py": file_hash(Path(__file__))},
-        "precedence": "explicit user inputs > SLHA > source parameter map; no guessed benchmark, scale, Yukawa type or tadpole solution",
+        "precedence": "explicit user inputs > SLHA > source parameter map; model-local SPheno example inputs are recommendations only until reviewed and bound; no guessed scale, Yukawa type or tadpole solution",
     }
     write_json(manifest_path, manifest)
     validation = refresh_review(contract_path)
     return {**result.to_dict(), "preparation": str(manifest_path), "checks": str(checks_path), "profile": DEFAULTS_ID,
+            "benchmark_request": {**model.benchmark_request, "recommendation": benchmark},
             "contract_sha256": file_hash(contract_path), "approval_required": True,
             "construction_ready": not any(i.severity == "error" and i.code != "review_required" for i in validation.issues),
             "graph": str(proof_dir/"contract_graph/contract_graph.png")}

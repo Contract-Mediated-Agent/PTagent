@@ -13,6 +13,8 @@ from typing import Any, Iterable
 from defusedxml import ElementTree as SafeElementTree
 from defusedxml.common import DefusedXmlException
 
+from ptagent.runtime_metadata import collect_software_versions
+
 from .safe_expression import SafeExpressionError, evaluate_safe_expression, parse_safe_expression
 from .safe_expression import expressions_equivalent as _expressions_equivalent
 from .slha import SlhaDocument, parse_slha_file
@@ -97,6 +99,29 @@ class SarahImportedModel:
     def numerical_ready(self) -> bool:
         return not self.unresolved_parameters and self.renormalization_scale_sq is not None
 
+    @property
+    def benchmark_request(self) -> dict[str, Any]:
+        missing = list(self.unresolved_parameters)
+        if self.renormalization_scale_sq is None:
+            missing.append("renormScaleSq (or positive Q)")
+        return {
+            "required": not self.numerical_ready,
+            "missing_inputs": missing,
+            "derived_parameters": {name: self.derived_parameters[name] for name in self.unresolved_parameters
+                                   if name in self.derived_parameters},
+            "block_references": dict(self.block_references),
+            "message": (
+                "First inspect the selected model's SPheno.m DefaultInputValues and recommend its example inputs "
+                "when no benchmark was specified. Preserve explicit user/SLHA values. Bind accepted values using "
+                "the source mappings through --slha <spectrum.slha> or --parameters <JSON object or file>. "
+                "Currently unresolved inputs: " + ", ".join(missing)
+                + ". Source/SLHA parameter names and derived expressions are listed in sarah_import.json. "
+                "Symbolic import and partial contracts remain available; numerical compilation and "
+                "phase-transition execution remain blocked until the numerical point is complete. Reading SPheno.m "
+                "does not require running SPheno. Ask about the proposed benchmark and any remaining settings in one batch."
+            ) if missing else "Numerical inputs are resolved; contract review and approval are still required.",
+        }
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "schema": SARAH_IMPORT_SCHEMA,
@@ -120,6 +145,7 @@ class SarahImportedModel:
             "thermal_result": self.thermal_result,
             "thermal_ready": self.thermal_ready,
             "numerical_ready": self.numerical_ready,
+            "benchmark_request": self.benchmark_request,
             "issues": list(self.issues),
             "provenance": dict(self.provenance),
         }
@@ -154,6 +180,7 @@ class SarahImportRun:
             "thermal_ready": self.model.thermal_ready,
             "numerical_ready": self.model.numerical_ready,
             "unresolved_parameters": list(self.model.unresolved_parameters),
+            "benchmark_request": self.model.benchmark_request,
         }
 
 
@@ -252,7 +279,7 @@ def import_sarah_model(
                 thermal_expressions.extend(str(entry) for row in rows for entry in row)
     scale_policy = _parse_scale_policy(map_root)
     slha = parse_slha_file(slha_path) if slha_path else None
-    overrides = _normalize_parameter_overrides(parameters or {})
+    overrides = _normalize_parameter_overrides(parameters if parameters is not None else {})
     parameter_values = _resolve_parameter_values(
         block_references=block_references,
         derived_parameters=normalized_derived,
@@ -382,6 +409,7 @@ def run_sarah_import(
         model.provenance["parameters"] = _source_record(parameter_path)
 
     import_json = proof_dir / "sarah_import.json"
+    model.provenance["software_versions"] = collect_software_versions()
     import_json.write_text(json.dumps(model.to_dict(), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     import_markdown = proof_dir / "sarah_import.md"
     import_markdown.write_text(_render_import_markdown(model), encoding="utf-8")
@@ -610,9 +638,14 @@ def _resolve_parameter_values(
         progressed = False
         for name, expression in list(pending.items()):
             try:
-                values[name] = evaluate_safe_expression(expression, values)
+                value = evaluate_safe_expression(expression, values)
             except (SafeExpressionError, KeyError):
                 continue
+            except (ArithmeticError, ValueError) as exc:
+                raise SarahImportError(f"Cannot evaluate derived parameter {name!r}: {exc}") from exc
+            if not math.isfinite(value):
+                raise SarahImportError(f"Derived parameter {name!r} must be finite.")
+            values[name] = value
             del pending[name]
             progressed = True
         if not progressed:
@@ -626,21 +659,36 @@ def _resolve_renormalization_scale_sq(
     overrides: dict[str, float],
 ) -> float | None:
     if "renormScaleSq" in overrides:
-        return float(overrides["renormScaleSq"])
+        scale_sq = _positive_scale(overrides["renormScaleSq"], "renormScaleSq")
+        if "Q" in overrides and _square_scale(overrides["Q"], "Q") != scale_sq:
+            raise SarahImportError("Conflicting Q and renormScaleSq inputs.")
+        return scale_sq
     if "Q" in overrides:
-        return float(overrides["Q"]) ** 2
+        return _square_scale(overrides["Q"], "Q")
     evaluation_type = policy.get("evaluation_type", "").strip().lower()
     argument = policy.get("evaluation_argument", "").strip()
     if evaluation_type == "fixednumber":
         try:
-            return float(argument) ** 2
+            scale = float(argument)
         except ValueError:
             return None
+        return _square_scale(scale, "ScaleAndBlock.xml FixedScaleChoice")
     if evaluation_type in {"blocklowestscale", "blockscale"} and slha:
         block = slha.blocks.get(argument.upper())
         if block and block.scale is not None:
-            return block.scale**2
+            return _square_scale(block.scale, f"SLHA block {argument} Q")
     return None
+
+
+def _positive_scale(value: float, name: str) -> float:
+    if not math.isfinite(value) or value <= 0:
+        raise SarahImportError(f"{name} must be finite and strictly positive.")
+    return value
+
+
+def _square_scale(value: float, name: str) -> float:
+    scale = _positive_scale(value, name)
+    return _positive_scale(scale * scale, f"{name} squared")
 
 
 def _load_thermal_metadata(path: str | Path) -> dict[str, Any]:
@@ -682,6 +730,8 @@ def _validate_thermal_source_hashes(
 
 
 def _normalize_parameter_overrides(parameters: dict[str, Any]) -> dict[str, float]:
+    if not isinstance(parameters, dict):
+        raise SarahImportError("Parameter overrides must be a JSON object.")
     result: dict[str, float] = {}
     for raw_name, raw_value in parameters.items():
         name = str(raw_name).strip()
@@ -695,7 +745,15 @@ def _normalize_parameter_overrides(parameters: dict[str, Any]) -> dict[str, floa
             name = _block_symbol(block_match.group(1).upper(), indices)
         if isinstance(raw_value, bool) or not isinstance(raw_value, (int, float)):
             raise SarahImportError(f"Parameter override {raw_name!r} must be a real number.")
-        result[name] = float(raw_value)
+        try:
+            value = float(raw_value)
+        except OverflowError as exc:
+            raise SarahImportError(f"Parameter override {raw_name!r} must be finite.") from exc
+        if not math.isfinite(value):
+            raise SarahImportError(f"Parameter override {raw_name!r} must be finite.")
+        if name in result and result[name] != value:
+            raise SarahImportError(f"Conflicting parameter overrides for {name!r}.")
+        result[name] = value
     return result
 
 
@@ -938,6 +996,8 @@ def _render_import_markdown(model: SarahImportedModel) -> str:
         + "\n".join(sector_lines)
         + "\n\n## Issues\n\n"
         + issues
+        + "\n\n## Numerical Benchmark\n\n"
+        + model.benchmark_request["message"]
         + "\n"
     )
 

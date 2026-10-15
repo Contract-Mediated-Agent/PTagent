@@ -1,6 +1,5 @@
 (* ::Package:: *)
 
-(*Quit[];*)
 
 
 $LoadGroupMath=True;
@@ -38,7 +37,6 @@ RepFermion1Gen={Rep1,Rep2,Rep3,Rep4,Rep5};
 (*The input for the gauge interactions to DRalgo are then given by*)
 
 
-RepFermion1Gen={Rep1,Rep2,Rep3,Rep4,Rep5};
 RepFermion3Gen={RepFermion1Gen}//Flatten[#,1]&;
 
 

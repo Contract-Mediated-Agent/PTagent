@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 
 from ptagent.ptagent_4d.cli import main as four_deft_main
-from .routing import decide_engine
+from .routing import RoutingError, decide_engine
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -18,7 +18,11 @@ def main(argv: list[str] | None = None) -> int:
             return three_deft_main(["--help"])
         return four_deft_main(["--help"])
 
-    engine = decide_engine(command, forwarded_args, engine_override)
+    try:
+        engine = decide_engine(command, forwarded_args, engine_override)
+    except RoutingError as exc:
+        print(f"ptagent: {exc}", file=sys.stderr)
+        return 2
     if engine == "3deft":
         from ptagent.ptagent_3deft.cli import main as three_deft_main
 

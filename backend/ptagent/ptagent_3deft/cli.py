@@ -21,9 +21,9 @@ from .environment import check_wolfram_and_dralgo, find_wolframscript, install_d
 from .example_inputs import resolve_dralgo_source
 from .extraction import EXTRACTION_REPORT_NAME, extract_source_to_template
 from .layout import CONTRACT_TEMPLATE_NAME, build_run_layout
-from .mathematica_compare import compare_mathematica_fixed_v3d
+from .mathematica_compare import compare_mathematica_fixed_v3d, compare_source_dralgo
 from .merge import MERGED_CONTRACT_NAME, merge_dralgo_output_into_contract
-from .model_check import configure_build_run_phasetracer_model
+from .model_check import DEFAULT_ATOL, DEFAULT_RTOL, configure_build_run_phasetracer_model
 from .phasetracer import compile_phasetracer_template
 from .runner import DRALGO_OUTPUT_NAME, run_dralgo_template
 from .scriptgen import GENERATED_DRALGO_SCRIPT_NAME, generate_marked_dralgo_script
@@ -66,6 +66,8 @@ def build_parser() -> argparse.ArgumentParser:
     compile_cmd.add_argument("--template", required=True, help="Resolved and approved 3DEFT contract template path.")
     compile_cmd.add_argument("--backend", default="phasetracer", help="Only phasetracer is supported for 3DEFT v1.")
     compile_cmd.add_argument("--output-dir", default="", help="Output directory. Default: DRalgo_model/<model_name>_phasetracer for task-local runs.")
+    compile_cmd.add_argument("--atol", type=float, default=DEFAULT_ATOL)
+    compile_cmd.add_argument("--rtol", type=float, default=DEFAULT_RTOL)
 
     approve = sub.add_parser("approve", help="Record a whole-template review gate approval in a 3DEFT contract.")
     approve.add_argument("--template", required=True, help="3DEFT contract template or merged contract path.")
@@ -83,6 +85,9 @@ def build_parser() -> argparse.ArgumentParser:
     check_model.add_argument("--build-dir", default="", help="CMake build directory. Default: <project-dir>/build.")
     check_model.add_argument("--configure-only", action="store_true", help="Only run CMake configure.")
     check_model.add_argument("--no-run", action="store_true", help="Build run_model but do not execute it.")
+    check_model.add_argument("--atol", type=float, default=None, help="Default: generated metadata tolerance.")
+    check_model.add_argument("--rtol", type=float, default=None, help="Default: generated metadata tolerance.")
+    check_model.add_argument("--timeout-seconds", type=int, default=300)
 
     compare_math = sub.add_parser("compare-mathematica", help="Run fixed-3D-parameter Mathematica replacement checks for generated V3D.")
     compare_math.add_argument("--template", required=True, help=f"Reviewed {MERGED_CONTRACT_NAME} path.")
@@ -92,6 +97,12 @@ def build_parser() -> argparse.ArgumentParser:
     compare_math.add_argument("--script", default="", help="Output Wolfram script. Default: <project-dir>/mathematica_fixed_v3d_compare.wl.")
     compare_math.add_argument("--tolerance", type=float, default=1.0e-8, help="Absolute/relative tolerance for Mathematica vs fixed direct-V3D reference.")
     compare_math.add_argument("--timeout-seconds", type=int, default=120, help="wolframscript timeout.")
+    compare_math.add_argument("--mode", choices=["fixed-3d", "source-dralgo"], default="fixed-3d")
+    compare_math.add_argument("--atol", type=float, default=None)
+    compare_math.add_argument("--rtol", type=float, default=None)
+    compare_math.add_argument("--points", default="", help="Source mode: JSON file of temperature/fields records, at least 2 temperatures x 2 fields.")
+    compare_math.add_argument("--source-driver", default="", help="Reviewed source-native Wolfram numerical driver; not generated contract expressions.")
+    compare_math.add_argument("--probe-executable", default="", help="Built generated source_probe executable.")
 
     env_check = sub.add_parser("env-check", help="Find Mathematica/wolframscript and verify DRalgo can be loaded.")
     env_check.add_argument("--wolframscript", default="", help="Optional wolframscript path.")
@@ -242,10 +253,11 @@ def _cmd_compile(args: argparse.Namespace) -> int:
             f"PhaseTracer compile must use {MERGED_CONTRACT_NAME}; "
             "run merge-output, review the merged contract, then approve PhaseTracer compile."
         )
-    result = compile_phasetracer_template(template, output_dir=args.output_dir or None)
+    result = compile_phasetracer_template(template, output_dir=args.output_dir or None, atol=args.atol, rtol=args.rtol)
     print(f"Generated 3DEFT PhaseTracer project: {result.output_dir}")
     print(f"Header: {result.header_path}")
     print(f"Run model source: {result.run_model_path}")
+    print(f"Numerical validation: {result.validation_status}; run check-model before production phase scans.")
     for warning in result.warnings:
         print(f"Warning: {warning}")
     return 0
@@ -266,20 +278,40 @@ def _cmd_check_model(args: argparse.Namespace) -> int:
         build_dir=args.build_dir or None,
         configure_only=args.configure_only,
         no_run=args.no_run,
+        atol=args.atol,
+        rtol=args.rtol,
+        timeout_seconds=args.timeout_seconds,
     )
     print(f"Configured: {result.configured}")
     print(f"Built: {result.built}")
     print(f"Ran: {result.ran}")
+    print(f"Numerical validation: {result.validation_status}")
+    if result.report_path:
+        print(f"Numerical report: {result.report_path}")
+    if result.validation_status != "passed":
+        print("Warning: do not use this unverified/failed model for production phase scans.")
     if result.stdout_preview:
         print("run_model stdout preview:")
         print(result.stdout_preview)
     if result.stderr_preview:
         print("run_model stderr preview:")
         print(result.stderr_preview)
-    return 0
+    return 0 if result.validation_status == "passed" or args.configure_only or args.no_run else 2
 
 
 def _cmd_compare_mathematica(args: argparse.Namespace) -> int:
+    if args.mode == "source-dralgo":
+        points = json.loads(Path(args.points).read_text(encoding="utf-8")) if args.points else []
+        result = compare_source_dralgo(
+            args.template, args.project_dir, points=points, source_driver=args.source_driver or None,
+            probe_executable=args.probe_executable or None, wolframscript_path=args.wolframscript or None,
+            output_path=args.output or None, script_path=args.script or None,
+            atol=args.tolerance if args.atol is None else args.atol,
+            rtol=args.tolerance if args.rtol is None else args.rtol, timeout_seconds=args.timeout_seconds,
+        )
+        print(f"Source DRalgo report: {result.report_path}")
+        print(f"Source DRalgo comparison: {result.status}")
+        return 0 if result.ok else 2
     result = compare_mathematica_fixed_v3d(
         args.template,
         args.project_dir,
@@ -288,12 +320,15 @@ def _cmd_compare_mathematica(args: argparse.Namespace) -> int:
         script_path=args.script or None,
         tolerance=args.tolerance,
         timeout_seconds=args.timeout_seconds,
+        atol=args.atol,
+        rtol=args.rtol,
     )
     print(f"Mathematica fixed-V3D script: {result.script_path}")
     print(f"Mathematica fixed-V3D report: {result.report_path}")
     print(f"Comparison count: {result.comparison_count}")
     print(f"Max abs diff: {result.max_abs_diff}")
     print(f"OK: {result.ok}")
+    print(f"Comparison: fixed_3d_expression_check; status: {result.status}")
     return 0 if result.ok else 2
 
 

@@ -24,10 +24,41 @@ consolidated questions. Missing thermal matrices block Parwani/Arnold-Espinosa;
 missing numerical parameters or renormalization scale block numerical execution.
 A successful import is not a claim that the model is ready to run.
 
+Downstream `11. Numerical Settings` use the shared 4D scan-approval gate. These
+numerical controls are separate from the prepared-physics digest: confirming
+`Tmax` does not require repeating SARAH export or changing physical inputs.
+Changing `Tmax` still requires a new matching `Tmax_approved_value` confirmation.
+
+If the user has not specified a benchmark, inspect the selected model's
+`SPheno.m` before asking for numbers. Recommend its `DefaultInputValues` as the
+starting point, with the source path and hash. `prepare-sarah --model-source`
+and the default export/preparation route write `spheno_benchmark.json` with
+static defaults, MINPAR/EXTPAR mappings, boundary/matching relations and
+`ParametersToSolveTadpoles`. No SPheno execution is needed to read this file.
+The reader does not evaluate arbitrary Wolfram code, apply defaults, or solve
+tadpoles; unsupported expressions and computed assignments are reported.
+
+Separate (1) file-provided inputs, (2) quantities computable through supported
+source relations and tree tadpole equations, and (3) remaining SM inputs,
+renormalization scale and physical choices. Do not claim that DefaultInputValues
+contains a complete spectrum or all calculation settings. Do not transfer a
+previous THDM example's SM values, scale, Yukawa truncation or tree/loop equality
+to another task. Do not require SPheno as the only way to complete a point.
+When the current converter cannot resolve a source relation or branch, state
+that limitation and request the missing binding, not an unrelated new benchmark.
+
+Present acceptance of the recommended example and all remaining settings in
+one batch, using `benchmark_request.missing_inputs` and the source mappings.
+Preserve explicit user parameters and SLHA inputs. Bind accepted inputs through
+`--slha` or `--parameters` JSON; final compilation approval is still required.
+If the file/defaults are absent or unsupported, request explicit inputs.
+Symbolic imports can continue with unresolved inputs.
+
 The deterministic precedence is explicit parameter JSON > SLHA > source
 parameter mapping. Use names in the imported expressions or normalized SLHA
-names. There are no hard-coded Yukawa types, electroweak values, source-example
-benchmarks, mass-to-coupling inversions or tree/loop parameter equalities.
+names. Model-local SPheno example values are recommendations until reviewed
+and explicitly bound. There are no hard-coded Yukawa types, electroweak values,
+model-specific benchmarks, mass-to-coupling inversions or tree/loop parameter equalities.
 Unknown names fail instead of being ignored. An unresolved input requires
 source evidence or a user value, not an LLM fit.
 
@@ -44,20 +75,31 @@ Generic physical proposals, subordinate to source/user choices, are:
   The manifest lists every count. Explicitly review massless-vector polarization
   conventions and unlisted decoupled particles. `num_boson_dof` and
   `num_fermion_dof` in parameter JSON override the proposal.
-- No phase filter or symmetry merge by default. For a reviewed reflection,
+- Derive phase-handling proposals from the imported potential's sign symmetries.
+  PhaseTracer receives generator rows. CosmoTransitions receives independent
+  sign cuts for single-field reflections, or `symmetry_orbits` trajectory
+  comparisons for coupled reflections. A pointwise cut can discard both entire
+  phases when a coupled-symmetry branch crosses the boundary. For a single-field reflection,
   suggest a negative threshold with tolerance `0.01*L`, where L is a sourced
   nonzero reference field scale. If the field step is known, use at least ten
-  steps. Check factor-of-two sensitivity. No reference scale means no guessed
-  threshold. Suggestions stay disabled until confirmed.
+  steps. Check factor-of-two sensitivity. Without a sourced scale or field step,
+  use the exact zero boundary. These are concrete pending-review proposals, not
+  user confirmations. Check all potential terms before approval and preserve
+  explicit user overrides; never recommend disabled filtering by default.
+  Coupled-orbit grouping is exposed as `symmetry_phase_history`; Tc/Tn calculations
+  retain the full phase dictionary and its relative-orientation channels.
 
 Supported `--choices` keys are `backend`, `resummation_scheme`,
 `counterterm` (`none` or `source_polynomial`), `goldstone` (`included`),
 `photon` (`retained`), `cubic_power_policy` (`positive_part` or `signed_abs`),
-`phase_filter` (`none` or `negative_field_threshold`),
+`phase_filter` (`none`, `negative_field_threshold` or `symmetry_orbits`),
 `phase_filter_field`, `phase_filter_threshold`,
 `phasetracer_symmetry` (`none` or `z2_reflection`), and
 `symmetry_generators` (a list of field-name lists, one simultaneous flip per list).
 Unsupported choices fail; they are never replaced with a different prescription.
+For `symmetry_orbits`, `phase_filter_field` is a comma-separated simultaneous
+field group and `phase_filter_threshold` is a positive absolute comparison
+tolerance. Multiple detected generators are proposed as separate contract rows.
 
 Preparation records source/configuration hashes, the bound point, raw tadpole
 residuals and mass eigenvalues when evaluable, proposals and software versions.

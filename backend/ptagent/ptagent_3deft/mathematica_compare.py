@@ -9,10 +9,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .contract import ThreeDeftBlocked, parse_contract
+from .contract import ThreeDeftBlocked, parse_contract, physical_spec_hash
+from ..runtime_metadata import collect_software_versions
 from .environment import find_wolframscript
 from .mathematica_expr import looks_like_mathematica_inputform
 from .phasetracer import _clean_expr, _field_symbol_map, _normalize_known_coefficient_references
+from .model_check import finite_comparison, json_safe_numbers, validate_tolerances
+from .layout import proof_dir_for_template
+from .scriptgen import _required_path, _wolfram_string
 
 
 MATHEMATICA_COMPARE_JSON = "mathematica_fixed_v3d_compare.json"
@@ -26,6 +30,7 @@ class MathematicaComparisonResult:
     ok: bool
     max_abs_diff: float | None
     comparison_count: int
+    status: str = "not_run"
 
 
 def compare_mathematica_fixed_v3d(
@@ -37,6 +42,8 @@ def compare_mathematica_fixed_v3d(
     script_path: str | Path | None = None,
     tolerance: float = 1.0e-8,
     timeout_seconds: int = 120,
+    atol: float | None = None,
+    rtol: float | None = None,
 ) -> MathematicaComparisonResult:
     """Evaluate reviewed V3D expressions in Mathematica by direct replacement.
 
@@ -44,6 +51,9 @@ def compare_mathematica_fixed_v3d(
     ``run_model.cpp``. It does not rerun 4D RG, matching, or 3DUS evolution.
     """
 
+    atol = tolerance if atol is None else atol
+    rtol = tolerance if rtol is None else rtol
+    validate_tolerances(atol, rtol)
     template = Path(template_path)
     project = Path(project_dir)
     metadata_path = project / "metadata.json"
@@ -78,18 +88,18 @@ def compare_mathematica_fixed_v3d(
 
     executable = find_wolframscript(wolframscript_path)
     if not executable:
-        raise ThreeDeftBlocked("wolframscript was not found; cannot run Mathematica fixed-V3D comparison.")
-    completed = subprocess.run(
-        [executable, "-file", str(script_target)],
-        check=False,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        timeout=timeout_seconds,
-    )
+        return _not_run_result(report_target, script_target, "fixed_3d_expression_check", "wolframscript was not found", atol, rtol)
+    try:
+        completed = subprocess.run(
+            [executable, "-script" if "kernel" in Path(executable).name.casefold() else "-file", str(script_target)], check=False, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout_seconds,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return _not_run_result(report_target, script_target, "fixed_3d_expression_check", str(exc), atol, rtol)
     if completed.returncode != 0:
         details = "\n".join(part for part in (completed.stdout.strip(), completed.stderr.strip()) if part)
-        raise ThreeDeftBlocked(f"Mathematica fixed-V3D comparison failed with code {completed.returncode}." + (f"\n{details}" if details else ""))
+        return _not_run_result(report_target, script_target, "fixed_3d_expression_check",
+                               f"Wolfram exited with {completed.returncode}: {details}", atol, rtol, status="failed")
     math_payload = _extract_mathematica_json(completed.stdout)
 
     report = _build_report(
@@ -98,10 +108,12 @@ def compare_mathematica_fixed_v3d(
         wolfram_payload=math_payload,
         symbol_map=symbol_map,
         replacement_values=values,
-        tolerance=tolerance,
+        tolerance=atol,
+        rtol=rtol,
         stdout=completed.stdout,
         stderr=completed.stderr,
         script_path=script_target,
+        executable=executable,
     )
     report_target.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
     return MathematicaComparisonResult(
@@ -110,7 +122,182 @@ def compare_mathematica_fixed_v3d(
         ok=bool(report["ok"]),
         max_abs_diff=report["max_abs_diff"],
         comparison_count=len(report["comparisons"]),
+        status=report["status"],
     )
+
+
+def _not_run_result(report_path: Path, script_path: Path, comparison_type: str, reason: str,
+                    atol: float, rtol: float, *, status: str = "not_run") -> MathematicaComparisonResult:
+    report = {"comparison_type": comparison_type, "status": status, "ok": False,
+              "reason": reason, "atol": atol, "rtol": rtol, "comparisons": []}
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    return MathematicaComparisonResult(report_path, script_path, False, None, 0, status)
+
+
+def compare_source_dralgo(
+    template_path: str | Path,
+    project_dir: str | Path,
+    *,
+    points: list[dict[str, Any]],
+    source_driver: str | Path | None = None,
+    probe_executable: str | Path | None = None,
+    wolframscript_path: str | None = None,
+    output_path: str | Path | None = None,
+    script_path: str | Path | None = None,
+    atol: float = 1e-9,
+    rtol: float = 1e-8,
+    timeout_seconds: int = 120,
+) -> MathematicaComparisonResult:
+    """Run source-native numeric DRalgo references, never translated contract expressions.
+
+    The reviewed source (or explicit numeric driver loaded after it) must define
+    PTAgentSourceReference[temperature, phaseTracerFields, settings]. This hook
+    owns the original RG/matching/running calculation; no missing model physics
+    is inferred here. See source_reference_request.json and the workflow docs.
+    """
+    validate_tolerances(atol, rtol)
+    template, project = Path(template_path).resolve(), Path(project_dir).resolve()
+    target = Path(output_path) if output_path else proof_dir_for_template(template) / "source_dralgo_comparison.json"
+    script = Path(script_path) if script_path else target.with_suffix(".wl")
+    report: dict[str, Any] = {
+        "schema": "ptagent.3deft.source_comparison.v1",
+        "comparison_type": "source_dralgo_end_to_end_comparison", "status": "not_run", "ok": False,
+        "atol": atol, "rtol": rtol, "timeout_seconds_per_process": timeout_seconds,
+        "points": points, "comparisons": [], "commands": [],
+        "software_versions": collect_software_versions(wolframscript=wolframscript_path),
+    }
+    source_executed = False
+    try:
+        contract = parse_contract(template.read_text(encoding="utf-8"))
+        metadata = json.loads((project / "metadata.json").read_text(encoding="utf-8"))
+        if metadata.get("physical_spec_hash") != physical_spec_hash(contract):
+            raise ThreeDeftBlocked("Generated physical_spec_hash does not match the current contract; review and regenerate first.")
+        _validate_source_points(points, len(metadata["fields"]))
+        source = _required_path(contract.get("runner", {}).get("dralgo_program_path"), base_dir=template.parent)
+        driver = Path(source_driver).resolve() if source_driver else None
+        report.update(source_path=str(source), driver_path=str(driver) if driver else None)
+        # Only settings and benchmarks cross the boundary, never compiled formulas.
+        settings = {"rg_matching": contract.get("rg_matching", {}), "fields": metadata["fields"],
+                    "input_parameters": metadata["input_parameters"],
+                    "parameter_names": metadata["coefficient_names"],
+                    "potential_prefactor": metadata["potential_prefactor_expression"]}
+        if metadata.get("rg_matching") != settings["rg_matching"]:
+            raise ThreeDeftBlocked("Generated matching settings are missing or stale; regenerate the project.")
+        report["settings"] = settings
+        if str(settings["rg_matching"].get("effective_potential_order", "")).upper() not in {"LO", "NLO", "NNLO"}:
+            raise ThreeDeftBlocked("Source comparison requires an explicit LO/NLO/NNLO effective-potential order.")
+        if driver and not driver.is_file():
+            raise ThreeDeftBlocked(f"Source numerical driver is missing: {driver}")
+        hook_text = (driver or source).read_text(encoding="utf-8")
+        if not re.search(r"\bPTAgentSourceReference\s*\[", hook_text):
+            raise ThreeDeftBlocked(
+                "Source has no PTAgentSourceReference numeric entry point. Symbolic DRalgo output alone "
+                "does not supply independent 4D RG/matching/3DUS numerics; provide its reviewed numeric driver."
+            )
+        exe = find_wolframscript(wolframscript_path)
+        if not exe:
+            raise ThreeDeftBlocked("Wolfram executable is unavailable.")
+        probe = Path(probe_executable).resolve() if probe_executable else project / "build" / "source_probe"
+        if not probe.is_file():
+            raise ThreeDeftBlocked("Build the generated source_probe target first, or supply --probe-executable.")
+        script.parent.mkdir(parents=True, exist_ok=True)
+        request_path = script.with_name("source_reference_request.json")
+        request_path.write_text(json.dumps({"settings": settings, "points": points}, allow_nan=False, indent=2), encoding="utf-8")
+        driver_load = f"Get[{_wolfram_string(str(driver))}];" if driver else ""
+        script.write_text(f'''(* Source-native numerical validation; no contract potentials or matching formulas. *)
+SetDirectory[DirectoryName[{_wolfram_string(str(source))}]];
+Get[{_wolfram_string(str(source))}];
+{driver_load}
+request = Import[{_wolfram_string(str(request_path))}, "RawJSON"];
+If[Length[DownValues[PTAgentSourceReference]] == 0, Exit[93]];
+results = Table[
+  PTAgentSourceReference[point["temperature"], point["fields"], request["settings"]],
+  {{point, request["points"]}}
+];
+Print["<<<PTAGENT_MATHEMATICA_COMPARE_JSON>>>"];
+Print[ExportString[<|"results" -> results, "wolfram_version" -> $Version|>, "RawJSON"]];
+Print["<<<PTAGENT_MATHEMATICA_COMPARE_JSON_END>>>"];
+''', encoding="utf-8")
+        command = [exe, "-script" if "kernel" in Path(exe).name.casefold() else "-file", str(script)]
+        report["commands"].append(command)
+        completed = subprocess.run(command, capture_output=True, text=True, timeout=timeout_seconds, check=False)
+        report["source_process"] = {"returncode": completed.returncode, "stdout": completed.stdout, "stderr": completed.stderr}
+        if completed.returncode:
+            raise ThreeDeftBlocked(f"Source driver did not complete (exit {completed.returncode}).")
+        payload = _extract_mathematica_json(completed.stdout)
+        report["software_versions"] = collect_software_versions(wolframscript=exe, wolfram_version=payload.get("wolfram_version"))
+        report["source_payload"] = payload
+        source_executed = True
+        source_rows = payload.get("results", [])
+        if not isinstance(source_rows, list) or len(source_rows) != len(points) or not all(isinstance(row, dict) for row in source_rows):
+            raise ThreeDeftBlocked("Source driver returned a different number of points.")
+        for point, source_row in zip(points, source_rows):
+            command = [str(probe), str(point["temperature"]), *map(str, point["fields"])]
+            report["commands"].append(command)
+            cpp = subprocess.run(command, capture_output=True, text=True, timeout=timeout_seconds, check=False)
+            values = {}
+            for line in cpp.stdout.splitlines():
+                tokens = line.split()
+                if len(tokens) == 2:
+                    values[tokens[0]] = _optional_float(tokens[1])
+            row = _compare_source_point(source_row, values, metadata, settings, atol=atol, rtol=rtol)
+            row["request_matches"] = source_row.get("temperature") == point["temperature"] and source_row.get("fields") == point["fields"] and source_row.get("settings") == settings
+            row["ok"] = row["ok"] and row["request_matches"]
+            row.update(point=point, cpp_returncode=cpp.returncode, cpp_stdout=cpp.stdout, cpp_stderr=cpp.stderr)
+            row["ok"] = row["ok"] and cpp.returncode == 0
+            report["comparisons"].append(row)
+        report["ok"] = all(row["ok"] for row in report["comparisons"])
+        report["status"] = "passed" if report["ok"] else "failed"
+    except (ThreeDeftBlocked, OSError, ValueError, TypeError, KeyError, subprocess.TimeoutExpired) as exc:
+        report["reason"] = f"{type(exc).__name__}: {exc}"
+        report["status"] = "failed" if source_executed else "not_run"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(json_safe_numbers(report), indent=2, allow_nan=False), encoding="utf-8")
+    diffs = [check["abs_diff"] for row in report["comparisons"] for check in row["values"].values()
+             if check.get("abs_diff") is not None]
+    return MathematicaComparisonResult(target, script, report["ok"], max(diffs) if diffs else None,
+                                       len(report["comparisons"]), report["status"])
+
+
+def _validate_source_points(points: list[dict[str, Any]], field_count: int) -> None:
+    by_temperature: dict[float, set[tuple[float, ...]]] = {}
+    for point in points:
+        temperature = float(point["temperature"])
+        fields = tuple(float(value) for value in point["fields"])
+        if temperature <= 0 or not math.isfinite(temperature) or len(fields) != field_count or not all(map(math.isfinite, fields)):
+            raise ThreeDeftBlocked("Source comparison points need finite T > 0 and the exact finite field vector.")
+        by_temperature.setdefault(temperature, set()).add(fields)
+    if len(by_temperature) < 2 or any(len(fields) < 2 for fields in by_temperature.values()):
+        raise ThreeDeftBlocked("Source comparison requires at least two distinct temperatures, each with two distinct field points.")
+
+
+def _compare_source_point(source: dict, cpp: dict, metadata: dict, settings: dict, *, atol: float, rtol: float) -> dict:
+    values = {}
+    expected = source.get("values", {})
+    labels = ["V3D", "prefactor", "V"]
+    labels += [f"fields_3d.{field['name']}" for field in metadata["fields"]]
+    labels += [f"{group}.{name}" for group in ("parameters_matched", "parameters_3d") for name in metadata["coefficient_names"]]
+    orders = {item["order"] for item in metadata["v3d_ordered_terms"]}
+    enabled_order = settings["rg_matching"].get("effective_potential_order", "").upper()
+    required_orders = set(("LO", "NLO", "NNLO")[:("LO", "NLO", "NNLO").index(enabled_order) + 1]) if enabled_order in {"LO", "NLO", "NNLO"} else orders
+    labels += [f"orders.{order}" for order in sorted(required_orders)]
+    for label in labels:
+        values[label] = finite_comparison(_optional_float(cpp.get(label)), _optional_float(expected.get(label)), atol=atol, rtol=rtol)
+    for order in {"LO", "NLO", "NNLO"} - required_orders:
+        values[f"orders.{order}"] = {"status": "not_applicable", "ok": expected.get(f"orders.{order}") == "not_applicable"}
+    stages = source.get("stages", {})
+    runtime_rg = metadata.get("runtime_rg_running", False)
+    # Accept not_applicable only for stages the generated model actually disables.
+    required_stages = {"matching": "performed",
+                       "four_d_rg": "performed" if runtime_rg else "not_applicable",
+                       "three_d_us_running": "performed" if metadata.get("three_d_us_parameter_running", {}).get("mode") != "none" else "not_applicable"}
+    if required_orders:
+        terms = [_optional_float(expected.get(f"orders.{order}")) for order in required_orders]
+        total = sum(terms) if all(term is not None for term in terms) else None
+        values["source_order_sum"] = finite_comparison(total, _optional_float(expected.get("V3D")), atol=atol, rtol=rtol)
+    return {"values": values, "source_stages": stages, "required_stages": required_stages,
+            "ok": all(value["ok"] for value in values.values()) and all(stages.get(key) == value for key, value in required_stages.items())}
 
 
 def _comparison_specs(contract: dict[str, Any], metadata: dict[str, Any]) -> list[dict[str, Any]]:
@@ -236,6 +423,7 @@ results = {{
 }};
 payload = <|
   "schema" -> "ptagent.3deft.mathematica_fixed_v3d.v1",
+  "wolfram_version" -> $Version,
   "replacement_rules" -> ToString[InputForm[replacementRules]],
   "safe_symbol_map" -> safeSymbolMap,
   "results" -> results
@@ -257,6 +445,8 @@ def _build_report(
     stdout: str,
     stderr: str,
     script_path: Path,
+    rtol: float | None = None,
+    executable: str | None = None,
 ) -> dict[str, Any]:
     by_label = {item.get("label"): item.get("value", {}) for item in wolfram_payload.get("results", [])}
     rows: list[dict[str, Any]] = []
@@ -273,7 +463,8 @@ def _build_report(
         if row_ok:
             diff = abs(mathematica_value - expected)
             diffs.append(diff)
-            row_ok = diff <= max(tolerance, tolerance * max(abs(expected), abs(mathematica_value), 1.0))
+            row_ok = finite_comparison(mathematica_value, expected, atol=tolerance,
+                                       rtol=tolerance if rtol is None else rtol)["ok"]
         ok = ok and row_ok
         rows.append(
             {
@@ -290,10 +481,15 @@ def _build_report(
         )
     return {
         "schema": "ptagent.3deft.mathematica_compare.v1",
+        "software_versions": collect_software_versions(wolframscript=executable, wolfram_version=wolfram_payload.get("wolfram_version")),
         "mode": "fixed_3d_parameters_direct_v3d",
+        "comparison_type": "fixed_3d_expression_check",
+        "status": "passed" if ok else "failed",
         "comparison_layer": "mathematica_replacement_vs_generated_direct_v3d_reference",
         "ok": ok,
         "tolerance": tolerance,
+        "atol": tolerance,
+        "rtol": tolerance if rtol is None else rtol,
         "max_abs_diff": max(diffs) if diffs else None,
         "metadata_reference_mode": metadata.get("reference_validation_mode"),
         "script_path": str(script_path),
@@ -472,4 +668,5 @@ __all__ = [
     "MATHEMATICA_COMPARE_SCRIPT",
     "MathematicaComparisonResult",
     "compare_mathematica_fixed_v3d",
+    "compare_source_dralgo",
 ]

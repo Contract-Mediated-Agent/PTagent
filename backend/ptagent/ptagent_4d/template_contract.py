@@ -4,6 +4,7 @@ import ast
 import hashlib
 import json
 import keyword
+import math
 import re
 import textwrap
 from dataclasses import dataclass, field
@@ -11,13 +12,18 @@ from pathlib import Path
 from typing import Any
 
 from ..symmetry_analysis import SignFlipAnalysis, analyze_sign_flip_symmetries, format_sign_flip_generators
+from ..runtime_metadata import collect_software_versions
 from .artifact_layout import generated_models_dir, model_artifact_slug
 from .compiler import CompileBlocked, CompileResult, compile_usage_instructions
 from .config import Settings
 from .latex_display import clean_latex_evidence_for_markdown, render_latex_evidence_block
 from .model_preflight import model_focus_terms, selected_model_from_memory
-from .model_defaults import DEFAULT_RULES, FILTER_GUIDANCE, phase_filter_suggestion
+from .model_defaults import DEFAULT_RULES, FILTER_GUIDANCE, phase_handling_recommendation
 from .paper_expression import scalar_expression
+from .numerical_settings import (
+    OS_MASS_CRITERION, OS_MASS_RELATIVE_CUTOFF, OS_MASS_SCALE_FLOOR,
+    resolve_numerical_settings, scan_approval_message,
+)
 from .safe_expression import parse_safe_expression
 from .schemas import (
     DaisyInfo,
@@ -94,7 +100,7 @@ THERMAL_MODES = {"none", "standard_thermal_integrals", "custom_expr"}
 DAISY_MODES = {"none", "custom_expr"}
 COUNTERTERM_MODES = {"none", "implicit_in_V1", "explicit_linear_system", "custom_expr"}
 RESUMMATION_SCHEMES = {"none", "Parwani", "Arnold-Espinosa", "custom_expr"}
-PHASE_FILTER_MODES = {"none", "negative_field_threshold", "custom_expr"}
+PHASE_FILTER_MODES = {"none", "negative_field_threshold", "custom_expr", "symmetry_orbits"}
 PHASETRACER_SYMMETRY_MODES = {"none", "z2_reflection"}
 THERMAL_MASS_IMPLEMENTATIONS = {
     "none",
@@ -396,11 +402,13 @@ def _render_human_contract_template(
     gauge_thermal_derivation_notes: str = "State whether the source gives the final total gauge Debye masses/eigenvalues directly or whether this block assembles baseline/SM self-energies plus extra-field increments. Record longitudinal/transverse policy, neutral mixing basis, photon/Z branch convention, and source equation/prose references.",
 ) -> str:
     phase_filter_example_field = str(fields[0].get("name", "phi")) if fields else "phi"
-    filter_proposal = phase_filter_suggestion(phase_filter_example_field, fields[0].get("zeroT_default") if fields else None)
     field_names = [str(field.get("name", "")).strip() for field in fields if str(field.get("name", "")).strip()]
     symmetry_analysis = analyze_sign_flip_symmetries(v0_python, field_names)
     symmetry_generators = format_sign_flip_generators(symmetry_analysis)
     symmetry_candidate_rows = _tree_level_symmetry_candidate_rows(symmetry_analysis, phase_filter_example_field)
+    filter_candidate = phase_handling_recommendation(
+        {"fields": fields, "symmetry_analysis": symmetry_analysis.to_dict()}, "cosmotransitions"
+    )
     goldstone_defaults = goldstone_defaults or {}
     return "\n".join(
         [
@@ -422,7 +430,7 @@ def _render_human_contract_template(
             "1. If no compile backend has been specified, stop and ask the user to choose exactly one supported backend: `cosmotransitions` or `phasetracer`. Any other backend is not supported yet.",
             "2. Present all available unresolved decisions together in one numbered checklist, grouping related blockers. Explain the evidence, impact, and recommendation for each; do not repeat explicit user choices. Show the contract provenance graph with the Markdown review target.",
             "3. Resolve the public-input gate from source/user/proof evidence: record the final public input list and one numeric `test_value` for every public input. Ask the user only when candidate inputs or test values cannot be safely determined.",
-            "4. Answer backend-specific phase handling: this is a mandatory user-confirmed gate. `cosmotransitions` uses phase filtering / `forbidPhaseCrit`; recommended default is `mode=none` unless the paper/reference code explicitly removes a traced phase branch. `phasetracer` uses `apply_symmetry(phi)` and `get_symmetry_axes()` to identify reviewed symmetry-equivalent field points; recommended default is `mode=none` unless the user confirms a Z2/sign-flip equivalence. For PhaseTracer symmetry rows, one row creates one generated symmetry partner: `h,s` means `h -> -h and s -> -s`, while two separate rows `h` and `s` mean `h -> -h or s -> -s`. Do not encode independent alternatives as `h,s`. The agent must present its recommendation and reason before patching these rows.",
+            "4. Review backend-specific phase handling together with the other physics choices. Recommend the detected generators for PhaseTracer apply_symmetry(phi). For CosmoTransitions, independent single-field reflections can use negative_field_threshold; if any generator couples fields, propose symmetry_orbits to group whole trajectories in a separate symmetry_phase_history after tracing. getPhases returns and retains every native CT phase for numerical transition searches, preserving relative-orientation channels. Even one fixed sign cut can discard every branch of a coupled orbit when trajectories cross its boundary. One row h,s means a simultaneous reflection; separate h and s rows are independent generators. Check the complete potential for symmetry breaking, preserve explicit user choices, and obtain final approval before compilation.",
             "5. Fill the remaining `ASK_USER` cells and review the physics choices below.",
             "6. When the reviewed model is complete, stop and ask the user to review this rendered Markdown. Set `approved` to `true` only after explicit user approval to generate/compile backend code.",
             "7. Run `python -m ptagent compile --template contract_template.md --backend cosmotransitions` or `python -m ptagent compile --template contract_template.md --backend phasetracer`; this regenerates `proof_materials/contract_resolved.json` first.",
@@ -655,36 +663,26 @@ def _render_human_contract_template(
             "",
             "### CosmoTransitions Phase Filtering",
             "",
-            "This section is used only by the CosmoTransitions backend. The phase-filter hook discards a traced phase when it returns true and renders as `forbidPhaseCrit(X)`. PhaseTracer does not consume this section; PhaseTracer symmetry double-counting is handled separately with `apply_symmetry(phi)` below.",
+            "This section is used only by the CosmoTransitions backend. Spatial filters use `forbidPhaseCrit(X)` to discard branches. In `symmetry_orbits` mode this hook always returns false; `getPhases` builds a separate deduplicated `symmetry_phase_history`, requiring identical temperature domains and one fixed group transformation at all sampled knots and midpoints. Its return value and `self.phases` remain complete for `calcTcTrans` and `findAllTransitions`: grouped history must not replace numerical transition inputs because distinct relative orientations can have different tunnelling actions. PhaseTracer instead uses `apply_symmetry(phi)` below.",
             f"Tree-level static check: `{symmetry_analysis.status}`; candidate sign-flip generator(s): `{symmetry_generators}`. This is a recommendation only. Confirm that loop, thermal, counterterm, and gauge choices preserve the symmetry before using it to remove a duplicate branch.",
             "",
             _render_table_with_notes(
                 ["key", "value", "notes"],
                 [
-                    {"key": "mode", "value": "ASK_USER", "notes": f"Mandatory user-confirmed choice. Choices: none, negative_field_threshold, custom_expr. Tree-level candidate generators: {symmetry_generators}. A candidate may motivate duplicate-branch filtering, but the branch and nonzero tolerance cannot be inferred from V0 alone."},
+                    {"key": "mode", "value": "ASK_USER", "notes": f"Review the concrete symmetry-handling proposal. Choices: none, negative_field_threshold, custom_expr, symmetry_orbits. Proposed mode: {filter_candidate['mode']}. Use whole-trajectory symmetry_orbits when any generator couples fields. Tree-level candidate generators: {symmetry_generators}. Thresholds are numerical conventions, not physical deductions from V0."},
                     {"key": "custom_expr", "value": "0.0", "notes": "Only used when mode=custom_expr; use a reviewed boolean expression with an explicit tolerance. Python and/or are compiled to NumPy-safe elementwise logic. For PhaseTracer symmetry equivalence, use the PhaseTracer Symmetry section instead."},
-                    {"key": "notes", "value": "ASK_USER", "notes": "State the recommendation and reason. If mode=none, explain that no CosmoTransitions branch is forbidden. If filtering is enabled, state what phase type or hard field region is being removed and why. For PhaseTracer Z2 equivalence, set this to none and use PhaseTracer Symmetry."},
+                    {"key": "notes", "value": "ASK_USER", "notes": "State the recommendation and reason. For spatial filters, explain the removed region. For symmetry_orbits, confirm the full-potential generators and absolute history-matching tolerance; no point or numerical transition channel is removed by this grouping. For none, no branch is removed. PhaseTracer uses its separate Symmetry section."},
                 ],
                 id_key="key",
             ),
             "",
             "### CosmoTransitions Phase Filter Rules",
             "",
-            "Use rows when `mode=negative_field_threshold`. This compiles to CosmoTransitions `forbidPhaseCrit`. For PhaseTracer symmetry-equivalent branches, use `apply_symmetry(phi)` instead of a threshold filter. " + FILTER_GUIDANCE,
+            "For `mode=symmetry_orbits`, each row uses comma-separated simultaneously flipped fields in `field`, `comparison=orbit`, `phase_type=symmetry_duplicate`, and the same positive absolute Euclidean field-distance tolerance in `threshold`. Generator closure is used; at most 4096 transformations are supported. Only trajectories with exactly equal temperature endpoints are compared, at the union of their knots and interval midpoints under one fixed transform. Nonfinite, invalid, unequal-domain, or unmatched trajectories stay. This is finite-sample numerical matching, not a proof of equivalence between samples; review tolerance convergence. Only the copied `symmetry_phase_history` has links rewired to representatives; native CT phases and links remain unchanged for all numerical transition searches. History grouping does not establish equivalence of tunnelling channels or guarantee Tn accuracy. For `mode=negative_field_threshold`, rows instead compile to spatial cuts in `forbidPhaseCrit`; the following tolerance guidance applies to those cuts only. " + FILTER_GUIDANCE,
             "",
             _render_table(
                 ["enabled", "field", "comparison", "threshold", "phase_type", "reason", "source_reference"],
-                [
-                    {
-                        "enabled": "false",
-                        "field": phase_filter_example_field,
-                        "comparison": "<",
-                        "threshold": filter_proposal["threshold"],
-                        "phase_type": "negative_branch",
-                        "reason": "Disabled proposal: tolerance relative to a sourced field scale; full-potential symmetry and branch must be confirmed.",
-                        "source_reference": "Model-independent numerical recommendation; not source evidence.",
-                    }
-                ],
+                [{**row, "enabled": "true", "threshold": str(row["threshold"])} for row in filter_candidate["rules"]],
             ),
             "",
             "### PhaseTracer Symmetry",
@@ -748,6 +746,20 @@ def _render_human_contract_template(
             "python -m ptagent compile --template path\\to\\contract_template.md --backend cosmotransitions",
             "python -m ptagent compile --template path\\to\\contract_template.md --backend phasetracer",
             "```",
+            "",
+            "## 11. Numerical Settings",
+            "",
+            "These settings govern downstream temperature scans, not potential generation or single-point smoke checks. Resolve/validate to see the proposed Tmax, rationale and impact. After explicit user confirmation, record the exact value in both Tmax and Tmax_approved_value and set Tmax_approved=true. Changing Tmax invalidates that approval. x_eps needs no separate approval.",
+            "",
+            "| key | value |",
+            "|---|---|",
+            "| Tmax | auto |",
+            "| Tmax_basis | |",
+            "| Tmax_approved | false |",
+            "| Tmax_approved_value | |",
+            "| source_temperature_max | |",
+            "| model_scale | |",
+            "| x_eps | 0.001 |",
         ]
     )
 
@@ -769,10 +781,10 @@ def _tree_level_symmetry_candidate_rows(analysis: SignFlipAnalysis, example_fiel
         operation = "simultaneous" if len(candidate.fields) > 1 else "single-field"
         rows.append(
             {
-                "enabled": "false",
+                "enabled": "true",
                 "fields": fields_text,
                 "transformation": "sign_flip",
-                "reason": f"Tree-level {operation} reflection candidate; enable only after full-potential review and user confirmation.",
+                "reason": f"Proposed tree-level {operation} reflection; check the full potential during contract review before approval.",
                 "source_reference": "Deterministic V0 AST parity check.",
             }
         )
@@ -888,6 +900,7 @@ def _parse_markdown_contract(markdown_text: str) -> dict[str, Any]:
             "approved": _truthy(approval.get("approved", "")),
             "notes": approval.get("reviewer_notes", ""),
         },
+        "numerical_settings": _key_value_table(_section(markdown_text, "11. Numerical Settings")),
         "fields": clean_fields,
         "parameters": {
             "public_inputs": [_clean_public_input(row) for row in public_inputs if str(row.get("name", "")).strip()],
@@ -1683,6 +1696,12 @@ def validate_contract(
     compile_backend: str | None = None,
 ) -> ContractValidation:
     issues: list[ValidationIssue] = []
+    try:
+        numerical = resolve_numerical_settings(contract)
+        if not numerical["Tmax_approved"]:
+            issues.append(_warning("numerical_settings.Tmax", "scan_approval_required", scan_approval_message(numerical)))
+    except ValueError as exc:
+        issues.append(_error("numerical_settings", "invalid_numerical_settings", str(exc)))
     if contract.get("schema") != CONTRACT_SCHEMA:
         issues.append(_error("schema", "schema_mismatch", f"Expected schema {CONTRACT_SCHEMA}."))
     _validate_source_import_provenance(contract, issues)
@@ -1743,13 +1762,13 @@ def validate_contract(
                 )
             )
         elif not _numeric_literal(default):
-            issues.append(_error(f"parameters.public_inputs[{index}].test_value", "invalid_number", "Public input test_value must be a numeric literal."))
+            issues.append(_error(f"parameters.public_inputs[{index}].test_value", "invalid_number", f"Public input {row.get('name', index)} test_value must be a finite numeric literal."))
     for index, row in enumerate(constants):
         value = row.get("value")
         if _placeholder(value):
             issues.append(_error(f"parameters.constants[{index}].value", "placeholder_value", "Constant value is unresolved."))
         elif not _numeric_literal(value):
-            issues.append(_error(f"parameters.constants[{index}].value", "invalid_number", "Constant value must be numeric."))
+            issues.append(_error(f"parameters.constants[{index}].value", "invalid_number", f"Constant {row.get('name', index)} value must be finite and numeric."))
 
     allowed = set(field_names) | set(input_names) | set(constant_names)
     for index, row in enumerate(derived):
@@ -1853,7 +1872,7 @@ def _append_tree_level_symmetry_advice(
             "The deterministic tree-level check found candidate sign-flip generator(s): "
             + "; ".join(generators)
             + ".",
-            "Check the loop, thermal, counterterm, gauge-fixing, and source conventions. Then ask the user whether to enable the matching PhaseTracer symmetry rows or a separately reviewed CosmoTransitions duplicate-branch filter. Do not infer a filter threshold from V0.",
+            "Check loop, thermal, counterterm and gauge terms; propose these generators for PhaseTracer or a representative-sign region for CosmoTransitions. Supply concrete rules and numerical boundary tolerance in the same review, rather than recommending disabled filtering.",
         )
     )
 
@@ -2631,7 +2650,7 @@ def _validate_phase_filter(
                 "implementation.phase_filter.mode",
                 "placeholder_value",
                 "Phase-filtering policy is unresolved.",
-                "Ask the user to confirm the CosmoTransitions forbidden-phase policy. Recommend `none` unless a full-potential duplicate or unphysical branch has been established. " + FILTER_GUIDANCE,
+                "Present concrete symmetry-duplicate removal rules from the detected generators for review; preserve existing explicit choices and check the complete potential. Do not recommend disabling an established symmetry. " + FILTER_GUIDANCE,
             )
         )
         return
@@ -2655,6 +2674,48 @@ def _validate_phase_filter(
             "implementation.phase_filter.custom_expr",
             issues,
         )
+        return
+    if mode == "symmetry_orbits":
+        from .phase_orbits import sign_flip_closure
+
+        if not rules:
+            issues.append(_error("implementation.phase_filter.rules", "missing_value",
+                                 "symmetry_orbits requires at least one sign-flip generator row."))
+            return
+        tolerances = []
+        groups = []
+        field_order = sorted(field_names)
+        for index, row in enumerate(rules):
+            prefix = f"implementation.phase_filter.rules[{index}]"
+            if not isinstance(row, dict):
+                issues.append(_error(prefix, "invalid_row", "Phase filter rule must be a table row."))
+                continue
+            group = [name.strip() for name in str(row.get("field", "")).split(",")]
+            if not all(group) or len(set(group)) != len(group) or any(name not in field_names for name in group):
+                issues.append(_error(prefix + ".field", "unknown_symbol",
+                                     "Orbit fields must be a comma-separated list of distinct declared background fields."))
+            else:
+                groups.append([field_order.index(name) for name in group])
+            if row.get("comparison") != "orbit":
+                issues.append(_error(prefix + ".comparison", "invalid_mode", "symmetry_orbits requires comparison=orbit."))
+            threshold = row.get("threshold")
+            if isinstance(threshold, bool) or not _numeric_literal(threshold) or float(threshold) <= 0:
+                issues.append(_error(prefix + ".threshold", "invalid_number",
+                                     "Orbit matching tolerance must be a finite positive absolute field distance."))
+            else:
+                tolerances.append(float(threshold))
+            if row.get("phase_type") != "symmetry_duplicate":
+                issues.append(_error(prefix + ".phase_type", "invalid_mode",
+                                     "symmetry_orbits requires phase_type=symmetry_duplicate."))
+            if _placeholder(row.get("reason")):
+                issues.append(_error(prefix + ".reason", "placeholder_value", "Explain the reviewed full-potential symmetry."))
+        if len(set(tolerances)) > 1:
+            issues.append(_error("implementation.phase_filter.rules", "contract_conflict",
+                                 "All symmetry_orbits rows must use the same absolute matching tolerance."))
+        try:
+            sign_flip_closure(groups, len(field_names))
+        except ValueError as exc:
+            issues.append(_error("implementation.phase_filter.rules", "unsupported_symmetry_group", str(exc)))
         return
     if mode == "negative_field_threshold":
         if not rules:
@@ -2731,7 +2792,7 @@ def _validate_phasetracer_symmetry(
                 "implementation.symmetry.mode",
                 "placeholder_value",
                 "PhaseTracer symmetry policy is unresolved.",
-                "Ask the user to confirm the PhaseTracer apply_symmetry policy. Recommend `none` unless the user wants PhaseTracer to merge reviewed symmetry-equivalent field points; otherwise use `z2_reflection` with reviewed field sign-flip rows and explain the reason.",
+                "Propose z2_reflection with the detected sign-flip generators for apply_symmetry; check the complete potential and present the rules together for review. Preserve existing explicit choices; do not invent generators when evidence is missing.",
             )
         )
         return
@@ -2945,7 +3006,7 @@ def compile_contract_template(
 ) -> CompileResult:
     validation = validate_contract_template(markdown_text, review_required=True, compile_backend="compare-backends" if for_comparison else "cosmotransitions")
     if not validation.ok:
-        preview = "; ".join(f"{issue.code}: {issue.message}" for issue in validation.issues[:5])
+        preview = "; ".join(f"{issue.code}: {issue.message}" for issue in [item for item in validation.issues if item.severity == "error"][:5])
         raise CompileBlocked("Template contract is not compile-ready: " + preview)
     contract = validation.contract
     model_path = output_path or _candidate_model_path(contract, settings, output_dir=output_dir)
@@ -2955,11 +3016,15 @@ def compile_contract_template(
             contract,
             template_sha256=_sha256_text(markdown_text),
             contract_sha256=_sha256_contract(contract),
+            software_versions=collect_software_versions(runtime_python=settings.runtime_python),
         ),
         encoding="utf-8",
     )
     warnings: list[str] = []
     status = "compiled"
+    numerical = resolve_numerical_settings(contract)
+    if not numerical["Tmax_approved"]:
+        warnings.append(scan_approval_message(numerical))
     if run_import_check:
         from .runner import import_check
 
@@ -2983,7 +3048,9 @@ def _render_cosmotransitions_source(
     *,
     template_sha256: str = "",
     contract_sha256: str = "",
+    software_versions: dict[str, Any] | None = None,
 ) -> str:
+    numerical = resolve_numerical_settings(contract)
     fields = _list(contract.get("fields"))
     params = _dict(contract.get("parameters"))
     public_inputs = _list(params.get("public_inputs"))
@@ -3017,7 +3084,7 @@ def _render_cosmotransitions_source(
     build_signature = init_args
     build_options_signature = f"{build_signature}, *, run_tc=True, print_tc=True" if build_signature else "*, run_tc=True, print_tc=True"
     build_call_args = ", ".join(f"{name}={name}" for name in input_names)
-    input_assignments = "\n".join(f"        self.{name} = float({name})" for name in input_names)
+    input_assignments = "\n".join(f"        self.{name} = _ptagent_finite_input({name!r}, {name})" for name in input_names)
     constant_assignments = "\n".join(
         f"        self.{row['name']} = float({_float_literal(row.get('value'))})" for row in constants
     )
@@ -3129,9 +3196,13 @@ def _render_cosmotransitions_source(
         constants,
         derived,
     )
+    get_phases_result = "super().getPhases(*args, **kwargs)"
+    if str(implementation_phase_filter.get("mode", "")).strip() == "symmetry_orbits":
+        get_phases_result = f"self._record_symmetry_phase_history({get_phases_result})"
     metadata = {
         "contract_schema": CONTRACT_SCHEMA,
         "artifact_backend": "cosmotransitions",
+        "software_versions": software_versions if software_versions is not None else collect_software_versions(),
         "paper_id": contract.get("paper_id", ""),
         "model_name": contract.get("model_name", ""),
         "model_short_name": contract.get("model_short_name", ""),
@@ -3147,6 +3218,8 @@ def _render_cosmotransitions_source(
         "phase_filter": implementation_phase_filter,
         "loop_modes": loops,
         "renormalization_scale": renormalization_scale_name,
+        "numerical_settings": numerical,
+        "os_like_mass_criterion": dict(OS_MASS_CRITERION),
         "excluded_species": excluded_species,
         "species_metadata": {
             "bosons": [
@@ -3174,11 +3247,16 @@ def _render_cosmotransitions_source(
     source = f'''
 from __future__ import annotations
 
+import json
 import numpy as np
 {cosmotransitions_import}
 
 
-MODEL_METADATA = {json.dumps(metadata, ensure_ascii=False, indent=2)}
+MODEL_METADATA = json.loads({json.dumps(metadata, ensure_ascii=False, indent=2)!r})
+NUMERICAL_SETTINGS = MODEL_METADATA["numerical_settings"]
+OS_MASS_RELATIVE_CUTOFF = {OS_MASS_RELATIVE_CUTOFF!r}
+OS_MASS_SCALE_FLOOR = {OS_MASS_SCALE_FLOOR!r}
+TMAX_APPROVAL_MESSAGE = {scan_approval_message(numerical)!r}
 PTAGENT_TEMPLATE_SHA256 = "{template_sha256}"
 PTAGENT_CONTRACT_SHA256 = "{contract_sha256}"
 INPUT_PARAMETERS = {input_names!r}
@@ -3186,6 +3264,16 @@ DEFAULT_PARAMETER_SOURCES = {default_parameter_sources!r}
 DEFAULT_INPUT_VALUES = {default_input_values!r}
 BOSON_NAMES = {boson_names!r}
 FERMION_NAMES = {([str(row.get("name", "")) for row in fermions] + _matrix_eigen_names(fermion_matrices))!r}
+
+
+def _ptagent_finite_input(name, value):
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"Public input {{name}} must be a finite number") from exc
+    if not np.isfinite(number):
+        raise ValueError(f"Public input {{name}} must be a finite number")
+    return number
 
 
 def _ptagent_jsonable(value):
@@ -3219,6 +3307,14 @@ def _ptagent_print_tc_transitions(TcTrans):
 
 def _ptagent_run_tc(model, *, print_tc=True):
     try:
+        model._require_scan_approval()
+    except RuntimeError as exc:
+        model.PTAGENT_TC_TRANS = []
+        model.PTAGENT_TC_STATUS = "waiting_for_Tmax_approval: " + str(exc)
+        if print_tc:
+            print("PTAGENT_TC_STATUS", model.PTAGENT_TC_STATUS)
+        return []
+    try:
         TcTrans = model.calcTcTrans()
     except Exception as exc:
         model.PTAGENT_TC_TRANS = []
@@ -3242,13 +3338,14 @@ def run_transitions(**parameter_overrides):
         raise TypeError("Unknown public input override(s): " + ", ".join(unknown))
     parameters = dict(DEFAULT_INPUT_VALUES)
     for key, value in parameter_overrides.items():
-        parameters[key] = float(value)
+        parameters[key] = _ptagent_finite_input(key, value)
     model = build_model(**parameters, run_tc=False, print_tc=False)
     TcTrans = model.calcTcTrans()
     if TcTrans is None:
         TcTrans = []
     return {{
         "parameters": parameters,
+        "numerical_settings": dict(NUMERICAL_SETTINGS),
         "transitions": [_ptagent_transition_payload(trans) for trans in TcTrans],
     }}
 
@@ -3256,8 +3353,8 @@ def run_transitions(**parameter_overrides):
 class GeneratedPotential(generic_potential.generic_potential):
     def init(self{init_signature}):
         self.Ndim = {len(fields)}
-        self.x_eps = 0.001
-        self.Tmax = 1000.0
+        self.x_eps = NUMERICAL_SETTINGS["x_eps"]
+        self.Tmax = NUMERICAL_SETTINGS["Tmax"]
 {input_assignments or "        pass"}
 {constant_assignments}
         self._update_derived()
@@ -3266,6 +3363,24 @@ class GeneratedPotential(generic_potential.generic_potential):
 
     def _update_derived(self):
 {derived_assignments or "        pass"}
+
+    def _require_scan_approval(self):
+        if (not NUMERICAL_SETTINGS["Tmax_approved"]
+                or not np.isfinite(self.Tmax)
+                or self.Tmax != NUMERICAL_SETTINGS["Tmax_approved_value"]):
+            raise RuntimeError(TMAX_APPROVAL_MESSAGE + " Current Tmax=" + str(self.Tmax))
+
+    def getPhases(self, *args, **kwargs):
+        self._require_scan_approval()
+        return {get_phases_result}
+
+    def calcTcTrans(self, *args, **kwargs):
+        self._require_scan_approval()
+        return super().calcTcTrans(*args, **kwargs)
+
+    def findAllTransitions(self, *args, **kwargs):
+        self._require_scan_approval()
+        return super().findAllTransitions(*args, **kwargs)
 
     def _zeroT_vacuum_point(self):
 {vacuum_bindings}
@@ -4033,6 +4148,17 @@ def _render_phase_filter_method(
 ) -> str:
     mode = str(phase_filter.get("mode", "none")).strip() or "none"
     field_tuple = ", ".join(["X"] + [str(row["name"]) for row in fields])
+    if mode == "symmetry_orbits":
+        from .phase_orbits import render_symmetry_orbit_methods
+
+        issues = []
+        field_order = [str(row["name"]) for row in fields]
+        _validate_phase_filter(phase_filter, set(field_order), set(), issues)
+        if issues:
+            raise CompileBlocked("; ".join(issue.message for issue in issues))
+        groups = [[field_order.index(name.strip()) for name in row["field"].split(",")]
+                  for row in phase_filter["rules"]]
+        return render_symmetry_orbit_methods(groups, len(fields), float(phase_filter["rules"][0]["threshold"]))
     if mode == "none":
         body = """
         def forbidPhaseCrit(self, X):
@@ -4137,8 +4263,8 @@ def _render_os_like_helper(*, enabled: bool) -> str:
                 m2 = np.asanyarray(massSq, dtype=float)
                 n = np.asanyarray(dof, dtype=float)
                 m2v = np.asanyarray(vacuumMassSq, dtype=float)
-                vacuum_scale = max(1.0, float(np.max(np.abs(m2v), initial=0.0)))
-                active = np.abs(m2v) > 1e-12*vacuum_scale
+                vacuum_scale = max(OS_MASS_SCALE_FLOOR, float(np.max(np.abs(m2v), initial=0.0)))
+                active = np.abs(m2v) > OS_MASS_RELATIVE_CUTOFF*vacuum_scale
                 denom = np.where(active, np.abs(m2v), 1.0)
                 term = m2*m2*(np.log(np.abs(m2/denom) + 1e-100) - 1.5) + 2.0*m2*m2v
                 term = np.where(active, term, 0.0)
@@ -5490,13 +5616,14 @@ def _placeholder(value: Any) -> bool:
 
 def _numeric_literal(value: Any) -> bool:
     try:
-        float(value)
-    except (TypeError, ValueError):
+        return math.isfinite(float(value))
+    except (TypeError, ValueError, OverflowError):
         return False
-    return True
 
 
 def _float_literal(value: Any) -> str:
+    if not _numeric_literal(value):
+        raise ValueError(f"Expected a finite numeric literal, got {value!r}.")
     return repr(float(value))
 
 

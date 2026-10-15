@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .artifact_layout import proof_materials_dir
-from .model_defaults import DEFAULT_RULES, FILTER_GUIDANCE, POLICY_DEFAULTS
+from .model_defaults import DEFAULT_RULES, FILTER_GUIDANCE, POLICY_DEFAULTS, phase_handling_recommendation
 from .backends import (
     COMPARE_BACKENDS_SENTINEL,
     SUPPORTED_COMPILE_BACKENDS,
@@ -17,6 +17,8 @@ from .backends import (
 )
 from .schemas import FormulaRecord, PaperMemory, ValidationIssue, ValidationReport
 from .template_contract import parse_contract, validate_contract_template
+from .numerical_settings import resolve_numerical_settings, scan_approval_message
+from .spheno_benchmark import benchmark_review_lines
 
 
 @dataclass(frozen=True)
@@ -47,7 +49,9 @@ def backend_selection_question(compile_backend: str | None = None) -> dict[str, 
     }
 
 
-def build_question_packets(issues: list[ValidationIssue], contract: dict[str, Any]) -> list[QuestionPacket]:
+def build_question_packets(
+    issues: list[ValidationIssue], contract: dict[str, Any], *, phase_tracing: bool | None = None,
+) -> list[QuestionPacket]:
     """Fuse related validation blockers into one user-answerable question packet."""
 
     groups: dict[str, list[ValidationIssue]] = {}
@@ -58,7 +62,18 @@ def build_question_packets(issues: list[ValidationIssue], contract: dict[str, An
             groups[key] = []
             order.append(key)
         groups[key].append(issue)
-    return [QuestionPacket(key=key, issues=tuple(groups[key])) for key in order]
+    packets = [QuestionPacket(key=key, issues=tuple(groups[key])) for key in order]
+    try:
+        numerical = resolve_numerical_settings(contract)
+    except ValueError:
+        numerical = None  # Invalid settings already appear in validation blockers.
+    if (phase_tracing is not False and numerical and not numerical["Tmax_approved"]
+            and "numerical_settings.Tmax" not in groups):
+        packets.append(QuestionPacket("numerical_settings.Tmax", (ValidationIssue(
+            severity="warning", field_key="numerical_settings.Tmax", code="scan_approval_required",
+            message=scan_approval_message(numerical),
+        ),)))
+    return packets
 
 
 def question_packet_to_dict(
@@ -68,6 +83,18 @@ def question_packet_to_dict(
     memory: PaperMemory | None = None,
     compile_backend: str = "",
 ) -> dict[str, Any]:
+    if packet.key == "numerical_settings.Tmax":
+        numerical = resolve_numerical_settings(contract)
+        return {
+            "field_key": packet.key,
+            "field_keys": ["numerical_settings.Tmax", "numerical_settings.Tmax_approved", "numerical_settings.Tmax_approved_value"],
+            "question": f"For phase tracing, approve Tmax={numerical['Tmax']:g}, or supply a different confirmed upper temperature?",
+            "reason": "scan_approval_required",
+            "blocks": "temperature_scan_only",
+            "suggested_action": scan_approval_message(numerical),
+            "current_thought": numerical["Tmax_basis"],
+            "compile_backend": compile_backend,
+        }
     issue = packet.representative
     target = _question_target(issue.field_key, contract)
     is_packet = len(packet.issues) > 1 or _always_render_as_packet(packet.key)
@@ -77,7 +104,7 @@ def question_packet_to_dict(
         "question": _packet_prompt(packet, target),
         "reason": "question_packet" if is_packet else issue.code,
         "suggested_action": _packet_agent_action(packet),
-        "current_thought": _packet_recommendation(packet, target, memory),
+        "current_thought": _packet_recommendation(packet, target, memory, contract),
         "compile_backend": compile_backend,
     }
 
@@ -89,6 +116,7 @@ def build_user_guidance_markdown(
     template_path: str | Path | None = None,
     memory: PaperMemory | None = None,
     compile_backend: str | None = None,
+    phase_tracing: bool | None = None,
 ) -> str:
     """Render validation blockers as human-facing questions and edit targets."""
 
@@ -112,7 +140,11 @@ def build_user_guidance_markdown(
         issue.field_key == "review.approved" for issue in all_blocking
     )
     blocking = nonapproval_blocking if approval_deferred else all_blocking
-    packets = build_question_packets(blocking, contract)
+    packets = build_question_packets(blocking, contract, phase_tracing=phase_tracing)
+    try:
+        numerical = resolve_numerical_settings(contract)
+    except ValueError:
+        numerical = None  # Invalid settings already appear in the validation blockers.
     lines = [
         "# PTagent Question Mode",
         "",
@@ -136,6 +168,24 @@ def build_user_guidance_markdown(
             "Label backend-dependent choices conditionally; do not assume a backend.",
             "",
         ])
+    manifest_path = contract.get("model_card", {}).get("sarah_preparation_manifest")
+    if manifest_path:
+        try:
+            benchmark = json.loads(Path(manifest_path).read_text(encoding="utf-8")).get("benchmark_recommendation")
+            if benchmark and benchmark.get("status") != "not_needed":
+                lines.extend(benchmark_review_lines(benchmark))
+                lines.extend(["Include acceptance of this source example and any remaining input/scale/policy questions in the same answer batch. Do not replace values already provided by the user.", ""])
+        except (OSError, ValueError, KeyError, TypeError):
+            lines.extend(["The source benchmark recommendation could not be read; inspect the preparation report before requesting inputs.", ""])
+    if numerical:
+        lines.extend([
+            "## Temperature Scan Status", "",
+            f"- Status: `{numerical['scan_status']}`; Tmax={numerical['Tmax']:g} in contract units.",
+            f"- Basis: {numerical['Tmax_basis']}",
+            f"- Impact: {numerical['Tmax_impact']}",
+            "- This is not a compile or potential-smoke blocker. Include the scan-only question in the complete answer batch when phase tracing is requested; for potential-only work it can be deferred.",
+            "",
+        ])
     if not all_blocking:
         status = "No blocking questions remain. Review the rendered Markdown, then run compile when ready."
         if backend_gate:
@@ -148,7 +198,8 @@ def build_user_guidance_markdown(
                 "",
             ]
         )
-        return "\n".join(lines)
+        if not packets:
+            return "\n".join(lines)
 
     lines.extend(
         [
@@ -196,6 +247,7 @@ def write_user_guidance(
     output_path: str | Path | None = None,
     memory_path: str | Path | None = None,
     compile_backend: str | None = None,
+    phase_tracing: bool | None = None,
 ) -> tuple[Path, ValidationReport]:
     template = Path(template_path).expanduser().resolve()
     template_markdown = template.read_text(encoding="utf-8")
@@ -216,6 +268,7 @@ def write_user_guidance(
             template_path=template,
             memory=memory,
             compile_backend=compile_backend,
+            phase_tracing=phase_tracing,
         ),
         encoding="utf-8",
     )
@@ -300,6 +353,19 @@ def _render_question_packet(
     *,
     compile_backend: str = "",
 ) -> list[str]:
+    if packet.key == "numerical_settings.Tmax":
+        numerical = resolve_numerical_settings(contract)
+        return [
+            f"### Q{number}. Temperature range (phase tracing only)", "",
+            f"- Proposed Tmax: `{numerical['Tmax']:g}` in contract units.",
+            f"- Materials checked and basis: {numerical['Tmax_basis']}",
+            f"- Possible impact: {numerical['Tmax_impact']}",
+            "- Why this blocks scanning only: the upper search limit has not been explicitly confirmed; potential construction, compilation and ordinary smoke checks can proceed.",
+            f"- Ask the user: for phase tracing, approve Tmax={numerical['Tmax']:g}, or provide a different confirmed upper temperature? Answer this together with all other applicable questions, not in a later serial round.",
+            "- Edit target: Section 11 `Numerical Settings`; record the confirmed `Tmax`, its `Tmax_basis`, `Tmax_approved=true`, and the same number in `Tmax_approved_value`, then regenerate.",
+            "- `x_eps` remains 0.001 unless explicitly overridden in that section; it needs no separate approval.",
+            "", "```text", f"Q{number}: ", "```", "",
+        ]
     if len(packet.issues) == 1 and not _always_render_as_packet(packet.key):
         return _render_issue_question(number, packet.representative, contract, memory, compile_backend=compile_backend)
 
@@ -320,7 +386,7 @@ def _render_question_packet(
         f"- Edit targets: {edit_targets}",
         f"- Accepted format: {_packet_format(packet, target)}",
         f"- Ask the user: {_packet_prompt(packet, target)}",
-        f"- My current thought (reviewable): {_packet_recommendation(packet, target, memory)}",
+        f"- My current thought (reviewable): {_packet_recommendation(packet, target, memory, contract)}",
         f"- The agent should handle first: {agent_action}",
         f"- If you accept my recommendation: the agent will {agent_action} Then it will apply the answer batch and rerun `resolve` to check remaining blockers.",
     ]
@@ -433,7 +499,7 @@ def _packet_format(packet: QuestionPacket, target: dict[str, str]) -> str:
     if packet.key == "model_card.physics_conventions":
         return "`key=value` lines for the listed Model Card rows; use the allowed choices shown in the template."
     if packet.key == "implementation.phase_filter":
-        return "`mode=none` or `mode=negative_field_threshold; rule: field < threshold, phase_type=..., reason=...`."
+        return "Confirm the proposed `mode` and rule rows: independent sign cuts use `negative_field_threshold`; coupled trajectory deduplication uses `symmetry_orbits`. State any correction explicitly."
     if packet.key == "implementation.symmetry":
         return "`mode=none` or `mode=z2_reflection; rules: fields=s, transformation=sign_flip, reason=...`."
     if packet.key == "symbols.unknown":
@@ -449,9 +515,9 @@ def _packet_prompt(packet: QuestionPacket, target: dict[str, str]) -> str:
     if packet.key == "model_card.physics_conventions":
         return "Please confirm the unresolved high-level physics choices as one set. If PTagent's current thought is correct, answer with the key=value lines to apply."
     if packet.key == "implementation.phase_filter":
-        return "For CosmoTransitions, please confirm the forbidden-phase policy. My recommendation is `mode=none` unless the paper/reference code explicitly removes a duplicate or unphysical traced branch; if filtering is intended, give the complete rule in one answer: field, comparison, threshold, phase_type, and reason."
+        return "For CosmoTransitions, please review the proposed representative region below, which removes symmetry-duplicate branches. The detected generators, field cuts, tolerances and reasons are supplied together; accept them or state a correction."
     if packet.key == "implementation.symmetry":
-        return "For PhaseTracer, please confirm the apply_symmetry(phi) policy. My recommendation is `mode=none` unless you want PhaseTracer to merge reviewed symmetry-equivalent field points; if enabled, give the reviewed sign-flip field group(s) and reason."
+        return "For PhaseTracer, please review the detected sign-flip generators below for apply_symmetry(phi). Each row is one simultaneous transformation; separate rows are independent generators. Accept these rules or state a correction."
     if packet.key == "symbols.unknown":
         return "Please classify these unknown symbols together, or point out typos in the compiler expressions."
     if packet.key.startswith("masses."):
@@ -467,23 +533,29 @@ def _packet_plain_language(packet: QuestionPacket, target: dict[str, str], compi
     if packet.key == "model_card.physics_conventions":
         return "These top-level choices control later formula routes, so resolving them together avoids asking the user about downstream details too early."
     if packet.key == "implementation.phase_filter":
-        return "The phase-filter mode and its concrete rule are the same CosmoTransitions decision. It affects which traced phases enter transition finding, so even the default `none` policy must be confirmed by the user."
+        return "The phase-filter rule retains a representative of symmetry-equivalent phases. A coupled reflection must not be replaced by independent cuts that remove physically distinct phases."
     if packet.key == "implementation.symmetry":
-        return "PhaseTracer symmetry mode and sign-flip rows describe one equivalence rule. It affects duplicate phase counting through apply_symmetry(phi) so symmetry-equivalent points are not counted as distinct phases; even the default `none` policy must be confirmed by the user."
+        return "The generated apply_symmetry(phi) partners identify symmetry-equivalent points and prevent duplicate phase counting. The full potential must preserve the proposed equivalences."
     if packet.key.startswith("masses."):
         return "A mass row is useful only when its formula, d.o.f., and loop metadata are consistent as one reviewed object."
     return _plain_language_explanation(packet.representative, target, compile_backend)
 
 
-def _packet_recommendation(packet: QuestionPacket, target: dict[str, str], memory: PaperMemory | None) -> str:
+def _packet_recommendation(packet: QuestionPacket, target: dict[str, str], memory: PaperMemory | None, contract: dict | None = None) -> str:
     if packet.key == "parameters.public_inputs":
         return "ask this as one mandatory input-basis gate; fixed conventions should be moved out before bothering the user."
     if packet.key == "model_card.physics_conventions":
         return "auto-fill choices explicitly stated in the source or by the user. " + DEFAULT_RULES
-    if packet.key == "implementation.phase_filter":
-        return "recommend `mode=none` unless a full-potential duplicate or unphysical branch has been established. " + FILTER_GUIDANCE
-    if packet.key == "implementation.symmetry":
-        return "recommend `mode=none` unless the user confirms PhaseTracer should merge reviewed symmetry-equivalent field points. Use `z2_reflection` only for an explicitly reviewed sign-flip invariance and list the field group(s)."
+    if packet.key in {"implementation.phase_filter", "implementation.symmetry"}:
+        backend = "phasetracer" if packet.key.endswith(".symmetry") else "cosmotransitions"
+        current = ((contract or {}).get("implementation") or {}).get(packet.key.rsplit(".", 1)[-1], {})
+        if str(current.get("mode", "")).strip() not in {"", "ASK_USER", "TBD", "unknown", "unresolved"}:
+            missing = ", ".join(issue.field_key for issue in packet.issues)
+            return (f"Preserve the existing mode and rules: {json.dumps(current)}. "
+                    f"Resolve only these outstanding items: {missing}. "
+                    "Do not replace chosen fields, thresholds or transformations with a new default.")
+        proposal = phase_handling_recommendation(contract or {}, backend)
+        return f"Proposed mode={proposal['mode']}; rules={json.dumps(proposal['rules'])}. {proposal['reason']}"
     if packet.key.startswith("masses."):
         return "The agent should fill source-exact mass expressions and standard CW constants itself, then ask only for conflicting or missing physics metadata."
     if packet.key == "symbols.unknown":
@@ -742,7 +814,7 @@ def _question_target(field_key: str, contract: dict[str, Any]) -> dict[str, str]
             **base,
             "title": "CosmoTransitions phase filtering policy",
             "edit_target": "Section 6 `CosmoTransitions Phase Filtering`.",
-            "format": "`none`, `negative_field_threshold`, or `custom_expr`; if filtering is enabled, fill the rule rows with phase type and threshold.",
+            "format": "`negative_field_threshold`, `symmetry_orbits`, `custom_expr`, or an explicitly justified `none`; preserve existing rule values and resolve missing cells only.",
             "notes": "This affects CosmoTransitions phase tracing, not the effective potential. For PhaseTracer use the Symmetry section. Custom and/or expressions compile to backend-safe boolean logic. " + FILTER_GUIDANCE,
         }
     if field_key.startswith("implementation.symmetry"):

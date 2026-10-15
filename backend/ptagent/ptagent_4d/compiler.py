@@ -26,6 +26,7 @@ def compile_usage_instructions(model_path: Path, backend: str, *, phasetracer_ro
             "Import usage: load the file as a Python module, then call build_model().",
             "Tc usage: build_model() runs calcTcTrans() by default, prints PTAGENT_TCTRANS lines, and stores the raw result on model.PTAGENT_TC_TRANS.",
             "Quiet usage: call build_model(run_tc=False, print_tc=False) when you only want the model object.",
+            "Scan approval: confirm Tmax in contract section 11. Numerical Settings, set Tmax_approved=true and Tmax_approved_value=Tmax, then regenerate. Potential/smoke calls remain available without scan approval; x_eps is configurable in the same section.",
         ]
     if backend_key == "phasetracer":
         project_dir = path.parent.resolve()
@@ -37,5 +38,6 @@ def compile_usage_instructions(model_path: Path, backend: str, *, phasetracer_ro
             f"Linux build: cd <linux-path-to-generated-project> && cmake -S . -B build -DPHASETRACER_ROOT={root}",
             "Potential smoke: cmake --build build --target run_model && ./build/run_model",
             "Tc smoke: cmake --build build --target run_model && ./build/run_model --transition",
+            "Scan approval: --transition requires user-confirmed Tmax in contract section 11. Numerical Settings (Tmax_approved=true, Tmax_approved_value=Tmax); regenerate after confirmation. Ordinary potential smoke needs no Tmax approval.",
         ]
     return [f"Generated model path: {path}"]

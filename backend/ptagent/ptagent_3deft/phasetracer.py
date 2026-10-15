@@ -9,14 +9,19 @@ from pathlib import Path
 from typing import Any
 
 from ..symmetry_analysis import analyze_sign_flip_symmetries
-from .contract import ThreeDeftBlocked, ensure_ready, parse_contract, validate_contract_template
+from .contract import ThreeDeftBlocked, _field_normalization_mode, ensure_compile_approval, ensure_ready, parse_contract, physical_spec_hash, validate_contract_template
+from ..runtime_metadata import collect_software_versions
 from .layout import default_phasetracer_dir
 from .mathematica_expr import convert_mathematica_inputform_expression, looks_like_mathematica_inputform
+from .model_check import DEFAULT_ATOL, DEFAULT_RTOL, finite_comparison, validate_tolerances
 
 _THREE_D_SCALE_ALIAS_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("mu_3_scale", ("mu_3", "mu3")),
     ("mu_3_us_scale", ("mu_3_us", "mu_3us", "mu3us", "mu3US")),
 )
+_POSITIVE_SCALE_ALIASES = {"mu", "mu4", "mu_4", "xi4", "xi_4"} | {
+    name for key, aliases in _THREE_D_SCALE_ALIAS_GROUPS for name in (key, *aliases)
+}
 _THREE_D_US_DYNAMIC_SCALE_NAMES = {
     "mu",
     "mu_3_us",
@@ -70,6 +75,7 @@ class PhaseTracerRenderResult:
     metadata_path: Path
     reference_value: float | None = None
     warnings: tuple[str, ...] = ()
+    validation_status: str = "generated_unverified"
 
 
 @dataclass(frozen=True)
@@ -102,6 +108,8 @@ def compile_phasetracer_template(
     template_path: str | Path,
     *,
     output_dir: str | Path | None = None,
+    atol: float = DEFAULT_ATOL,
+    rtol: float = DEFAULT_RTOL,
 ) -> PhaseTracerRenderResult:
     """Generate a PhaseTracer-compatible project from a 3DEFT contract."""
 
@@ -115,13 +123,14 @@ def compile_phasetracer_template(
     target = Path(output_dir) if output_dir else default_phasetracer_dir(template_path, f"{artifact_name}_phasetracer")
     target.mkdir(parents=True, exist_ok=True)
 
-    render = _render_cpp_project(contract)
+    render = _render_cpp_project(contract, atol=atol, rtol=rtol)
     header_path = target / render["header_filename"]
     run_model_path = target / "run_model.cpp"
     cmake_path = target / "CMakeLists.txt"
     metadata_path = target / "metadata.json"
     header_path.write_text(render["header"], encoding="utf-8")
     run_model_path.write_text(render["run_model"], encoding="utf-8")
+    (target / "source_probe.cpp").write_text(render["source_probe"], encoding="utf-8")
     cmake_path.write_text(render["cmake"], encoding="utf-8")
     metadata_path.write_text(json.dumps(render["metadata"], ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
 
@@ -136,7 +145,9 @@ def compile_phasetracer_template(
     )
 
 
-def _render_cpp_project(contract: dict[str, Any]) -> dict[str, Any]:
+def _render_cpp_project(contract: dict[str, Any], *, atol: float = DEFAULT_ATOL, rtol: float = DEFAULT_RTOL) -> dict[str, Any]:
+    ensure_compile_approval(contract)
+    validate_tolerances(atol, rtol)
     artifact_name = _model_artifact_name(contract)
     class_name = _cpp_class_name(artifact_name)
     header_filename = f"{artifact_name}.hpp"
@@ -150,6 +161,12 @@ def _render_cpp_project(contract: dict[str, Any]) -> dict[str, Any]:
     consumption = contract.get("three_d_consumption", {})
     phasetracer = contract.get("phasetracer", {})
     interface = _phasetracer_interface(contract)
+    normalization = consumption.get("field_normalization")
+    if normalization is not None and _normalization_mode(normalization) == "unsupported":
+        raise ThreeDeftBlocked(f"Unsupported 3D field normalization {normalization!r}; extra factors such as Z(T) cannot be rendered.")
+    field_map_description = interface.get("field_3d_to_phasetracer_map", "")
+    if re.search(r"\b(?:Z\w*\s*[\[(]|wave[_ -]?function|field[_ -]?renormalization)", field_map_description, re.IGNORECASE):
+        raise ThreeDeftBlocked("Unsupported extra field-renormalization factor in field_3d_to_phasetracer_map; Z(T) cannot be rendered.")
     rg_matching = contract.get("rg_matching", {})
     runtime_rg = _runtime_rg_enabled(contract)
     beta_functions = _beta_functions(contract, running_inputs) if runtime_rg else {}
@@ -401,6 +418,8 @@ def _render_cpp_project(contract: dict[str, Any]) -> dict[str, Any]:
             )
             if not math.isfinite(value)
         ]
+        invalid_values.extend(name for name, value in candidate_env.items() if not math.isfinite(value))
+        invalid_values.extend(invalid_terms)
         if invalid_values:
             return invalid_reference_result(
                 candidate_env=candidate_env,
@@ -613,12 +632,32 @@ def _render_cpp_project(contract: dict[str, Any]) -> dict[str, Any]:
         )
         if line
     )
-    constructor_body = f" {{\n{scale_setters}\n  }}" if scale_setters else " {}"
+    input_checks = _render_finite_member_checks(inputs, "input_", "InputParameters")
+    constructor_body = f" {{\n{input_checks}\n{scale_setters}\n  }}"
+    running_checks = _render_finite_member_checks(running_inputs, "values", "RunningParameters")
+    parameter_checks = _render_finite_member_checks((coeff["name"] for coeff in coefficients), "values", "ThreeDParameters")
+    field_checks = _render_finite_member_checks((field["name"] for field in fields), "values", "ThreeDFields")
     class_comment = (
         "  // This class evaluates the reviewed total 3D EFT potential.\n"
         "  // The field map, parameter evaluation, and V3D-to-V(phi,T) prefactor\n"
         "  // are recorded in the contract and implemented below."
     )
+    order_methods = []
+    for order, expression in v3d_terms:
+        block = _render_v3d_order_block(order, expression, allowed_names=potential_allowed_names, field_names=field_names)
+        order_methods.append(f"""
+  double evaluate_v3d_{order}(const ThreeDFields& fields, const ThreeDParameters& params, double T) const {{
+    check_temperature(T);
+    checked_3d_fields(fields);
+    checked_3d_parameters(params);
+{v3d_field_alias_lines}
+{v3d_coefficient_alias_lines}
+{v3d_running_alias_block}
+{v3d_scale_alias_block}
+{block.lines}
+    return require_finite({block.result_name}, "V3D_{order}");
+  }}
+""")
     header = f"""#pragma once
 
 #include <algorithm>
@@ -626,6 +665,7 @@ def _render_cpp_project(contract: dict[str, Any]) -> dict[str, Any]:
 #include <cmath>
 #include <limits>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 #include <eigen3/Eigen/Core>
@@ -659,6 +699,7 @@ class {class_name} final : public EffectivePotential::Potential {{
   }};
 
   RunningParameters get_running_parameters(double T) const {{
+    check_temperature(T);
 {running_body}
   }}
 
@@ -667,6 +708,7 @@ class {class_name} final : public EffectivePotential::Potential {{
 
   // Matched 3D parameters before optional ultrasoft running.
   ThreeDParameters get_matched_3d_parameters(double T) const {{
+    check_temperature(T);
 {matched_void_lines}
 {matched_running_alias_block}
 {matched_scale_alias_block}
@@ -683,7 +725,9 @@ class {class_name} final : public EffectivePotential::Potential {{
   }}
 
   ThreeDFields get_3d_fields(Eigen::VectorXd phase_tracer_fields, double T) const {{
+    check_temperature(T);
     check_field_count(phase_tracer_fields);
+    if (!phase_tracer_fields.allFinite()) throw std::invalid_argument("3DEFT fields must be finite.");
 {field_void_lines}
 {field_unpack}
 {field_return}
@@ -691,28 +735,34 @@ class {class_name} final : public EffectivePotential::Potential {{
 
   // Total reviewed V3D in canonical 3D fields.
   double evaluate_v3d(const ThreeDFields& fields, const ThreeDParameters& params, double T) const {{
+    check_temperature(T);
+    checked_3d_fields(fields);
+    checked_3d_parameters(params);
 {v3d_void_lines}
 {v3d_field_alias_lines}
 {v3d_coefficient_alias_lines}
 {v3d_running_alias_block}
 {v3d_scale_alias_block}
 {v3d_block.lines}
-    return {v3d_block.result_name};
+    return require_finite({v3d_block.result_name}, "V3D");
   }}
 
   double potential_prefactor(double T) const {{
+    check_temperature(T);
 {prefactor_void_lines}
 {prefactor_running_alias_block}
 {prefactor_scale_alias_block}
 {prefactor_block.lines}
-    return {prefactor_block.result_name};
+    return require_finite({prefactor_block.result_name}, "potential_prefactor");
   }}
+
+{chr(10).join(order_methods)}
 
   double V(Eigen::VectorXd phase_tracer_fields, double T) const override {{
     const ThreeDFields fields = get_3d_fields(phase_tracer_fields, T);
     const ThreeDParameters params = get_3d_parameters(T);
     const double v3d = evaluate_v3d(fields, params, T);
-    return potential_prefactor(T) * v3d;
+    return require_finite(potential_prefactor(T) * v3d, "V(phi,T)");
   }}
 
 {symmetry_methods}
@@ -726,7 +776,36 @@ class {class_name} final : public EffectivePotential::Potential {{
   static constexpr double kPi = 3.14159265358979323846;
   static constexpr double kEulerGamma = 0.57721566490153286061;
   static constexpr double kGlaisher = 1.28242712910062263688;
-  static constexpr double kTemperatureFloor = 1e-15;
+  static double require_finite(double value, const char* name) {{
+    if (!std::isfinite(value)) throw std::domain_error(std::string(name) + " must be finite.");
+    return value;
+  }}
+
+  static double require_positive_scale(double value, const char* name) {{
+    if (!std::isfinite(value) || value <= 0.0) {{
+      throw std::invalid_argument(std::string(name) + " must be finite and positive.");
+    }}
+    return value;
+  }}
+
+  static void check_temperature(double T) {{
+    require_positive_scale(T, "3DEFT temperature");
+  }}
+
+  static RunningParameters checked_running_parameters(const RunningParameters& values) {{
+{running_checks}
+    return values;
+  }}
+
+  static ThreeDParameters checked_3d_parameters(const ThreeDParameters& values) {{
+{parameter_checks}
+    return values;
+  }}
+
+  static ThreeDFields checked_3d_fields(const ThreeDFields& values) {{
+{field_checks}
+    return values;
+  }}
 
   static double sqr(double value) {{
     return value * value;
@@ -770,8 +849,24 @@ class {class_name} final : public EffectivePotential::Potential {{
 #include <cstdlib>
 #include <iomanip>
 #include <iostream>
+#include <algorithm>
+#include <cmath>
+#include <string>
 
-int main() {{
+int main(int argc, char** argv) {{
+  double atol = {_cpp_float(atol)};
+  double rtol = {_cpp_float(rtol)};
+  if (argc == 4 && std::string(argv[1]) == "--tolerances") {{
+    try {{ atol = std::stod(argv[2]); rtol = std::stod(argv[3]); }}
+    catch (const std::exception&) {{ return EXIT_FAILURE; }}
+  }} else if (argc != 1) {{ return EXIT_FAILURE; }}
+  if (!std::isfinite(atol) || !std::isfinite(rtol) || atol < 0 || rtol < 0) return EXIT_FAILURE;
+  std::cout << std::setprecision(17);
+  std::cout << "Validation.atol " << atol << "\\nValidation.rtol " << rtol << "\\n";
+  if (!{str(bool(reference_result['valid'])).lower()}) {{
+    std::cout << "Validation.status generated_unverified\\n";
+    return 3;
+  }}
   ptagent_3deft::{class_name}::InputParameters input{{}};
 {input_initializers}
   ptagent_3deft::{class_name} model(input);
@@ -808,10 +903,19 @@ int main() {{
   }}
   std::cout << "\\n";
   std::cout << "Reference.FullPathVDiagnostic " << full_path_value << "\\n";
-  return EXIT_SUCCESS;
+  std::cout << "Reference.FullPathExpectedV " << expected_value << "\\n";
+  std::cout << "Reference.FullPathDiffV " << (full_path_value - expected_value) << "\\n";
+  const auto close = [atol, rtol](double a, double b) {{
+    return std::isfinite(a) && std::isfinite(b) && std::isfinite(a - b) &&
+      std::abs(a - b) <= atol + rtol * std::max({{std::abs(a), std::abs(b), 1.0}});
+  }};
+  const bool passed = close(direct_v3d, expected_v3d) && close(direct_prefactor, expected_prefactor)
+    && close(direct_value, expected_value) && close(full_path_value, expected_value);
+  std::cout << "Validation.status " << (passed ? "passed" : "failed") << "\\n";
+  return passed ? EXIT_SUCCESS : EXIT_FAILURE;
 }}
 """
-    if expected_numeric is not None and not _close_enough(reference_value, expected_numeric):
+    if expected_numeric is not None and not finite_comparison(reference_value, expected_numeric, atol=atol, rtol=rtol)["ok"]:
         raise ThreeDeftBlocked(
             "Reference V(phi,T) does not agree with the reviewed expected value: "
             f"computed {reference_value}, expected {expected_numeric}."
@@ -840,19 +944,81 @@ target_include_directories(run_model PRIVATE
   ${{PHASETRACER_ROOT}}/include
 )
 target_link_libraries(run_model PRIVATE phasetracer effectivepotential)
+
+add_executable(source_probe source_probe.cpp)
+target_include_directories(source_probe PRIVATE
+  ${{CMAKE_CURRENT_SOURCE_DIR}}
+  ${{PHASETRACER_ROOT}}/EffectivePotential/include
+  ${{PHASETRACER_ROOT}}/EffectivePotential/include/effectivepotential
+  ${{PHASETRACER_ROOT}}/include
+)
+target_link_libraries(source_probe PRIVATE phasetracer effectivepotential)
+"""
+    probe_lines = []
+    for spec in fields:
+        probe_lines.append(f'    emit("fields_3d.{spec["name"]}", fields.{spec["name"]});')
+    for coeff in coefficients:
+        for group, variable in (("parameters_matched", "matched"), ("parameters_3d", "params")):
+            probe_lines.append(f'    emit("{group}.{coeff["name"]}", {variable}.{coeff["name"]});')
+    for order, _ in v3d_terms:
+        probe_lines.append(f'    emit("orders.{order}", model.evaluate_v3d_{order}(fields, params, T));')
+    source_probe = f"""#include "{header_filename}"
+#include <cstdlib>
+#include <iomanip>
+#include <iostream>
+#include <string>
+
+int main(int argc, char** argv) {{
+  if (argc != {len(fields) + 2}) return EXIT_FAILURE;
+  try {{
+    const double T = std::stod(argv[1]);
+    Eigen::VectorXd phi({len(fields)});
+    for (Eigen::Index i = 0; i < phi.size(); ++i) phi[i] = std::stod(argv[i + 2]);
+    ptagent_3deft::{class_name}::InputParameters input{{}};
+{input_initializers}
+    ptagent_3deft::{class_name} model(input);
+    const auto fields = model.get_3d_fields(phi, T);
+    const auto matched = model.get_matched_3d_parameters(T);
+    const auto params = model.get_3d_parameters(T);
+    bool finite = true;
+    std::cout << std::setprecision(17);
+    const auto emit = [&finite](const char* label, double value) {{
+      finite = finite && std::isfinite(value);
+      std::cout << label << " " << value << "\\n";
+    }};
+{chr(10).join(probe_lines)}
+    emit("V3D", model.evaluate_v3d(fields, params, T));
+    emit("prefactor", model.potential_prefactor(T));
+    emit("V", model.V(phi, T));
+    return finite ? EXIT_SUCCESS : EXIT_FAILURE;
+  }} catch (const std::exception& error) {{
+    std::cerr << error.what() << "\\n";
+    return EXIT_FAILURE;
+  }}
+}}
 """
     metadata = {
         "schema": "ptagent.3deft.phasetracer_project.v1",
+        "physical_spec_hash": physical_spec_hash(contract),
+        "source_hash": contract.get("source_hash"),
+        "software_versions": collect_software_versions(),
         "model_name": contract.get("model_name", "three_deft_model"),
         "artifact_name": artifact_name,
         "cpp_class": class_name,
         "header": header_filename,
         "backend": "phasetracer",
+        "numerical_validation": {
+            "status": "generated_unverified", "atol": atol, "rtol": rtol,
+            "criterion": "abs(a-b) <= atol + rtol * max(abs(a), abs(b), 1)",
+            "downstream_policy": "Run check-model successfully before production phase scans.",
+        },
+        "source_dralgo_comparison": {"status": "not_run"},
         "phasetracer_base": "EffectivePotential::Potential",
         "requires_phasetracer_root": True,
         "potential_mode": "external_total_3deft",
         "evaluation_policy": "reviewed_total_3d_eft_potential",
         "input_parameters": _input_parameters_for_metadata(inputs),
+        "rg_matching": rg_matching,
         "fields": fields,
         "symbol_audit": contract.get("symbol_audit", []),
         "phasetracer_interface": contract.get("phasetracer_interface", []),
@@ -933,7 +1099,8 @@ target_link_libraries(run_model PRIVATE phasetracer effectivepotential)
             ),
         },
         "full_pipeline_reference_value_python": _metadata_number(reference_value),
-        "full_pipeline_reference_is_diagnostic": True,
+        "full_pipeline_reference_is_diagnostic": False,
+        "full_pipeline_reference_layer": "python_runtime_rg_matching_and_3dus_not_independent_dralgo",
         "v3d_reference_value_python": _metadata_number(v3d_reference_value),
         "prefactor_reference_value_python": _metadata_number(prefactor_reference_value),
         "reference_value_python": _metadata_number(reference_value),
@@ -951,6 +1118,7 @@ target_link_libraries(run_model PRIVATE phasetracer effectivepotential)
         "header_filename": header_filename,
         "header": header,
         "run_model": run_model,
+        "source_probe": source_probe,
         "cmake": cmake,
         "metadata": metadata,
     }
@@ -1036,55 +1204,33 @@ def _field_cpp_assignment(spec: dict[str, Any], index: int) -> str:
     if mode == "identity":
         expression = source
     elif mode == "phase_tracer_over_sqrt_t":
-        expression = f"({source} / std::sqrt(T + kTemperatureFloor))"
+        expression = f"({source} / std::sqrt(T))"
     elif mode == "phase_tracer_times_sqrt_t":
-        expression = f"({source} * std::sqrt(T + kTemperatureFloor))"
+        expression = f"({source} * std::sqrt(T))"
     else:
         raise ThreeDeftBlocked(
             f"Unsupported 3D field normalization {spec.get('normalization')!r} for field {name!r}. "
             "Use canonical_3d/phase_tracer/sqrt(T), explicit identity, or phase_tracer*sqrt(T), "
-            "or extend the independent 3DEFT renderer."
+            "Extra temperature-dependent wavefunction factors such as Z(T) are unsupported; compilation is blocked."
         )
     return f"    const double {name} = {expression};"
 
 
 def _field_reference_value(spec: dict[str, Any], phase_tracer_value: float, temperature: float) -> float:
+    if not math.isfinite(temperature) or temperature <= 0 or not math.isfinite(phase_tracer_value):
+        raise ThreeDeftBlocked("3DEFT field conversion requires finite fields and finite T > 0.")
     mode = _normalization_mode(spec.get("normalization", ""))
     if mode == "identity":
         return phase_tracer_value
     if mode == "phase_tracer_over_sqrt_t":
-        return phase_tracer_value / math.sqrt(temperature + 1e-15)
+        return phase_tracer_value / math.sqrt(temperature)
     if mode == "phase_tracer_times_sqrt_t":
-        return phase_tracer_value * math.sqrt(temperature + 1e-15)
+        return phase_tracer_value * math.sqrt(temperature)
     raise ThreeDeftBlocked(f"Unsupported 3D field normalization {spec.get('normalization')!r}.")
 
 
 def _normalization_mode(value: Any) -> str:
-    normalized = re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().casefold()).strip("_")
-    if normalized in {"identity", "none", "phase_tracer", "phasetracer"}:
-        return "identity"
-    if normalized in {
-        "",
-        "canonical",
-        "canonical_3d",
-        "phase_tracer_sqrt_t",
-        "phase_tracer_over_sqrt_t",
-        "phasetracer_sqrt_t",
-        "phasetracer_over_sqrt_t",
-        "pt_over_sqrt_t",
-        "phi_over_sqrt_t",
-        "1_sqrt_t",
-    }:
-        return "phase_tracer_over_sqrt_t"
-    if normalized in {
-        "phase_tracer_times_sqrt_t",
-        "phasetracer_times_sqrt_t",
-        "pt_times_sqrt_t",
-        "sqrt_t_phase_tracer",
-        "sqrt_t_phasetracer",
-    }:
-        return "phase_tracer_times_sqrt_t"
-    return "unsupported"
+    return _field_normalization_mode(value or "canonical_3d")
 
 
 def _phasetracer_interface(contract: dict[str, Any]) -> dict[str, str]:
@@ -1331,6 +1477,8 @@ def _render_scale_alias_block(
             input_names=set(),
         ).render(expression)
         lines.append(f"    const double {alias} = {rendered};")
+        check = "require_positive_scale" if alias in _POSITIVE_SCALE_ALIASES else "require_finite"
+        lines.append(f'    {check}({alias}, "scale alias {alias}");')
         defined_aliases.add(alias)
     return "\n".join(lines)
 
@@ -1338,7 +1486,15 @@ def _render_scale_alias_block(
 def _eval_scale_aliases(scale_expressions: dict[str, str], env: dict[str, float]) -> dict[str, float]:
     values: dict[str, float] = {}
     for alias, expression in scale_expressions.items():
-        values[alias] = _eval_expr(expression, {**env, **values})
+        try:
+            value = _eval_expr(expression, {**env, **values})
+        except (OverflowError, ValueError, ZeroDivisionError) as exc:
+            raise ThreeDeftBlocked(f"Could not evaluate scale alias {alias}: {exc}") from exc
+        if alias in _POSITIVE_SCALE_ALIASES:
+            _require_positive_scale(value, f"scale alias {alias}")
+        elif not math.isfinite(value):
+            raise ThreeDeftBlocked(f"Scale alias {alias} must be finite.")
+        values[alias] = value
     return values
 
 
@@ -1469,7 +1625,9 @@ def _common_input_scale(inputs: dict[str, dict[str, Any]]) -> float:
     scales = {_number(spec.get("input_scale")) for spec in inputs.values()}
     if len(scales) != 1:
         raise ThreeDeftBlocked("4D running currently requires all input parameters to share one numeric input_scale.")
-    return next(iter(scales))
+    scale = next(iter(scales))
+    _require_positive_scale(scale, "4D input_scale")
+    return scale
 
 
 def _running_scale_expression(value: Any) -> str:
@@ -1638,6 +1796,10 @@ def _render_input_struct(inputs: dict[str, dict[str, Any]]) -> str:
     return "\n".join(f"    double {name} = 0.0;" for name in inputs)
 
 
+def _render_finite_member_checks(names, source: str, label: str) -> str:
+    return "\n".join(f'    require_finite({source}.{name}, "{label}.{name}");' for name in names)
+
+
 def _render_input_initializers(inputs: dict[str, dict[str, Any]]) -> str:
     return "\n".join(
         f"  input.{name} = {_cpp_float(spec['test_value'])};"
@@ -1653,9 +1815,9 @@ def _render_parameter_struct(coefficients: list[dict[str, str]]) -> str:
 
 def _render_parameter_return(coefficients: list[dict[str, str]]) -> str:
     if not coefficients:
-        return "    return ThreeDParameters{};"
+        return "    return checked_3d_parameters(ThreeDParameters{});"
     values = ", ".join(coeff["name"] for coeff in coefficients)
-    return f"    return ThreeDParameters{{{values}}};"
+    return f"    return checked_3d_parameters(ThreeDParameters{{{values}}});"
 
 
 def _render_3dus_parameter_running_method(
@@ -1670,8 +1832,8 @@ def _render_3dus_parameter_running_method(
 ) -> str:
     if not beta_functions:
         return """  ThreeDParameters apply_3dus_parameter_running(const ThreeDParameters& matched, double T) const {
-    (void)T;
-    return matched;
+    check_temperature(T);
+    return checked_3d_parameters(matched);
   }"""
     if mode == "rk4_log_mu":
         return _render_3dus_numeric_running_method(coefficients, inputs, running_inputs, scale_expressions, beta_functions, ode_steps=ode_steps)
@@ -1721,17 +1883,18 @@ def _render_3dus_analytic_running_method(
         for coeff in coefficients
     )
     return f"""  ThreeDParameters apply_3dus_parameter_running(const ThreeDParameters& matched, double T) const {{
+    check_temperature(T);
+    checked_3d_parameters(matched);
 {method_void_lines}
 {running_alias_block}
 {coefficient_alias_block}
 {scale_alias_block}
-    if (mu3 <= 0.0 || mu3US <= 0.0) {{
-      throw std::invalid_argument("3DUS parameter running requires positive mu_3_scale and mu_3_us_scale.");
-    }}
-    const double log_ratio_3dus = std::log(mu3US / mu3);
+    require_positive_scale(mu3, "mu_3_scale");
+    require_positive_scale(mu3US, "mu_3_us_scale");
+    const double log_ratio_3dus = require_finite(std::log(mu3US / mu3), "3DUS log scale ratio");
 {chr(10).join(beta_blocks)}
 {update_lines}
-    return ThreeDParameters{{{values}}};
+    return checked_3d_parameters(ThreeDParameters{{{values}}});
   }}"""
 
 
@@ -1809,6 +1972,8 @@ def _render_3dus_numeric_running_method(
         for coeff in coefficients
     )
     return f"""  ThreeDParameters apply_3dus_parameter_running(const ThreeDParameters& matched, double T) const {{
+    check_temperature(T);
+    checked_3d_parameters(matched);
 {apply_void_lines}
 {apply_running_alias_block}
 {apply_scale_alias_block}
@@ -1816,27 +1981,31 @@ def _render_3dus_numeric_running_method(
   }}
 
   ThreeDParameters beta_functions_3dus(const ThreeDParameters& state, double T, double mu3US) const {{
+    check_temperature(T);
+    require_positive_scale(mu3US, "3DUS beta scale");
+    checked_3d_parameters(state);
 {beta_void_lines}
 {beta_running_alias_block}
 {beta_coefficient_alias_block}
 {beta_scale_alias_block}
 {dynamic_scale_alias_block}
 {chr(10).join(beta_blocks)}
-    return ThreeDParameters{{{beta_return_values}}};
+    return checked_3d_parameters(ThreeDParameters{{{beta_return_values}}});
   }}
 
   ThreeDParameters add_scaled_3dus_parameters(const ThreeDParameters& base, const ThreeDParameters& delta, double scale) const {{
-    return ThreeDParameters{{{add_scaled_values}}};
+    return checked_3d_parameters(ThreeDParameters{{{add_scaled_values}}});
   }}
 
   ThreeDParameters combine_3dus_rk4(const ThreeDParameters& k1, const ThreeDParameters& k2, const ThreeDParameters& k3, const ThreeDParameters& k4) const {{
-    return ThreeDParameters{{{rk4_values}}};
+    return checked_3d_parameters(ThreeDParameters{{{rk4_values}}});
   }}
 
   ThreeDParameters solve_3dus_parameter_running_numeric(const ThreeDParameters& matched, double T, double mu3, double mu3US) const {{
-    if (mu3 <= 0.0 || mu3US <= 0.0) {{
-      throw std::invalid_argument("3DUS parameter running requires positive mu_3_scale and mu_3_us_scale.");
-    }}
+    check_temperature(T);
+    checked_3d_parameters(matched);
+    require_positive_scale(mu3, "mu_3_scale");
+    require_positive_scale(mu3US, "mu_3_us_scale");
     const double log_start = std::log(mu3);
     const double log_end = std::log(mu3US);
     const double step = (log_end - log_start) / static_cast<double>({ode_steps});
@@ -1863,10 +2032,8 @@ def _render_named_struct_fields(rows: list[dict[str, Any]]) -> str:
 
 
 def _render_named_struct_return(type_name: str, rows: list[dict[str, Any]]) -> str:
-    if not rows:
-        return f"    return {type_name}{{}};"
     values = ", ".join(row["name"] for row in rows)
-    return f"    return {type_name}{{{values}}};"
+    return f"    return checked_3d_fields({type_name}{{{values}}});"
 
 
 def _render_running_struct(inputs: dict[str, dict[str, Any]]) -> str:
@@ -1877,9 +2044,9 @@ def _render_running_struct(inputs: dict[str, dict[str, Any]]) -> str:
 
 def _render_running_return(inputs: dict[str, dict[str, Any]], *, member_values: bool) -> str:
     if not inputs:
-        return "    return RunningParameters{};"
+        return "    return checked_running_parameters(RunningParameters{});"
     values = ", ".join(f"input_.{name}" if member_values else name for name in inputs)
-    return f"    return RunningParameters{{{values}}};"
+    return f"    return checked_running_parameters(RunningParameters{{{values}}});"
 
 
 def _render_running_aliases(inputs: dict[str, dict[str, Any]], used_names: set[str] | None = None) -> str:
@@ -1978,9 +2145,7 @@ def _render_running_body(
             fixed_aliases,
             scale_alias_block,
             f"    const double target_scale = {scale_cpp};",
-            '    if (target_scale <= 0.0) {',
-            '      throw std::invalid_argument("RG target scale must be positive.");',
-            "    }",
+            '    require_positive_scale(target_scale, "RG target scale");',
             "    return running_from_phase_tracer_splines(target_scale);",
         ]
     ).lstrip("\n")
@@ -2024,10 +2189,12 @@ def _render_beta_method(
     void_lines = _render_void_lines(("running", not aliases))
     vector_values = ", ".join(f"x.at({index})" for index, _name in enumerate(inputs))
     dxdt_lines = "\n".join(
-        f"    dxdt[{index}] = beta.{name} / t;"
+        f'    dxdt[{index}] = require_finite(beta.{name} / t, "RG derivative {name}");'
         for index, name in enumerate(inputs)
     )
     return f"""  RunningParameters beta_functions(const RunningParameters& running, double mu) const {{
+    require_positive_scale(mu, "4D beta scale");
+    checked_running_parameters(running);
 {void_lines}
 {aliases}
     const double log_mu = std::log(mu);
@@ -2035,13 +2202,11 @@ def _render_beta_method(
     (void)log_mu;
     (void)t;
 {chr(10).join(blocks)}
-    return RunningParameters{{{values}}};
+    return checked_running_parameters(RunningParameters{{{values}}});
   }}
 
   void Betas(const std::vector<double>& x, std::vector<double>& dxdt, const double t) override {{
-    if (t <= 0.0) {{
-      throw std::invalid_argument("PhaseTracer RG scale t must be positive.");
-    }}
+    require_positive_scale(t, "PhaseTracer RG scale t");
     if (x.size() != {len(inputs)}) {{
       throw std::invalid_argument("3DEFT potential received a malformed RG state vector.");
     }}
@@ -2062,18 +2227,23 @@ def _running_spline_config(
 ) -> dict[str, float]:
     if input_scale is None or target_scale is None:
         raise ThreeDeftBlocked("PhaseTracer-native RG setup needs numeric input and target scales.")
+    _require_positive_scale(input_scale, "4D input_scale")
+    _require_positive_scale(target_scale, "4D target_scale")
     default_min = min(input_scale, target_scale, 1.0)
     default_max = max(input_scale, target_scale, 5000.0)
-    min_scale = _interface_number_any(interface, "rg_spline_min_scale", "rg_min_scale") or default_min
-    max_scale = _interface_number_any(interface, "rg_spline_max_scale", "rg_max_scale") or default_max
-    if min_scale <= 0.0 or max_scale <= 0.0:
-        raise ThreeDeftBlocked("PhaseTracer RG spline scale bounds must be positive.")
+    min_scale = _interface_number_any(interface, "rg_spline_min_scale", "rg_min_scale")
+    max_scale = _interface_number_any(interface, "rg_spline_max_scale", "rg_max_scale")
+    min_scale = default_min if min_scale is None else min_scale
+    max_scale = default_max if max_scale is None else max_scale
+    _require_positive_scale(min_scale, "RG spline minimum scale")
+    _require_positive_scale(max_scale, "RG spline maximum scale")
     if min_scale >= max_scale:
         max_scale = min_scale * 1.01
+        _require_positive_scale(max_scale, "RG spline maximum scale")
     default_step = min(1.0, max(1e-5, (max_scale - min_scale) / max(float(ode_steps), 1.0)))
-    step = _interface_number_any(interface, "rg_spline_step", "rg_step") or default_step
-    if step <= 0.0:
-        raise ThreeDeftBlocked("PhaseTracer RG spline step must be positive.")
+    step = _interface_number_any(interface, "rg_spline_step", "rg_step")
+    step = default_step if step is None else step
+    _require_positive_scale(step, "RG spline step")
     return {"input_scale": input_scale, "min_scale": min_scale, "max_scale": max_scale, "step": step}
 
 
@@ -2092,10 +2262,11 @@ def _render_phase_tracer_rg_helpers(inputs: dict[str, dict[str, Any]], *, rg_spl
   }}
 
   RunningParameters running_from_phase_tracer_splines(double scale) const {{
+    require_positive_scale(scale, "RG spline scale");
     if (RGEs.size() != {len(inputs)}) {{
       throw std::runtime_error("PhaseTracer RG splines were not initialized.");
     }}
-    return RunningParameters{{{spline_values}}};
+    return checked_running_parameters(RunningParameters{{{spline_values}}});
   }}
 """
 
@@ -2667,6 +2838,11 @@ def _metadata_number(value: float) -> float | None:
     return value if math.isfinite(value) else None
 
 
+def _require_positive_scale(value: float, name: str) -> None:
+    if not math.isfinite(value) or value <= 0.0:
+        raise ThreeDeftBlocked(f"{name} must be finite and positive.")
+
+
 def _apply_3dus_parameter_running_python(
     coefficient_names: set[str],
     beta_functions: dict[str, str],
@@ -2680,14 +2856,16 @@ def _apply_3dus_parameter_running_python(
         raise ThreeDeftBlocked("3DUS parameter running needs reviewed mu_3_scale and mu_3_us_scale aliases.")
     mu_initial = float(env["mu3"])
     mu_target = float(env["mu3US"])
-    if mu_initial <= 0.0 or mu_target <= 0.0:
-        raise ThreeDeftBlocked("3DUS parameter running requires positive mu_3_scale and mu_3_us_scale.")
+    _require_positive_scale(mu_initial, "mu_3_scale")
+    _require_positive_scale(mu_target, "mu_3_us_scale")
     state = {name: float(env[name]) for name in coefficient_names if name in env}
     active_betas = {name: expression for name, expression in beta_functions.items() if name in state}
     if not active_betas:
         return {}
     if not _three_d_us_needs_numeric_running(active_betas):
-        log_ratio = math.log(mu_target / mu_initial)
+        ratio = mu_target / mu_initial
+        _require_positive_scale(ratio, "3DUS scale ratio")
+        log_ratio = math.log(ratio)
         values = dict(state)
         beta_env = _with_3dus_dynamic_scale_aliases({**env, **values}, mu_target)
         for name, expression in active_betas.items():
@@ -2705,6 +2883,8 @@ def _run_3dus_python(
     *,
     ode_steps: int,
 ) -> dict[str, float]:
+    _require_positive_scale(mu_initial, "mu_3_scale")
+    _require_positive_scale(mu_target, "mu_3_us_scale")
     log_start = math.log(mu_initial)
     log_end = math.log(mu_target)
     step = (log_end - log_start) / float(ode_steps)
@@ -2735,6 +2915,7 @@ def _eval_3dus_beta_vector(
 
 
 def _with_3dus_dynamic_scale_aliases(env: dict[str, float], mu: float) -> dict[str, float]:
+    _require_positive_scale(mu, "3DUS beta scale")
     log_mu = math.log(mu)
     result = dict(env)
     result.update(
@@ -2766,8 +2947,8 @@ def _run_rg_python(
 ) -> dict[str, float]:
     if input_scale is None:
         raise ThreeDeftBlocked("4D running needs an input scale.")
-    if target_scale <= 0.0 or input_scale <= 0.0:
-        raise ThreeDeftBlocked("4D running scales must be positive.")
+    _require_positive_scale(input_scale, "4D input_scale")
+    _require_positive_scale(target_scale, "4D target_scale")
     state = {name: spec["test_value"] for name, spec in inputs.items()}
     log_start = math.log(input_scale)
     log_end = math.log(target_scale)
@@ -2805,6 +2986,7 @@ def _eval_beta_vector(
     beta_variable: str,
     beta_factor: float,
 ) -> dict[str, float]:
+    _require_positive_scale(mu, "4D beta scale")
     env = dict(state)
     log_mu = math.log(mu)
     env["mu"] = mu
@@ -2824,7 +3006,10 @@ def _add_scaled_full(base: dict[str, float], delta: dict[str, float], scale: flo
 
 def _number(value: Any) -> float:
     try:
-        return float(str(value).strip())
+        number = float(str(value).strip())
+        if not math.isfinite(number):
+            raise ValueError("non-finite number")
+        return number
     except (TypeError, ValueError) as exc:
         raise ThreeDeftBlocked(f"Expected numeric value, got {value!r}.") from exc
 
@@ -2867,7 +3052,7 @@ def _reference_candidate_vectors(field_count: int, original: list[float]) -> lis
 
 
 def _close_enough(left: float, right: float) -> bool:
-    return abs(left - right) <= max(1e-9, 1e-8 * max(abs(left), abs(right), 1.0))
+    return finite_comparison(left, right, atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL)["ok"]
 
 
 def _literal_number(node: ast.AST) -> float | None:

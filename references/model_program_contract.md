@@ -127,24 +127,35 @@ previous artifacts.
     them. Check the full compiled potential before asking the user to confirm.
   - CosmoTransitions phase filtering: explicitly ask the user to decide whether
     to implement the CosmoTransitions phase-filter hook after presenting the
-    agent's recommendation and reason. Recommend `mode=none` unless the
-    paper/reference code intentionally removes a duplicate or unphysical branch.
-    This maps to `forbidPhaseCrit`. It
+    agent's concrete recommendation and reason. For detected symmetries, propose
+    `negative_field_threshold` rules for independent single-field reflections.
+    Do not default to `none` merely because the source did not specify a filter.
+    For coupled generators use `symmetry_orbits`, which compares full trajectories
+    after tracing instead of rejecting phase endpoints. Each rule contains a
+    comma-separated simultaneous field group in `field`, `comparison=orbit`, and
+    a positive absolute field tolerance in `threshold`. Matching requires the
+    same temperature domain and one fixed group transformation over the sampled
+    trajectory; unmatched branches remain. Do not replace a coupled generator
+    with independent cuts. Grouped trajectories live in `symmetry_phase_history`;
+    `phases` and its links remain complete for Tc/Tn calculations, because distinct
+    relative-orientation channels can have different tunnelling actions.
+    The threshold-cut mode maps to `forbidPhaseCrit`. It
     discards traced phases when the method returns true; it is not part of
     `Vtot`. If enabled, list the phase type, field component, comparison,
     numeric threshold, and reason. Suggest `field < -epsilon`, with
     `epsilon=0.01*L` for a sourced reference field scale L and at least ten
-    numerical field steps when known. No field scale means no guessed numeric
-    threshold. Vary the tolerance by a factor of two and preserve the origin
-    and distinct phases. Keep the proposal disabled until reviewed.
+    numerical field steps when known. Without a sourced field scale, use the
+    exact zero boundary (or ten known field steps), not an invented energy scale.
+    Vary a nonzero tolerance by a factor of two and preserve the origin
+    and distinct phases. Final approval, not disabled rules, guards execution.
     Custom expressions may use Python `and`/`or` in the Markdown contract, but
     generated code must convert them to NumPy-safe elementwise boolean logic and
     smoke-test both single-point and batched `X` inputs. PhaseTracer does not
     consume this section.
   - PhaseTracer symmetry: explicitly ask the user to decide whether to implement
     `apply_symmetry(phi)` and `get_symmetry_axes()` after presenting the agent's
-    recommendation and reason. Recommend `mode=none` unless the user confirms a
-    reviewed sign-flip equivalence. This is required for the PhaseTracer backend
+    recommendation and reason. Recommend `z2_reflection` with the detected
+    generators after checking for symmetry-breaking terms. This is required for the PhaseTracer backend
     instead of a CosmoTransitions-style phase-filter question. It identifies
     symmetry-equivalent field points so they are not counted as distinct phases;
     it does not create new physical vacua. For a Z2 reflection, list each field

@@ -199,7 +199,7 @@ Ask the user only for items that cannot be safely inferred after checking the re
   recommendation and reason, and record the final status as `user_confirmed` or
   `human_reviewed`. Keep low-temperature guesses `none` unless numeric hints are
   intentionally supplied.
-- PhaseTracer compile approval: after `three_deft_contract_merged.md` has no compile blockers, ask the user to open and review it, then record their exact approval sentence.
+- PhaseTracer compile approval: after `three_deft_contract_merged.md` has no compile blockers, ask the user to open and review it, then record their exact approval sentence using `approve`. This binds `approval_spec_hash` to the normalized physical contract. Editing parameters, expressions, mappings, scales, orders or generation options invalidates the approval; request fresh review instead of refreshing the hash automatically. Negated or conditional approval is not consent. Old approved contracts without the digest need fresh approval. The digest excludes approval bookkeeping, runtime source_hash, output location and executable location; it does not monitor the original DRalgo source file.
 
 Do not ask the user to hand-copy DRalgo-derived outputs before DRalgo has run. These are agent/DRalgo backfill items:
 
@@ -299,6 +299,13 @@ The generated model must:
 - generate `run_model.cpp` as the default executable entry point;
 - avoid artifacts or physics terms outside the reviewed 3DEFT contract data.
 
+Supported field normalizations are identity, `phi/sqrt(T)` (`canonical_3d`),
+and `phi*sqrt(T)` (`phase_tracer_times_sqrt_t`). Extra wave-function factors
+such as `Z(T)` are unsupported and block compilation; never replace them
+silently with a leading-order map. 3DEFT numerical evaluation requires finite
+fields and parameters, strictly positive temperature and RG/matching scales.
+Negative mass squares, couplings and potential values remain permitted.
+
 Reference comparisons must be layer-local. Because the generated PhaseTracer
 model may run 4D RG, 4D-to-3D matching, and optional 3DUS running at runtime,
 do not compare a Mathematica/DRalgo V value against the full `V(phi,T)` path
@@ -326,6 +333,39 @@ The ordinary compile-time reference point is diagnostic only when
 non-finite or non-real values, keep generating the C++ project and report a
 clear warning in stdout and metadata. Treat it as a hard blocker only when the
 user supplied a numeric `reference_expected_v` that must be checked.
+
+Generation, build/run success, and numerical verification are distinct states.
+`check-model` records `generated_unverified`, `passed`, or `failed`, using finite
+reference values and `abs(actual-expected) <= atol + rtol*max(abs(actual),abs(expected),1)`.
+Keep raw values, differences and tolerances in the report. No valid reference
+point means `generated_unverified`, never numerical success; do not proceed to
+production phase scans on an unverified or failed model.
+
+The fixed-expression comparison is `fixed_3d_expression_check`; it does not
+independently validate the source DRalgo RG/matching chain. A
+`source_dralgo_end_to_end_comparison` must obtain its matched parameters and
+active perturbative contributions from the original DRalgo calculation at
+multiple positive temperatures and field points, with identical scales and
+field maps. An unavailable source/runtime or an unexecuted comparison must be
+reported as `not_run` or unverified, never passed. Inactive orders are
+`not_applicable`, not invented zero contributions.
+
+Use `compare-mathematica --mode source-dralgo --template CONTRACT --project-dir
+PROJECT --points points.json --source-driver source_numerics.wl` for this separate
+comparison. The points file is a list of `{"temperature": ..., "fields": [...]}`
+records with at least two temperatures and two distinct field points per
+temperature. Build the generated `source_probe` target first.
+
+This interface requires a reviewed source-native numerical driver defining
+`PTAgentSourceReference[temperature, fields, settings]`; it does not automatically
+derive such a driver from an arbitrary DRalgo script. The driver must execute
+the original RG/matching/running route and return the requested settings,
+points, stage statuses, matching parameters and order-by-order values. Do not
+construct this reference by translating the contract formulas back to Wolfram.
+A missing driver, unavailable runtime or failed source execution is recorded as
+`not_run`. Synthetic driver tests validate the comparison interface only, not
+an actual DRalgo model or its physics. Source-native xSM numerical validation
+remains incomplete until that driver and a working DRalgo runtime are available.
 
 The contract must use:
 

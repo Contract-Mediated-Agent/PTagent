@@ -127,8 +127,21 @@ selection through `--choices '{"backend":"cosmotransitions"}'`.
 Use the same source-first deterministic preparation for every supported SARAH
 model. `export-sarah --preset auto` selects it without a model-name branch;
 existing exports use `prepare-sarah`. Pass explicit user inputs and available
-thermal metadata. Parameters and scales must come from the parameter map, SLHA
-or explicit JSON; missing values remain blockers, not an example benchmark.
+thermal metadata. When the user has not specified a benchmark, first inspect
+the selected model's `SPheno.m` and recommend its `DefaultInputValues`. The
+preparation report includes a static, source-hashed recommendation when that
+file is available. Do not ask the user to invent a parameter point before
+checking it, and do not require running SPheno merely to read these inputs.
+These model-local example values are proposals, not a universal benchmark or
+prior user approval. Preserve explicit user parameters and SLHA values.
+Distinguish default inputs, source-defined boundary/matching relations and
+tadpole-derived quantities from additional SM inputs, the renormalization
+scale and physical prescriptions. Use only supported deterministic source
+relations for conversions; never assume all of these settings occur in
+`DefaultInputValues`, or impose tree/loop equalities without review. Propose
+the source example and list remaining unresolved settings in one review batch.
+Parameters and scales must be traceable to source, accepted proposals, SLHA or
+explicit JSON; unresolved values still block numerical execution.
 For installed supported SARAH models, `export-sarah` generates the companion
 thermal data automatically from the full canonical component interactions.
 Do not ask the user to supply thermal tensors before trying this built-in route.
@@ -178,9 +191,24 @@ Whenever a deterministic tree-level potential is available, inspect the shared
 `symmetry_analysis` result before asking about phase handling. Present its
 minimal sign-flip generator candidates as recommendations for PhaseTracer
 symmetry or possible CosmoTransitions duplicate-branch filtering. Treat these
-as tree-level candidates only: never enable a symmetry or invent a phase-filter
-threshold until loop, thermal, counterterm, and gauge choices have been checked
-and the user has confirmed the final policy.
+as tree-level evidence, then check loop, thermal, counterterm and gauge choices
+for breaking terms. Recommend concrete PhaseTracer `z2_reflection` rows or a
+CosmoTransitions symmetry-duplicate removal rules, not blanket `none` or
+"leaving filtering disabled". Supply the rules and reasons in the single review
+batch; do not ask users to reconstruct field groups or thresholds already
+derivable from the available information. Independent single-field flips allow
+representative sign cuts. Coupled flips require `symmetry_orbits` trajectory
+comparison after tracing: a pointwise half-space cut can reject both members
+when a physical branch crosses that boundary.
+Use `symmetry_phase_history` for grouped presentation; retain the complete
+`phases` dictionary for critical-temperature and tunnelling calculations so
+relative-orientation channels are not silently lost.
+Use `phase_handling_recommendation` for these proposals. Numerical boundary
+tolerances are conventions, not source evidence. Retain the origin and test
+boundary sensitivity. Proposals still require final contract approval; preserve
+explicit user policies. If the full potential breaks a candidate symmetry or
+no symmetry is established, report that specific limitation instead of imposing
+an unjustified cut.
 
 Ask the user only when evidence is missing, conflicting, physically ambiguous,
 or guessing would make the generated model/code/report misleading or

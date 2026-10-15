@@ -17,6 +17,29 @@ If the user explicitly asks for DRalgo, 3DEFT, dimensionally reduced EFT, or
 uploads a DRalgo-style Mathematica/Wolfram file, switch to the internal 3DEFT
 workflow in `references/ptagent_3deft_workflow.md` instead.
 
+## Numerical Search Settings
+
+Contract section `11. Numerical Settings` controls downstream scans independently
+of model construction. Include the proposed `Tmax`, its basis and truncation/runtime
+impact in the same question batch when phase tracing is requested. Prefer the
+source temperature range (`source_temperature_max`), then a sourced `model_scale`
+or available dimensional model information. An exploratory fallback is not a
+universal physical bound. Never silently apply 1000 to an unknown-scale model.
+
+After the user confirms a range, set `Tmax`, `Tmax_approved=true` and
+`Tmax_approved_value` to the same value. A changed maximum invalidates the scan
+approval. Regeneration preserves these settings. Without approval, generation,
+single-point potential evaluation and ordinary smoke checks are allowed, but
+`getPhases`, transition searches and PhaseTracer transition mode are blocked.
+`x_eps` defaults to 0.001 and may be explicitly overridden without a separate
+physics approval. Preserve legitimate 4D zero-temperature calls.
+
+OS-like vacuum-mass exclusion uses the same criterion in Python, C++ and the
+reference evaluator: `abs(m2_vac) <= 1e-12*max(1,max(abs(m2_vac_group)))`.
+The bosonic group combines scalar and vector modes; fermions form a separate
+group. Generated metadata records the criterion; do not substitute an absolute
+near-zero test in reference calculations.
+
 ## Core Rule
 
 Do not call external model services or configure API keys. The user-facing source
@@ -146,23 +169,28 @@ or pass it to PhaseTracer compile commands as `--phasetracer-root`.
    - Backend-specific phase handling: include this policy in the question batch
      only if the user has not already explicitly specified it. First inspect source, contract, proof
      files, and explicit user inputs, then present a recommendation and reason.
-     For `cosmotransitions`, ask whether `forbidPhaseCrit` should discard any
-     traced phase. Recommend `mode=none` unless the paper/reference code
-     explicitly removes a duplicate or unphysical branch; if filtering is
-     intended, ask for the field, comparison, threshold, phase type, and reason.
+     For `cosmotransitions`, propose removing symmetry-duplicate phases using
+     independent sign cuts or coupled-generator trajectory comparisons. Supply the complete rule,
+     including fields, comparisons, thresholds and reasons, from the detected
+     generators. Do not recommend disabled filtering for an established symmetry.
+     Use `symmetry_orbits` for coupled reflections, with a positive absolute
+     trajectory-comparison tolerance; pointwise cuts can erase both full branches
+     when they cross the selected half-space. Only verified complete trajectory
+     duplicates are merged; other branches remain available.
      For `phasetracer`, do not ask the CosmoTransitions-style phase-filter
      question; ask whether PhaseTracer should use `apply_symmetry(phi)` to
      identify reviewed symmetry-equivalent field points and avoid duplicate
-     phase counting. Recommend `mode=none` unless the user confirms a reviewed
-     Z2/sign-flip equivalence; if enabled, ask for the sign-flip field groups
+     phase counting. Recommend `z2_reflection` with the detected sign-flip groups;
+     check the full potential for breaking terms and present the concrete groups
      used by `apply_symmetry` / `get_symmetry_axes`. One contract row creates
      one generated symmetry partner: `h,s` means `h -> -h and s -> -s`, while
      two separate rows `h` and `s` mean `h -> -h or s -> -s`. Do not encode
      independent alternatives as `h,s`. For a confirmed duplicate-branch filter,
      suggest `field < -epsilon` with `epsilon=0.01*L` for a sourced reference
      field scale L, and at least ten numerical field steps when known. Check
-     sensitivity to a factor-of-two change; without a field scale ask for one.
-     This is a disabled numerical proposal, not an automatic physics choice.
+     sensitivity to a factor-of-two change. Without a sourced scale use the zero
+     boundary or ten known field steps. This is a numerical convention requiring
+     final contract review, not a new physical parameter or disabled recommendation.
    - Compile approval: after the Markdown template has no blockers, stop and
      ask the user to review the rendered `contract_template.md` and explicitly
      approve backend code generation/compilation. Do not treat a request like
@@ -273,11 +301,10 @@ backend context:
   show the supported choices `cosmotransitions` and `phasetracer`;
 - include any unconfirmed backend-specific phase handling in the complete batch,
   with a source-backed recommendation and reason; do not re-ask explicit choices.
-  `cosmotransitions` uses phase filtering / `forbidPhaseCrit`; recommend
-  `mode=none` unless the paper/reference code intentionally removes a traced
-  branch. `phasetracer` uses `apply_symmetry(phi)` to identify reviewed
-  symmetry-equivalent field points and avoid duplicate phase counting; recommend
-  `mode=none` unless the user confirms a reviewed sign-flip equivalence;
+  `cosmotransitions` uses `forbidPhaseCrit`: propose removal of symmetry-duplicate
+  regions from the detected generators. `phasetracer` uses `apply_symmetry(phi)`:
+  propose one row per detected generator. Check the full potential, preserve
+  explicit choices, and request final review of concrete rules;
 - ask all available unresolved decisions together, grouping related fields and
   explaining each decision in plain language. Include conditional questions
   when the backend is not selected. Do not hide later questions;
@@ -307,11 +334,10 @@ backend context:
   branch affects formulas.
 - backend-specific phase handling has not been explicitly user-confirmed for
   the selected backend. For `cosmotransitions`, ask whether any forbidden phase
-  branch should be filtered and recommend `mode=none` unless source/reference
-  evidence supports filtering. For `phasetracer`, ask for reviewed
-  `apply_symmetry` sign-flip equivalence rules instead of a phase-filter
-  threshold and recommend `mode=none` unless the user wants symmetry-equivalent
-  points merged.
+  branch should be filtered, supplying a concrete representative-region rule
+  derived from the detected symmetry. For `phasetracer`, supply detected
+  `apply_symmetry` generators instead of requesting a phase-filter threshold.
+  Never replace a constructive symmetry proposal with a blanket disabled default.
 
 Do not ask about values that are standard fixed constants unless the paper uses
 nonstandard conventions. Treat `v`, SM gauge couplings, and Yukawa couplings as
@@ -446,9 +472,14 @@ truth. Derived JSON must not be hand-edited:
   `V_CT=sum_i c_i O_i`, `A_ai=L_a[O_i]`, `b_a=t_a-L_a[V_CW_source]`, and
   `A c=b`; list Goldstone species/mode groups when Goldstones exist; list every
   Daisy-resummed particle/mode group when the Daisy scheme is not `none`.
-- CosmoTransitions phase filtering: for `cosmotransitions`, choose `none`,
-  `negative_field_threshold`, or `custom_expr`. This is not a potential term;
-  it maps to `forbidPhaseCrit`. If enabled, the template must state the removed
+- CosmoTransitions phase filtering: for `cosmotransitions`, use
+  `negative_field_threshold`, `symmetry_orbits`, `custom_expr`, or an explicitly
+  chosen `none`. This is not a potential term. Sign cuts and custom expressions
+  map to `forbidPhaseCrit`; `symmetry_orbits` compares complete traced trajectories
+  under the reviewed group. Its `symmetry_phase_history` is a grouped copy with
+  rewired links; the original `phases` and all channels remain intact for Tc/Tn.
+  Each orbit rule has comma-separated fields, `comparison=orbit`, and a positive
+  absolute tolerance in `threshold`. If enabled, the template must state the removed
   phase type, field component, comparison, and numeric tolerance threshold.
   Custom expressions may be written naturally with Python `and`/`or`; the
   compiler must render them as backend-safe boolean logic and smoke tests must
@@ -468,8 +499,10 @@ truth. Derived JSON must not be hand-edited:
   checker. Use its rows as review suggestions only. Confirm that all compiled
   loop, thermal, counterterm, and gauge-dependent pieces preserve the proposed
   relation before enabling PhaseTracer symmetry. For CosmoTransitions, the
-  check may motivate duplicate-branch filtering but cannot choose which branch
-  to remove or infer a safe nonzero threshold.
+  checker supplies independent sign cuts or coupled-generator trajectory rules.
+  Coupled reflections must not be implemented by independent field cuts. Numerical
+  tolerance is chosen from a sourced field scale or known numerical step, or
+  the exact zero boundary when neither is available; it is not source evidence.
 - Daisy resummation has two standard routes:
   - Parwani: replace one-loop finite-temperature mass eigenvalues by reviewed
     lowest-order thermal mass eigenvalues and add no separate `V_daisy`.

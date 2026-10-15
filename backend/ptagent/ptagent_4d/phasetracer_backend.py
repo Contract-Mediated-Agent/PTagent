@@ -13,9 +13,14 @@ from typing import Any
 
 import numpy as np
 
+from ..runtime_metadata import collect_software_versions
 from .artifact_layout import generated_models_dir, model_artifact_slug
 from .compiler import CompileBlocked, CompileResult, compile_usage_instructions
 from .config import Settings
+from .numerical_settings import (
+    OS_MASS_CRITERION, OS_MASS_RELATIVE_CUTOFF, OS_MASS_SCALE_FLOOR,
+    os_mass_scale, resolve_numerical_settings, scan_approval_message,
+)
 from .phasetracer_expr import (
     PhaseTracerExpressionError,
     render_cpp_accumulation_block,
@@ -49,7 +54,7 @@ def compile_phasetracer_template(
 ) -> CompileResult:
     validation = validate_contract_template(markdown_text, review_required=True, compile_backend="compare-backends" if for_comparison else "phasetracer")
     if not validation.ok:
-        preview = "; ".join(f"{issue.code}: {issue.message}" for issue in validation.issues[:5])
+        preview = "; ".join(f"{issue.code}: {issue.message}" for issue in [item for item in validation.issues if item.severity == "error"][:5])
         raise CompileBlocked("Template contract is not compile-ready: " + preview)
     contract = validation.contract
     _validate_phasetracer_contract(contract)
@@ -61,11 +66,17 @@ def compile_phasetracer_template(
         contract,
         template_sha256=template_sha256,
         contract_sha256=contract_sha256,
+        software_versions=collect_software_versions(
+            runtime_python=settings.runtime_python, phasetracer_root=phasetracer_root or settings.phasetracer_root,
+        ),
     )
     for name, content in files.items():
         (project_dir / name).write_text(content, encoding="utf-8")
 
     warnings: list[str] = []
+    numerical = resolve_numerical_settings(contract)
+    if not numerical["Tmax_approved"]:
+        warnings.append(scan_approval_message(numerical))
     warnings.extend(_maybe_clang_format_project(project_dir, enabled=clang_format))
     status = "generated"
     if run_smoke:
@@ -193,7 +204,8 @@ def _compare_detailed_smoke_output(
     if errors:
         raise CompileBlocked("PhaseTracer numerical smoke check failed: " + "; ".join(errors[:8]))
     total_note = "total skipped for backend-native standard thermal integrals" if not compare_total else "total checked"
-    return f"numerical check ok ({len(points)} detailed points, {total_note}, abs_tol={abs_tol:g}, rel_tol={rel_tol:g})"
+    return (f"numerical check ok ({len(points)} detailed points, {total_note}, abs_tol={abs_tol:g}, rel_tol={rel_tol:g}); "
+            f"OS-like mass criterion: {json.dumps(OS_MASS_CRITERION, sort_keys=True)}")
 
 
 def _append_scalar_error(
@@ -239,8 +251,9 @@ def _render_phasetracer_project(
     *,
     template_sha256: str,
     contract_sha256: str,
+    software_versions: dict[str, Any] | None = None,
 ) -> dict[str, str]:
-    metadata = _metadata(contract, template_sha256=template_sha256, contract_sha256=contract_sha256)
+    metadata = _metadata(contract, template_sha256=template_sha256, contract_sha256=contract_sha256, software_versions=software_versions)
     header_filename = _phasetracer_header_filename(contract)
     return {
         header_filename: _render_potential_header(contract, metadata),
@@ -358,6 +371,9 @@ def _render_constructor(class_name: str, public_inputs: list[dict[str, Any]], co
         constructor += f" : {member_initializers}"
     method = _phasetracer_daisy_method(contract)
     lines = [constructor + " {"]
+    for row in public_inputs:
+        name = str(row["name"])
+        lines.append(f'  if (!std::isfinite({name}_)) throw std::invalid_argument("Public input {name} must be finite");')
     lines.append(f"  set_daisy_method(EffectivePotential::DaisyMethod::{method});")
     if _counterterm_mode(contract) == "explicit_linear_system":
         lines.append("  solve_counterterms();")
@@ -1128,16 +1144,25 @@ def _render_os_like_v1_override() -> str:
           const auto scalar_vacuum = get_scalar_masses_sq(vacuum, get_xi());
           const auto vector_vacuum = get_vector_masses_sq(vacuum);
           const auto fermion_vacuum = get_fermion_masses_sq(vacuum);
+          const double boson_scale = std::max(ptagent_os_mass_scale(scalar_vacuum), ptagent_os_mass_scale(vector_vacuum));
+          const double fermion_scale = ptagent_os_mass_scale(fermion_vacuum);
           double correction = 0.0;
-          correction += ptagent_os_like_sum(scalar_masses_sq, get_scalar_dofs(), scalar_vacuum);
-          correction += ptagent_os_like_sum(vector_masses_sq, get_vector_dofs(), vector_vacuum);
-          correction -= ptagent_os_like_sum(fermion_masses_sq, get_fermion_dofs(), fermion_vacuum);
+          correction += ptagent_os_like_sum(scalar_masses_sq, get_scalar_dofs(), scalar_vacuum, boson_scale);
+          correction += ptagent_os_like_sum(vector_masses_sq, get_vector_dofs(), vector_vacuum, boson_scale);
+          correction -= ptagent_os_like_sum(fermion_masses_sq, get_fermion_dofs(), fermion_vacuum, fermion_scale);
           return correction / (64.0 * 3.141592653589793238462643383279502884 * 3.141592653589793238462643383279502884);
+        }
+
+        double ptagent_os_mass_scale(const std::vector<double>& vacuum_masses_sq) const {
+          double scale = PTAGENT_OS_SCALE_FLOOR;
+          for (const double reference : vacuum_masses_sq) scale = std::max(scale, std::abs(reference));
+          return scale;
         }
 
         double ptagent_os_like_sum(const std::vector<double>& masses_sq,
                                    const std::vector<double>& dofs,
-                                   const std::vector<double>& vacuum_masses_sq) const {
+                                   const std::vector<double>& vacuum_masses_sq,
+                                   double vacuum_scale) const {
           if (masses_sq.size() != dofs.size() || masses_sq.size() != vacuum_masses_sq.size()) {
             throw std::runtime_error("OS-like V1 masses, d.o.f., and vacuum masses do not match");
           }
@@ -1145,18 +1170,14 @@ def _render_os_like_v1_override() -> str:
           for (size_t i = 0; i < masses_sq.size(); ++i) {
             const double m2 = masses_sq[i];
             const double m2_vac = vacuum_masses_sq[i];
-            double vacuum_scale = 1.0;
-            for (const double reference : vacuum_masses_sq) {
-              vacuum_scale = std::max(vacuum_scale, std::abs(reference));
-            }
-            if (std::abs(m2_vac) <= 1e-12 * vacuum_scale) continue;
+            if (std::abs(m2_vac) <= PTAGENT_OS_RELATIVE_CUTOFF * vacuum_scale) continue;
             const double denom = std::abs(m2_vac);
             correction += dofs[i] * (m2 * m2 * (std::log(std::abs(m2 / denom) + 1e-100) - 1.5) + 2.0 * m2 * m2_vac);
           }
           return correction;
         }
         """
-    ).strip()
+    ).strip().replace("PTAGENT_OS_SCALE_FLOOR", repr(OS_MASS_SCALE_FLOOR)).replace("PTAGENT_OS_RELATIVE_CUTOFF", repr(OS_MASS_RELATIVE_CUTOFF))
 
 
 def _render_raddof_method(contract: dict[str, Any]) -> str:
@@ -1456,6 +1477,7 @@ def _cleanup_empty_cpp_blocks(lines: list[str]) -> list[str]:
 
 
 def _render_model_runner(contract: dict[str, Any], *, header_filename: str | None = None) -> str:
+    numerical = resolve_numerical_settings(contract)
     if header_filename is None:
         header_filename = _phasetracer_header_filename(contract)
     points = _smoke_points(contract)
@@ -1569,9 +1591,15 @@ def _render_model_runner(contract: dict[str, Any], *, header_filename: str | Non
         "",
         "int run_transition_check(const TransitionOptions& options) {",
         "  try {",
+        *([] if numerical["Tmax_approved"] else [
+            f'    std::cout << "PTAGENT_TC_STATUS waiting_for_Tmax_approval " << {json.dumps(scan_approval_message(numerical))} << "\\n";',
+            "    return 2;",
+        ]),
         "    PTagentPhaseTracer::GeneratedPotential model;",
         "    std::cout << std::setprecision(17);",
         "    PhaseTracer::PhaseFinder phase_finder(model);",
+        f"    phase_finder.set_t_high({numerical['Tmax']!r});",
+        f'    std::cout << "PTAGENT_SCAN Tmax " << {numerical["Tmax"]!r} << " approved true\\n";',
         "    if (options.has_seed) phase_finder.set_seed(options.seed);",
         "    if (options.relax_dxdt_check) phase_finder.set_check_dx_min_dt(false);",
         "    if (options.merge_phase_gaps) phase_finder.set_check_merge_phase_gaps(true);",
@@ -1781,8 +1809,9 @@ def _evaluate_v1(contract: dict[str, Any], phi: list[float], temperature: float)
         scalar_vacuum = _evaluate_masses(contract, vacuum, "scalar")
         vector_vacuum = _evaluate_masses(contract, vacuum, "vector")
         fermion_vacuum = _evaluate_fermion_masses(contract, vacuum)
-        correction = _os_like_sum(scalar_masses, _mass_dofs(contract, "scalar"), scalar_vacuum)
-        correction += _os_like_sum(vector_masses, _mass_dofs(contract, "vector"), vector_vacuum)
+        boson_scale = os_mass_scale(scalar_vacuum + vector_vacuum)
+        correction = _os_like_sum(scalar_masses, _mass_dofs(contract, "scalar"), scalar_vacuum, vacuum_scale=boson_scale)
+        correction += _os_like_sum(vector_masses, _mass_dofs(contract, "vector"), vector_vacuum, vacuum_scale=boson_scale)
         correction -= _os_like_sum(fermion_masses, _fermion_dofs(contract), fermion_vacuum)
         return correction / (64.0 * math.pi * math.pi)
     q_sq = _renorm_scale_sq(contract)
@@ -1981,12 +2010,14 @@ def _standard_v1_sum(masses: list[float], dofs: list[float], c_values: list[floa
     return total
 
 
-def _os_like_sum(masses: list[float], dofs: list[float], vacuum: list[float]) -> float:
+def _os_like_sum(masses: list[float], dofs: list[float], vacuum: list[float], *, vacuum_scale: float | None = None) -> float:
     if len(masses) != len(dofs) or len(masses) != len(vacuum):
         raise CompileBlocked("Reference OS-like V1 masses, d.o.f., and vacuum masses do not match.")
     total = 0.0
+    if vacuum_scale is None:
+        vacuum_scale = os_mass_scale(vacuum)
     for m2, dof, m2_vac in zip(masses, dofs, vacuum):
-        if abs(m2_vac) <= 1e-80:
+        if abs(m2_vac) <= OS_MASS_RELATIVE_CUTOFF * vacuum_scale:
             continue
         denom = abs(m2_vac)
         total += dof * (m2 * m2 * (math.log(abs(m2 / denom) + 1e-100) - 1.5) + 2.0 * m2 * m2_vac)
@@ -2521,11 +2552,13 @@ def _eval_field_default(expr: Any, contract: dict[str, Any]) -> float:
         return _eval_compiler_block(str(expr), env)
 
 
-def _metadata(contract: dict[str, Any], *, template_sha256: str, contract_sha256: str) -> dict[str, Any]:
+def _metadata(contract: dict[str, Any], *, template_sha256: str, contract_sha256: str,
+              software_versions: dict[str, Any] | None = None) -> dict[str, Any]:
     params = _dict(contract.get("parameters"))
     return {
         "contract_schema": contract.get("schema", ""),
         "artifact_backend": "phasetracer",
+        "software_versions": software_versions if software_versions is not None else collect_software_versions(),
         "paper_id": contract.get("paper_id", ""),
         "model_name": contract.get("model_name", ""),
         "model_short_name": contract.get("model_short_name", ""),
@@ -2536,6 +2569,8 @@ def _metadata(contract: dict[str, Any], *, template_sha256: str, contract_sha256
         "loop_modes": contract.get("loops", {}),
         "phasetracer_base": "EffectivePotential::OneLoopPotential",
         "daisy_method": _phasetracer_daisy_method(contract),
+        "numerical_settings": resolve_numerical_settings(contract),
+        "os_like_mass_criterion": dict(OS_MASS_CRITERION),
     }
 
 

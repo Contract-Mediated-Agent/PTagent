@@ -11,12 +11,14 @@ from typing import Any
 
 import numpy as np
 
+from ..runtime_metadata import collect_software_versions
 from .artifact_layout import generated_models_dir, model_artifact_slug, proof_materials_dir
 from .compiler import CompileBlocked, CompileResult, compile_usage_instructions
 from .config import ConfigurationError, Settings, require_configured_phasetracer_root, require_configured_runtime_python
 from .phasetracer_runner import run_phasetracer_smoke
 from .smoke_output import parse_detailed_smoke_output
 from ._model_probe import evaluate_vtot, load_model
+from .numerical_settings import OS_MASS_CRITERION
 
 
 BACKEND_COMPARE_ABS_TOL = 1e-8
@@ -38,6 +40,7 @@ class BackendCompareResult:
     comparison_points: list[dict[str, Any]] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     artifact_actions: dict[str, str] = field(default_factory=dict)
+    software_versions: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -51,9 +54,11 @@ class BackendCompareResult:
             "contract_reference_status": self.contract_reference_status,
             "python_model_status": self.python_model_status,
             "comparison_points": list(self.comparison_points),
+            "os_like_mass_criterion": dict(OS_MASS_CRITERION),
             "python_usage_instructions": list(self.python_result.usage_instructions),
             "phasetracer_usage_instructions": list(self.phasetracer_result.usage_instructions),
             "artifact_actions": dict(self.artifact_actions),
+            "software_versions": dict(self.software_versions),
             "warnings": list(self.warnings),
         }
 
@@ -77,7 +82,7 @@ def compare_backends_template(
 
     validation = validate_contract_template(markdown_text, review_required=True, compile_backend="compare-backends")
     if not validation.ok:
-        preview = "; ".join(f"{issue.code}: {issue.message}" for issue in validation.issues[:5])
+        preview = "; ".join(f"{issue.code}: {issue.message}" for issue in [item for item in validation.issues if item.severity == "error"][:5])
         raise CompileBlocked("Template contract is not compare-ready: " + preview)
     try:
         require_configured_runtime_python(settings)
@@ -138,6 +143,9 @@ def compare_backends_template(
         contract_reference_status=contract_reference_status,
         python_model_status=python_model_status,
         comparison_points=comparison_points,
+        software_versions=collect_software_versions(
+            runtime_python=settings.runtime_python, phasetracer_root=resolved_phasetracer_root,
+        ),
         warnings=warnings,
         artifact_actions={
             "cosmotransitions": python_action,
@@ -458,7 +466,10 @@ def _render_backend_compare_markdown(payload: dict[str, Any]) -> str:
         - PhaseTracer smoke: `{payload.get("phasetracer_smoke_status", "")}`
         - Contract reference: `{payload.get("contract_reference_status", "")}`
         - Python model comparison: `{payload.get("python_model_status", "")}`
+        - OS-like zero-vacuum-mass criterion: `{json.dumps(payload.get("os_like_mass_criterion", {}), sort_keys=True)}`
         - Summary: **{conclusion}**
+
+        Software paths and versions for this comparison are recorded in `backend_compare.json` under `software_versions`; generated artifact metadata records the generation environment separately.
 
         ## Warnings
 
