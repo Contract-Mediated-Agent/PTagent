@@ -49,6 +49,13 @@ the environment gate before routing to 4D or 3DEFT work:
 python <skill-dir>/scripts/check_environment.py
 ```
 
+Select `--workflow 4d` for a paper/arXiv or manual 4D request, `--workflow sarah`
+for SARAH, and `--workflow 3deft` for DRalgo. This input-type hint limits
+preflight probes; it does not process the model or bypass the gate. A pure 4D
+preflight does not start Wolfram or search SARAH package paths. Unchecked
+operations remain blocked until their own preflight is run; omitted workflow
+retains the full environment check.
+
 Use the installed skill directory as `<skill-dir>`. If the user provides a
 repository checkout, pass `--project-root <PTagent-repo-root>`. If the user
 provides an existing PhaseTracer source path, pass

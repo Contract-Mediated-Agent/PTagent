@@ -110,8 +110,8 @@ def _run_capture_stage(
         )
     missing_labels = [label for label in script_result.capture_labels if label not in captured]
     if missing_labels:
-        normalized["missing_capture_labels"] = missing_labels
-    unevaluated_labels = _unevaluated_capture_labels(captured)
+        raise ThreeDeftBlocked("DRalgo run omitted requested capture markers: " + ", ".join(missing_labels))
+    unevaluated_labels = _unevaluated_capture_labels(captured, contract=contract)
     if unevaluated_labels:
         raise ThreeDeftBlocked(
             "DRalgo run produced unevaluated capture outputs; the reviewed source likely failed before these calls: "
@@ -230,6 +230,11 @@ def normalize_dralgo_output(raw_text: str, *, source_label: str, contract: dict[
         "beta_functions": beta_functions,
         "beta_functions_phase_tracer": _convert_beta_functions(beta_functions),
         "captured_outputs": marked,
+        "unavailable_optional_audits": [
+            {"label": label, "status": "unavailable", "reason": "optional audit function has no definitions"}
+            for label, values in marked.items()
+            if _optional_audit_unavailable(label, values, contract)
+        ],
         "raw_output": data,
     }
 
@@ -272,10 +277,23 @@ def _wolfram_messages(text: str) -> list[str]:
     return result
 
 
-def _unevaluated_capture_labels(captured: dict[str, Any]) -> list[str]:
+def _optional_audit_unavailable(label: str, values: Any, contract: dict[str, Any]) -> bool:
+    rows = contract.get("three_d_soft_beta_functions", [])
+    return (
+        label == "BetaFunctions3DS" and bool(rows)
+        and all(str(row.get("parameter", "")).casefold() == "not_applicable"
+                and str(row.get("beta_expression", "")).casefold() == "not_applicable" for row in rows)
+        and isinstance(values, list) and len(values) == 1
+        and re.fullmatch(r'Missing\[\s*"OptionalAuditUnavailable"\s*,\s*"BetaFunctions3DS"\s*\]', str(values[0]).strip()) is not None
+    )
+
+
+def _unevaluated_capture_labels(captured: dict[str, Any], *, contract: dict[str, Any] | None = None) -> list[str]:
     result: list[str] = []
     for label, values in captured.items():
         if not isinstance(values, list):
+            continue
+        if _optional_audit_unavailable(label, values, contract or {}):
             continue
         function_name = _capture_function_name(label)
         for value in values:
@@ -307,7 +325,7 @@ def _capture_function_name(label: str) -> str:
 
 def _looks_like_unevaluated_call(value: str, function_name: str) -> bool:
     stripped = value.strip()
-    if not stripped:
+    if not stripped or stripped in {"$Failed", "$Aborted", "Null"} or stripped.startswith("Missing["):
         return True
     return bool(re.fullmatch(rf"{re.escape(function_name)}\s*\[.*\]", stripped, flags=re.DOTALL))
 

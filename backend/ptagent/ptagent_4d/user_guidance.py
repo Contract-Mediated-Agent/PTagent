@@ -8,6 +8,7 @@ from typing import Any
 
 from .artifact_layout import proof_materials_dir
 from .model_defaults import DEFAULT_RULES, FILTER_GUIDANCE, POLICY_DEFAULTS, phase_handling_recommendation
+from .model_preflight import focused_formula_records
 from .backends import (
     COMPARE_BACKENDS_SENTINEL,
     SUPPORTED_COMPILE_BACKENDS,
@@ -152,7 +153,8 @@ def build_user_guidance_markdown(
         "- `contract_template.md` is the only file users should edit.",
         "- Files under `proof_materials/` and `generated_models/` are derived and will be overwritten.",
         "- Related blockers are fused into packets; present ALL available packets together in one numbered checklist.",
-        "- The agent should patch source-evident fields itself before asking; only uncertain physics choices should reach the user.",
+        "- This guide lists machine-detected blockers, not completed source or conversation review. It has no access to user messages beyond choices already recorded in the supplied contract/backend context.",
+        "- Before presenting questions, the agent must check source/proof evidence and the actual user request, patch supported fields, and omit choices already answered. Only remaining uncertain physics choices should reach the user.",
         "- Apply the answer batch to the Markdown and rerun this guide; ask again only for unanswered or newly exposed blockers.",
         "",
         "```powershell",
@@ -317,8 +319,8 @@ def _render_issue_question(
         "",
         f"- Problem: `{issue.code}` - {issue.message}",
         f"- In plain language: {_plain_language_explanation(issue, target, compile_backend)}",
-        "- Materials checked: source material, current contract, generated proof files, explicit user inputs, and selected backend context when available.",
-        "- Missing or conflicting information: this field remains unresolved after evidence review.",
+        "- Machine check: this field is unresolved in the supplied contract. Evidence hints below are candidates, not completed review.",
+        "- Review required before asking: inspect the source, current proof files and actual user request; remove this question if those resolve the field.",
         "- Why this blocks: resolving it differently could change physics interpretation, generated backend behavior, or numerical results.",
         f"- Edit target: {target['edit_target']}",
         f"- Accepted format: {target['format']}",
@@ -358,7 +360,7 @@ def _render_question_packet(
         return [
             f"### Q{number}. Temperature range (phase tracing only)", "",
             f"- Proposed Tmax: `{numerical['Tmax']:g}` in contract units.",
-            f"- Materials checked and basis: {numerical['Tmax_basis']}",
+            f"- Basis recorded by the numerical-settings resolver: {numerical['Tmax_basis']}",
             f"- Possible impact: {numerical['Tmax_impact']}",
             "- Why this blocks scanning only: the upper search limit has not been explicitly confirmed; potential construction, compilation and ordinary smoke checks can proceed.",
             f"- Ask the user: for phase tracing, approve Tmax={numerical['Tmax']:g}, or provide a different confirmed upper temperature? Answer this together with all other applicable questions, not in a later serial round.",
@@ -380,8 +382,8 @@ def _render_question_packet(
         "",
         f"- Problem packet: `{len(packet.issues)}` related blockers were grouped because they belong to the same decision.",
         f"- In plain language: {_packet_plain_language(packet, target, compile_backend)}",
-        "- Materials checked: source material, current contract, generated proof files, explicit user inputs, previous extracted model information in this active run, and selected backend context.",
-        "- Missing or conflicting information: the grouped blocker fields below still cannot be resolved from checked evidence.",
+        "- Machine check: the grouped fields below are unresolved in the supplied contract; source and user-message review is still the agent's responsibility.",
+        "- Before asking: resolve source-supported fields and explicit user choices, then present all remaining ambiguities together.",
         "- Why this blocks: resolving this packet differently could change physics intent, generated code behavior, backend implementation, or numerical interpretation.",
         f"- Edit targets: {edit_targets}",
         f"- Accepted format: {_packet_format(packet, target)}",
@@ -985,7 +987,7 @@ def _default_recommendation(issue: ValidationIssue, target: dict[str, str]) -> s
     if issue.code == "unknown_symbol":
         return "first decide whether the symbol is a field, public input, fixed constant, or derived quantity; do not patch the expression blindly."
     if issue.code == "placeholder_value":
-        return "fill the smallest reviewed value that removes this blocker, and leave unrelated model details for later questions."
+        return "bind this field only from source evidence or explicit user choices; otherwise retain ASK_USER and include the missing evidence, impact and all related decisions in the same review batch. Never choose a value merely to clear validation."
     if issue.code == "contract_conflict":
         return "resolve the higher-level convention first, then regenerate the guide before changing detailed rows."
     if title.startswith("Final"):
@@ -1008,10 +1010,8 @@ def _memory_search_text(memory: PaperMemory | None) -> str:
     if memory is None:
         return ""
     parts: list[str] = []
-    for record in memory.formula_registry:
+    for record in focused_formula_records(memory):
         parts.extend([record.latex, record.context, record.raw_text])
-    for item in memory.symbol_registry:
-        parts.extend([item.symbol, item.role, *item.definitions])
     return "\n".join(part for part in parts if part)
 
 
@@ -1040,9 +1040,11 @@ def _evidence_lines(field_key: str, target: dict[str, str], memory: PaperMemory 
         return []
     formula_kinds = _formula_kinds_for_field(field_key)
     symbol = target.get("symbol", "")
+    scoped = focused_formula_records(memory)
+    source_ids = {record.source_id for record in scoped}
     formulas = [
         record
-        for record in memory.formula_registry
+        for record in scoped
         if (not formula_kinds or record.kind in formula_kinds)
         and (not symbol or _formula_mentions_symbol(record, symbol))
     ]
@@ -1050,7 +1052,8 @@ def _evidence_lines(field_key: str, target: dict[str, str], memory: PaperMemory 
         matching_symbols = [
             item
             for item in memory.symbol_registry
-            if item.symbol == symbol or symbol in item.definitions
+            if (item.symbol == symbol or symbol in item.definitions)
+            and source_ids.intersection(item.source_ids)
         ][:3]
     else:
         matching_symbols = []

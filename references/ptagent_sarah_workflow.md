@@ -54,6 +54,26 @@ Preserve explicit user parameters and SLHA inputs. Bind accepted inputs through
 If the file/defaults are absent or unsupported, request explicit inputs.
 Symbolic imports can continue with unresolved inputs.
 
+For a prepared task, apply the accepted batch with `prepare-sarah` in a fresh
+`--run-dir`, reusing the exported `.vin`, parameter map, companion metadata and
+`--model-source`. Carry forward prior explicit parameters/choices; supply changed
+bindings through `--parameters`/`--slha` and policies through `--choices`. Do not
+edit physical rows in the existing prepared Markdown and then run `resolve`:
+that invalidates its prepared-physics digest. No repeat Wolfram export is needed.
+Source relations not supported by the deterministic converter remain blockers;
+neither a source recommendation nor a test point authorizes guessed bindings.
+Section 11 scan controls retain their separate approval path described above.
+
+The prepared review packet includes unresolved parameters/scale and all pending
+policy proposals, omits requests to reconstruct already imported formulas, and
+preserves explicit overrides without treating them as compilation approval.
+The graph distinguishes sourced expressions, calculated thermal/binding values,
+explicit structured inputs, pending recommendations and unavailable values.
+`sarah_preparation_checks.json` reports `numerical_status=not_run` for an unbound
+point; `passed=true` then refers only to the completed import checks. A finite
+point check is reported only with actual reference-point/tadpole/mass records,
+and still does not establish vacuum stability or physical suitability.
+
 The deterministic precedence is explicit parameter JSON > SLHA > source
 parameter mapping. Use names in the imported expressions or normalized SLHA
 names. Model-local SPheno example values are recommendations until reviewed

@@ -26,6 +26,8 @@ def main() -> int:
     parser.add_argument("--phasetracer-root", default="", help="Optional explicit PhaseTracer source root.")
     parser.add_argument("--sarah-root", default="", help="Optional SARAH installation root used only by export-sarah.")
     parser.add_argument("--sarah-model", default="", help="Optional SARAH model name/directory, including the documentation placeholder path.")
+    parser.add_argument("--workflow", choices=("all", "4d", "sarah", "3deft"), default="all",
+                        help="Limit active external-tool probes to the requested route; all preserves the full preflight.")
     args = parser.parse_args()
 
     if sys.version_info < (3, 11):
@@ -69,11 +71,16 @@ def main() -> int:
     project_phase_candidates = _project_phasetracer_candidates(project_root, validate_phasetracer_root)
     phasetracer_ready = configured_phase_ok or bool(project_phase_candidates)
 
-    wolfram_status = _check_wolfram_and_dralgo()
+    check_sarah = args.workflow in {"all", "sarah"} or bool(args.sarah_root or args.sarah_model)
+    check_wolfram = args.workflow != "4d" or check_sarah
+    wolfram_status = _check_wolfram_and_dralgo(probe=check_wolfram)
     wolfram_ready = bool(wolfram_status.get("wolfram_ready", wolfram_status["dralgo_available"]))
     dralgo_ready = bool(wolfram_status["dralgo_available"])
     sarah_options = {"sarah_root": args.sarah_root, "wolframscript": wolfram_status["wolframscript_path"]}
-    if args.sarah_model:
+    if not check_sarah:
+        sarah_status = {"available": False, "root": "", "configured": False,
+                        "selection": "not_checked", "searched_locations": [], "diagnostics": []}
+    elif args.sarah_model:
         try:
             sarah_status = resolve_sarah_model(args.sarah_model, **sarah_options)
             sarah_status["model_available"] = True
@@ -106,6 +113,8 @@ def main() -> int:
         defusedxml_ready=current_has_defusedxml,
         sarah_ready=sarah_ready,
     )
+    not_checked = ([] if check_wolfram else ["wolfram", "dralgo"]) + ([] if check_sarah else ["sarah"])
+    missing = [name for name in missing if name not in not_checked]
     advisories = _advisories(
         missing=missing,
         runtime_python_message=runtime_message,
@@ -127,6 +136,8 @@ def main() -> int:
     phasetracer_download_dir = project_root / "PhaseTracer"
     payload: dict[str, Any] = {
         "schema": "ptagent.environment.v2",
+        "workflow": args.workflow,
+        "not_checked": not_checked,
         "ready": not operation_blockers["4d_extract"],
         "ready_meaning": "ready covers baseline 4D extraction only; inspect operation_blockers before backend-specific work.",
         "project_root": str(project_root),
@@ -160,8 +171,10 @@ def main() -> int:
         "wolfram": {
             "wolframscript_path": wolfram_status["wolframscript_path"],
             "wolframscript_found": bool(wolfram_status["wolframscript_path"]),
+            "probe_status": wolfram_status.get("probe_status", "passed" if wolfram_ready else "not_checked"),
             "wolfram_ready": wolfram_ready,
             "dralgo_available": dralgo_ready,
+            "dralgo_status": wolfram_status.get("dralgo_status", "available" if dralgo_ready else "not_checked"),
             "message": wolfram_status["message"],
         },
         "sarah": {
@@ -247,23 +260,41 @@ def _probe_modules(python_path, modules, *, python_ready=True, python_message="o
     return results
 
 
-def _check_wolfram_and_dralgo() -> dict[str, Any]:
+def _check_wolfram_and_dralgo(*, probe: bool = True) -> dict[str, Any]:
+    executable = ""
     try:
-        from ptagent.ptagent_3deft.environment import check_wolfram_and_dralgo
+        from ptagent.ptagent_3deft.environment import check_wolfram_and_dralgo, find_wolframscript
 
-        result = check_wolfram_and_dralgo()
+        executable = find_wolframscript() or ""
+        if not probe:
+            return {"wolframscript_path": executable, "probe_status": "not_required",
+                    "wolfram_ready": False, "dralgo_available": False, "dralgo_status": "not_checked",
+                    "message": "No Wolfram process was started for this 4D preflight. Run the SARAH/3DEFT preflight before using those operations."}
+        result = check_wolfram_and_dralgo(executable or None)
+        runtime_ready = result.ok or "PTAGENT_DRALGO_MISSING" in result.stdout
         return {
             "wolframscript_path": result.wolframscript_path,
-            "wolfram_ready": result.ok or "PTAGENT_DRALGO_MISSING" in result.stdout,
+            "probe_status": "passed" if runtime_ready else "failed" if result.wolframscript_path else "not_found",
+            "wolfram_ready": runtime_ready,
             "dralgo_available": result.dralgo_available,
+            "dralgo_status": "available" if result.dralgo_available else "load_failed" if runtime_ready else "not_checked",
             "message": result.message,
         }
     except Exception as exc:
+        timed_out = isinstance(exc, subprocess.TimeoutExpired) or isinstance(exc.__cause__, subprocess.TimeoutExpired)
+        advice = (
+            " The executable was found, but its runtime probe did not complete. "
+            "DRalgo availability is unknown; this is not evidence that a package is missing. "
+            "On macOS, test the existing WolframKernel directly. If it works, request permission "
+            "to rerun the existing wolframscript outside the restricted sandbox; do not reinstall or reactivate solely on this result."
+        ) if timed_out and executable else ""
         return {
-            "wolframscript_path": "",
+            "wolframscript_path": executable,
+            "probe_status": "timed_out" if timed_out else "failed",
             "wolfram_ready": False,
             "dralgo_available": False,
-            "message": f"{type(exc).__name__}: {exc}",
+            "dralgo_status": "not_checked",
+            "message": f"{type(exc).__name__}: {exc}" + advice,
         }
 
 
@@ -386,7 +417,8 @@ def _advisories(
         )
     if "dralgo" in missing:
         advisories.append(
-            "DRalgo could not be loaded; 3DEFT DRalgo run is blocked until DRalgo is installed. "
+            "DRalgo availability was not confirmed; 3DEFT DRalgo run is blocked until its runtime/load check succeeds. "
+            "A runtime timeout does not establish that DRalgo needs installation. "
             f"Detail: {wolfram_message}"
         )
     if "defusedxml" in missing:

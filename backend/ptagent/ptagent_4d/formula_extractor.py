@@ -72,6 +72,7 @@ def extract_formula_records(spans: list[SourceSpan]) -> list[FormulaRecord]:
             equation_number=item.equation_number,
             context=item.context,
             parser_sources=[item.parser],
+            section_path=[item.heading] if item.heading else [],
         )
         for index, item in enumerate(formulas, start=1)
     ]
@@ -290,10 +291,10 @@ def _confidence(value: str, *, env: str, kind: str, parser: str) -> float:
 
 
 def _dedupe_formulas(items: list[_ParsedFormula]) -> list[_ParsedFormula]:
-    seen: set[str] = set()
+    seen: set[tuple[str, str]] = set()
     result: list[_ParsedFormula] = []
     for item in items:
-        key = re.sub(r"\s+", "", item.latex)[:300]
+        key = (item.heading, re.sub(r"\s+", "", item.latex))
         if key in seen:
             continue
         seen.add(key)

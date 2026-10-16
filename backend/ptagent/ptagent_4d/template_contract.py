@@ -7,7 +7,7 @@ import keyword
 import math
 import re
 import textwrap
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -17,7 +17,7 @@ from .artifact_layout import generated_models_dir, model_artifact_slug
 from .compiler import CompileBlocked, CompileResult, compile_usage_instructions
 from .config import Settings
 from .latex_display import clean_latex_evidence_for_markdown, render_latex_evidence_block
-from .model_preflight import model_focus_terms, selected_model_from_memory
+from .model_preflight import focused_formula_records, selected_model_from_memory
 from .model_defaults import DEFAULT_RULES, FILTER_GUIDANCE, phase_handling_recommendation
 from .paper_expression import scalar_expression
 from .numerical_settings import (
@@ -281,20 +281,28 @@ def is_contract_template(markdown_text: str) -> bool:
 def build_contract_template(memory: PaperMemory) -> str:
     """Build the human-editable Markdown contract worksheet."""
 
-    focus_terms = model_focus_terms(memory)
+    records = focused_formula_records(memory)
+    withheld = [record.formula_id for record in memory.formula_registry if record not in records]
+    selected_model = selected_model_from_memory(memory)
+    relevant_ids = {record.source_id for record in records
+                    if _potential_definition_kind(record) or record.kind == "mass"}
+    # Keep the complete paper memory as evidence; narrow only the worksheet view.
+    memory = replace(memory, formula_registry=records, symbol_registry=[
+        symbol for symbol in memory.symbol_registry
+        if selected_model is None or relevant_ids.intersection(symbol.source_ids)
+    ])
     formulas = {
-        "V0": _best_formula(memory.formula_registry, "tree_potential", focus_terms=focus_terms),
-        "Veff": _best_formula(memory.formula_registry, "effective_potential", focus_terms=focus_terms),
-        "VCW": _best_formula(memory.formula_registry, "zero_temp_loop", focus_terms=focus_terms),
+        "V0": _best_formula(records, "tree_potential"),
+        "Veff": _best_formula(records, "effective_potential"),
+        "VCW": _best_formula(records, "zero_temp_loop"),
         "VCT": "",
-        "scalar_mass": _best_formula(memory.formula_registry, "mass", focus_terms=focus_terms),
-        "thermal": _best_formula(memory.formula_registry, "thermal", focus_terms=focus_terms),
-        "daisy": _best_formula(memory.formula_registry, "daisy", focus_terms=focus_terms),
+        "scalar_mass": _best_formula(records, "mass"),
+        "thermal": _best_formula(records, "thermal"),
+        "daisy": _best_formula(records, "daisy"),
     }
     fields = _candidate_fields(memory, tree_potential_latex=formulas["V0"])
     parameters = [row for row in _candidate_parameters(memory, tree_potential_latex=formulas["V0"])
                   if row["name"] not in {field["name"] for field in fields}]
-    selected_model = selected_model_from_memory(memory)
     public_inputs = _public_input_candidates(parameters)
     constants = [
         {
@@ -360,7 +368,7 @@ def build_contract_template(memory: PaperMemory) -> str:
         )
     )
     goldstone_defaults = _auto_goldstone_defaults(formulas)
-    return _render_human_contract_template(
+    worksheet = _render_human_contract_template(
         paper_id=memory.paper_id,
         fields=fields,
         public_inputs=public_inputs,
@@ -377,6 +385,16 @@ def build_contract_template(memory: PaperMemory) -> str:
         matrix_notes=matrix_notes,
         goldstone_defaults=goldstone_defaults,
         model_short_name=selected_model.short_name if selected_model else "ASK_USER",
+        loop_modes={name: "ASK_USER" for name in ("zero_temperature", "thermal", "daisy")},
+    )
+    blank = [name for name, value in formulas.items() if not value and name != "VCT"]
+    return worksheet + "\n\n## Extraction Review Notes\n\n" + (
+        "- Worksheet selection is conservative; it does not remove evidence from the full paper memory.\n"
+        f"- Blank formula slots: {', '.join(blank) or 'none'}. A blank means no unique exact definition "
+        "was identified in the selected branch, not that the contribution vanishes. Conditions, "
+        "expansions, competing definitions and unscoped formulas require source review.\n"
+        f"- Formulas withheld from automatic branch selection: {', '.join(withheld) or 'none'}. "
+        "These remain in the formula registry, including unscoped evidence available for review.\n"
     )
 
 
@@ -398,6 +416,7 @@ def _render_human_contract_template(
     matrix_notes: str = "Enabled by default because mixed scalar sectors must use matrix eigenvalues. Ask the user if the paper instead gives direct eigenvalues.",
     goldstone_defaults: dict[str, str] | None = None,
     model_short_name: str = "ASK_USER",
+    loop_modes: dict[str, str] | None = None,
     scalar_thermal_derivation_notes: str = "State whether the source gives the final total scalar thermal masses directly or whether this block assembles zero-temperature matrices plus baseline/SM self-energies plus BSM increments. Record branch-sensitive details such as Yukawa type, tan(beta) factors, neglected off-diagonal self-energies, and source equation/prose references.",
     gauge_thermal_derivation_notes: str = "State whether the source gives the final total gauge Debye masses/eigenvalues directly or whether this block assembles baseline/SM self-energies plus extra-field increments. Record longitudinal/transverse policy, neutral mixing basis, photon/Z branch convention, and source equation/prose references.",
 ) -> str:
@@ -446,10 +465,10 @@ def _render_human_contract_template(
                     {"key": "model_short_name", "value": model_short_name or "ASK_USER", "notes": "Reviewed HEP model acronym/short name used for generated artifact names, e.g. XSM, 2HDM, IDM. Use `model` only when no such name exists."},
                     {"key": "workflow_mode", "value": "fresh", "notes": "Choices: fresh or continue. Fresh ignores old artifacts; continue means this Markdown is the source of truth for local repairs."},
                     {"key": "source_of_truth", "value": "current_input_plus_user_answers", "notes": "In continue mode, set this to existing_contract_template.md."},
-                    {"key": "zero_temperature", "value": "none", "notes": "Choices: none, standard_CW_V1, paper_os_like_V1, custom_expr."},
+                    {"key": "zero_temperature", "value": (loop_modes or {}).get("zero_temperature", "none"), "notes": "Choices: none, standard_CW_V1, paper_os_like_V1, custom_expr. Missing extraction evidence does not establish absence."},
                     {"key": "counterterm", "value": "ASK_USER", "notes": "Choices: none, implicit_in_V1, explicit_linear_system, custom_expr. Explicit systems must fill Section 6."},
-                    {"key": "thermal", "value": "none", "notes": "Choices: none, standard_thermal_integrals, custom_expr."},
-                    {"key": "daisy", "value": "none", "notes": "Choices: none, custom_expr. Use custom_expr only for an explicit Arnold-Espinosa Daisy term; Parwani uses no separate V_daisy."},
+                    {"key": "thermal", "value": (loop_modes or {}).get("thermal", "none"), "notes": "Choices: none, standard_thermal_integrals, custom_expr. Review the source and explicit user prescription."},
+                    {"key": "daisy", "value": (loop_modes or {}).get("daisy", "none"), "notes": "Choices: none, custom_expr. Use custom_expr only for an explicit Arnold-Espinosa Daisy term; Parwani uses no separate V_daisy."},
                     {"key": "resummation_scheme", "value": "ASK_USER", "notes": "Choices: none, Parwani, Arnold-Espinosa, custom_expr."},
                     {"key": "gauge", "value": "ASK_USER", "notes": "Example: Landau, Feynman, unitary, or not_applicable."},
                     {"key": "species_policy", "value": "explicit_include_exclude_tables", "notes": "Included species appear in Direct Bosons/Fermions; omitted species appear in Excluded Species."},
@@ -3217,6 +3236,19 @@ def _render_cosmotransitions_source(
         "implementation_contract": implementation,
         "phase_filter": implementation_phase_filter,
         "loop_modes": loops,
+        "thermal_evaluator": {
+            "method": "low_mass_series_spline_hybrid",
+            "argument": "mass_squared_over_temperature_squared",
+            "series_functions": ["cosmoTransitions.finiteT.Jb_low", "cosmoTransitions.finiteT.Jf_low"],
+            "series_order": 20,
+            "series_continuation": "real_part_at_sqrt_complex_argument",
+            "blend_coordinate": "abs(mass_squared_over_temperature_squared)",
+            "blend_window": [1.0, 2.0],
+            "series_weight": "1-(10*u**3-15*u**4+6*u**5), u=clip(abs(y)-1,0,1)",
+            "spline_functions": ["cosmoTransitions.finiteT.Jb_spline", "cosmoTransitions.finiteT.Jf_spline"],
+        } if thermal.get("mode") == "standard_thermal_integrals" else {
+            "method": thermal.get("mode", "none"),
+        },
         "renormalization_scale": renormalization_scale_name,
         "numerical_settings": numerical,
         "os_like_mass_criterion": dict(OS_MASS_CRITERION),
@@ -5084,26 +5116,46 @@ def _public_input_candidates(parameters: list[dict[str, str]]) -> list[dict[str,
 
 
 def _best_formula(records: list[FormulaRecord], kind: str, *, focus_terms: tuple[str, ...] = ()) -> str:
-    candidates = [record for record in records if record.kind == kind]
+    candidates = [record for record in records
+                  if (record.kind == kind if kind == "mass" else _potential_definition_kind(record) == kind)]
     if not candidates:
         return ""
-    candidates.sort(
-        key=lambda record: _formula_focus_score(record, focus_terms),
-        reverse=True,
-    )
-    return candidates[0].latex
+    unique = {re.sub(r"\s+", "", record.latex): record.latex for record in candidates}
+    # Different definitions are a review question, not a confidence/length contest.
+    return next(iter(unique.values())) if len(unique) == 1 else ""
 
 
-def _formula_focus_score(record: FormulaRecord, focus_terms: tuple[str, ...]) -> float:
-    score = record.confidence + len(record.latex) / 10000.0
-    if not focus_terms:
-        return score
-    probe = "\n".join([record.latex, record.raw_text, record.context, record.label]).lower()
-    for term in focus_terms:
-        cleaned = str(term or "").strip().lower()
-        if cleaned and cleaned in probe:
-            score += 0.75
-    return score
+def _potential_definition_kind(record: FormulaRecord) -> str:
+    """Recognize a defining potential LHS, never conditions or J expansions."""
+    if "=" not in record.latex:
+        return ""
+    lhs, rhs = record.latex.split("=", 1)
+    if any(token in lhs for token in (r"\partial", r"\approx", r"\simeq")):
+        return ""
+    lhs = re.sub(r"\\begin\{(?:aligned|align|split|gather)\}", "", lhs)
+    lhs = re.sub(r"\\(?:mathrm|textrm|text|rm)\s*", "", lhs)
+    lhs = re.sub(r"[{}\s&]", "", lhs).lower()
+    match = re.fullmatch(r"(v(?:_?[a-z0-9]+)?)(?:\([^=]*\))?", lhs)
+    if not match:
+        return ""
+    name = match.group(1).replace("_", "")
+    kind = {"v0": "tree_potential", "vtree": "tree_potential",
+            "veff": "effective_potential", "v1": "zero_temp_loop", "vcw": "zero_temp_loop",
+            "vt": "thermal", "v1t": "thermal", "vthermal": "thermal",
+            "vdaisy": "daisy", "vring": "daisy"}.get(name, "")
+    # Equal-potential conditions compare the same function at two field points.
+    right = re.sub(r"\\(?:mathrm|textrm|text|rm)\s*", "", rhs)
+    right = re.sub(r"[{}\s&_]", "", right).lower()
+    if right.startswith(name + "("):
+        return ""
+    scope = " ".join([record.tex_label, *record.section_path])
+    if re.search(r"high[-_ ]?(?:temperature|T)\b|approx|expansion", scope, re.IGNORECASE):
+        return ""
+    if kind == "tree_potential" and re.search(r"(?:in the )?high[- ]temperature (?:limit|approximation|expansion)|approximat(?:e|ed) potential", record.context, re.IGNORECASE):
+        return ""
+    if any(token in rhs for token in (r"\approx", r"\simeq", r"\mathcal{O}", r"\mathcal O")):
+        return ""
+    return kind
 
 
 def _default_questions(formulas: dict[str, str]) -> list[dict[str, str]]:

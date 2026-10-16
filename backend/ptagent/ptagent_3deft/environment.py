@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .contract import ThreeDeftBlocked
+from .loader import compatibility_prelude
 
 
 DRALGO_INSTALL_SOURCES = {
@@ -64,7 +65,9 @@ def check_wolfram_and_dralgo(
             dralgo_available=False,
             message="wolframscript was not found. Install Wolfram Engine/Mathematica or pass --wolframscript <path>.",
         )
-    completed = _run_wolfram_code(executable, _dralgo_check_code(), timeout_seconds=timeout_seconds)
+    prelude = compatibility_prelude(None, executable)
+    code = prelude + '\nPrint["PTAGENT_DRALGO_OK"]; Exit[0];' if prelude else _dralgo_check_code()
+    completed = _run_wolfram_code(executable, code, timeout_seconds=timeout_seconds)
     loaded = "PTAGENT_DRALGO_OK" in completed.stdout
     available = completed.returncode == 0 and loaded
     return WolframPreflightResult(

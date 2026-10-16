@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Iterable
 
 from .artifact_layout import proof_materials_dir
-from .schemas import PaperMemory
+from .schemas import FormulaRecord, PaperMemory
 
 
 MODEL_FOCUS_MARKER = "PTAGENT_MODEL_FOCUS:"
@@ -135,6 +135,11 @@ def preflight_model_selection(memory: PaperMemory, *, requested_model: str = "")
     candidates = tuple(_scan_model_candidates(memory))
     if requested:
         selected = _scanned_candidate_for_requested_model(requested, candidates)
+        if selected is None and any(
+            _contains_alias(heading, requested)
+            for record in memory.formula_registry for heading in record.section_path
+        ):
+            selected = _candidate_for_requested_model(requested, candidates)
         if selected is None and candidates:
             return ModelPreflightResult(
                 selected_model=None,
@@ -216,6 +221,51 @@ def model_focus_terms(memory: PaperMemory) -> tuple[str, ...]:
         return ()
     terms = [selected.short_name, selected.display_name, *selected.aliases]
     return tuple(item for item in dict.fromkeys(term.strip() for term in terms) if item)
+
+
+def focused_formula_records(memory: PaperMemory) -> list[FormulaRecord]:
+    """Select branch-owned evidence; nearby comparisons do not establish ownership."""
+    selected = selected_model_from_memory(memory)
+    if selected is None:
+        return list(memory.formula_registry)
+    models = [(name, aliases) for name, _display, aliases in _KNOWN_MODELS
+              if name != selected.short_name]
+    models.append((selected.short_name, (selected.display_name, *selected.aliases)))
+
+    def owners(heading: str) -> set[str]:
+        if re.search(r"\b(?:shared|comparison|versus)\b", heading, re.IGNORECASE):
+            return {"ambiguous_scope"}
+        # Acronyms are stronger evidence than overlapping descriptive aliases.
+        direct = {name for name, _aliases in models if _contains_alias(heading, name)}
+        if direct and re.search(r"\band\b", heading, re.IGNORECASE):
+            return direct | {"ambiguous_scope"}
+        if direct:
+            return direct
+        hits = [(len(alias), name) for name, aliases in models for alias in aliases
+                if _contains_alias(heading, alias)]
+        longest = max((length for length, _name in hits), default=0)
+        if hits:
+            return {name for length, name in hits if length == longest}
+        # Explicit custom branch headings also stop inheritance from a parent
+        # branch. Do not guess aliases from arbitrary nearby prose.
+        if re.search(r"\b[Mm]odel\s+[A-Z][A-Za-z0-9_-]*(?:\b|$)", heading):
+            return {"unselected_custom_scope"}
+        return set()
+
+    result = []
+    for record in memory.formula_registry:
+        # The closest model-bearing heading owns the formula. Ambiguous/shared
+        # headings and unscoped prose require explicit review, not a score bonus.
+        for heading in reversed(record.section_path):
+            matches = owners(heading)
+            if matches:
+                if matches == {selected.short_name}:
+                    result.append(record)
+                break
+        else:
+            if not record.section_path and owners(record.tex_label or record.label) == {selected.short_name}:
+                result.append(record)
+    return result
 
 
 def write_model_preflight_artifacts(run_dir: Path, result: ModelPreflightResult) -> tuple[Path, Path]:

@@ -1049,6 +1049,7 @@ int main(int argc, char** argv) {{
         "rg_spline_step": rg_spline["step"] if rg_spline else None,
         "rg_ode_solver": "rk4" if runtime_rg else "none",
         "rg_ode_steps": ode_steps,
+        "reference_rg_solver": "DOP853_log_mu" if runtime_rg else "none",
         "rg_beta_function_variable": beta_variable if runtime_rg else "none",
         "rg_beta_derivative_factor": beta_factor if runtime_rg else 1.0,
         "rg_beta_dependent_variable_policy": rg_matching.get("four_d_beta_dependent_variable_policy", "dralgo_native") if runtime_rg else "none",
@@ -2945,6 +2946,8 @@ def _run_rg_python(
     beta_variable: str,
     beta_factor: float,
 ) -> dict[str, float]:
+    from scipy.integrate import solve_ivp
+
     if input_scale is None:
         raise ThreeDeftBlocked("4D running needs an input scale.")
     _require_positive_scale(input_scale, "4D input_scale")
@@ -2952,30 +2955,36 @@ def _run_rg_python(
     state = {name: spec["test_value"] for name, spec in inputs.items()}
     log_start = math.log(input_scale)
     log_end = math.log(target_scale)
-    step = (log_end - log_start) / float(ode_steps)
-    for index in range(ode_steps):
-        log_mu = log_start + step * index
-        k1 = _eval_beta_vector(beta_functions, state, math.exp(log_mu), beta_variable=beta_variable, beta_factor=beta_factor)
-        k2 = _eval_beta_vector(
-            beta_functions,
-            _add_scaled(state, k1, 0.5 * step),
-            math.exp(log_mu + 0.5 * step),
-            beta_variable=beta_variable,
-            beta_factor=beta_factor,
+    if not state or log_start == log_end:
+        return state
+    names = list(state)
+
+    def rhs(log_mu, values):
+        beta = _eval_beta_vector(
+            beta_functions, dict(zip(names, values)), math.exp(log_mu),
+            beta_variable=beta_variable, beta_factor=beta_factor,
         )
-        k3 = _eval_beta_vector(
-            beta_functions,
-            _add_scaled(state, k2, 0.5 * step),
-            math.exp(log_mu + 0.5 * step),
-            beta_variable=beta_variable,
-            beta_factor=beta_factor,
+        result = [beta[name] for name in names]
+        if not all(math.isfinite(value) for value in result):
+            raise ValueError("4D reference RG derivative is not finite.")
+        return result
+
+    # A fixed log-grid RK4 can be less accurate than the compiled scale-grid
+    # splines. Control reference integration error independently of acceptance
+    # tolerances, retaining ode_steps as a minimum integration resolution.
+    solution = solve_ivp(
+        rhs, (log_start, log_end), list(state.values()), method="DOP853",
+        rtol=1e-12, atol=1e-12,
+        max_step=abs(log_end - log_start) / float(ode_steps),
+    )
+    if not solution.success:
+        raise ValueError(
+            f"4D reference RG integration failed at scale {math.exp(solution.t[-1]):.17g}: {solution.message}"
         )
-        k4 = _eval_beta_vector(beta_functions, _add_scaled(state, k3, step), math.exp(log_mu + step), beta_variable=beta_variable, beta_factor=beta_factor)
-        state = {
-            name: state[name] + step * (k1[name] + 2.0 * k2[name] + 2.0 * k3[name] + k4[name]) / 6.0
-            for name in state
-        }
-    return state
+    result = {name: float(value) for name, value in zip(names, solution.y[:, -1])}
+    if not all(math.isfinite(value) for value in result.values()):
+        raise ValueError("4D reference RG state is not finite.")
+    return result
 
 
 def _eval_beta_vector(

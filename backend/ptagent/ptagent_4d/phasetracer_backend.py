@@ -2567,6 +2567,14 @@ def _metadata(contract: dict[str, Any], *, template_sha256: str, contract_sha256
         "field_order": [str(row.get("name", "")) for row in _list(contract.get("fields"))],
         "input_defaults": {str(row.get("name", "")): _param_default(row) for row in _list(params.get("public_inputs"))},
         "loop_modes": contract.get("loops", {}),
+        "thermal_evaluator": {
+            "method": "native_spline",
+            "provider": "PhaseTracer/EffectivePotential",
+            "argument": "mass_squared_over_temperature_squared",
+            "entrypoint": "EffectivePotential::OneLoopPotential::V1T",
+        } if _uses_standard_thermal_integrals(contract) else {
+            "method": _dict(_dict(contract.get("loops")).get("thermal")).get("mode", "none"),
+        },
         "phasetracer_base": "EffectivePotential::OneLoopPotential",
         "daisy_method": _phasetracer_daisy_method(contract),
         "numerical_settings": resolve_numerical_settings(contract),

@@ -222,7 +222,8 @@ def public_input_names():
                             names.append(str(value))
                             break
     try:
-        names.extend(str(name) for name in inspect.signature(m.build_model).parameters.keys())
+        names.extend(str(name) for name, param in inspect.signature(m.build_model).parameters.items()
+                     if param.kind not in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD))
     except Exception:
         pass
     control_names = {'run_tc', 'print_tc'}
@@ -321,8 +322,21 @@ def check_vacuum_physical_mass_anchors(bosons):
         )
 
 def should_run_finite_vtot_check():
+    metadata = getattr(m, 'MODEL_METADATA', {{}})
+    card = metadata.get('model_card', {{}}) if isinstance(metadata, dict) else {{}}
+    if isinstance(card, dict) and str(card.get('numerical_ready', '')).lower() == 'false':
+        return False, 'model metadata declares unresolved numerical inputs'
     sources, reason = default_parameter_sources()
+    defaults = getattr(m, 'DEFAULT_INPUT_VALUES', None)
     if not sources:
+        input_tables = [table for table in (
+            getattr(m, 'INPUT_PARAMETERS', None),
+            metadata.get('input_parameters') if isinstance(metadata, dict) else None,
+        ) if table is not None]
+        # An explicitly empty generated input contract is not missing provenance.
+        if (input_tables and all(isinstance(table, (dict, list, tuple)) and not table for table in input_tables)
+                and isinstance(defaults, dict) and not defaults and not public_input_names()):
+            return True, 'generated model declares no public inputs; existing factory binds all constants'
         return False, reason
     trusted = {{
         'benchmark',
@@ -342,6 +356,20 @@ def should_run_finite_vtot_check():
     bad = {{name: source for name, source in sources.items() if source not in trusted}}
     if bad:
         return False, 'untrusted or placeholder defaults: ' + repr(bad)
+    if isinstance(defaults, dict):
+        missing = []
+        for name in set(public_input_names()) | set(sources):
+            try:
+                finite = np.isfinite(float(defaults[name]))
+            except (KeyError, TypeError, ValueError, OverflowError):
+                finite = False
+            if not finite:
+                missing.append(name)
+        if missing:
+            return False, 'missing or non-finite public input defaults: ' + repr(sorted(missing))
+    untraced = set(public_input_names()) - set(sources)
+    if untraced:
+        return False, 'missing public input provenance: ' + repr(sorted(untraced))
     return True, 'all defaults are reviewed benchmark/source/user/standard/range-midpoint values'
 
 mins = model.approxZeroTMin()
@@ -391,6 +419,7 @@ if run_vtot_check:
     x_probe = x + np.linspace(0.5, 1.5, model.Ndim)
     assert_finite('Vtot(x_probe, T=100)', model.Vtot(x_probe, 100.0, include_radiation=False))
     assert_finite('Vtot(xb, Tb)', model.Vtot(xb, Tb, include_radiation=False))
+    print('INFO: finite Vtot BP check passed: ' + vtot_check_reason)
 else:
     print('WARNING: finite Vtot BP check skipped: ' + vtot_check_reason + '. Please test Vtot with a reviewed benchmark point.')
 print(m.MODEL_METADATA.get('model_name', 'ok'))

@@ -339,9 +339,14 @@ backend context:
   `apply_symmetry` generators instead of requesting a phase-filter threshold.
   Never replace a constructive symmetry proposal with a blanket disabled default.
 
-Do not ask about values that are standard fixed constants unless the paper uses
-nonstandard conventions. Treat `v`, SM gauge couplings, and Yukawa couplings as
-fixed/default internals unless the paper lists them as scan/public inputs.
+Treat `v`, SM gauge couplings, and Yukawa couplings as fixed internal parameters
+unless the source or user makes them scan/public inputs. A fixed role does not
+establish a numerical value, scale, or scheme. Bind numbers only from the current
+source, explicit user inputs, SLHA, or an explicitly accepted sourced proposal.
+Do not re-ask values already supplied. If numerical bindings remain missing after
+checking those materials, keep `ASK_USER` and include them in the same review
+batch with their physical impact. Do not silently import SM numbers from memory,
+backend defaults, unrelated examples, or earlier runs.
 
 ## Evidence Triage
 

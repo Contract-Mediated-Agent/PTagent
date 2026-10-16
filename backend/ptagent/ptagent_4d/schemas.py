@@ -118,6 +118,8 @@ class FormulaRecord:
     equation_number: str = ""
     context: str = ""
     parser_sources: list[str] = field(default_factory=list)
+    section_path: list[str] = field(default_factory=list)
+    tex_label: str = ""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "FormulaRecord":
@@ -133,6 +135,8 @@ class FormulaRecord:
             equation_number=str(data.get("equation_number", "")),
             context=str(data.get("context", "")),
             parser_sources=[str(item) for item in _as_list(data.get("parser_sources"))],
+            section_path=[str(item) for item in _as_list(data.get("section_path"))],
+            tex_label=str(data.get("tex_label", "")),
         )
 
     def to_dict(self) -> dict[str, Any]:

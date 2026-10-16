@@ -122,7 +122,9 @@ def _policies(model, choices: dict) -> dict:
 
 def _numerical_checks(model) -> dict:
     """Check the imported point; do not solve or replace the source parameters."""
-    proof = {"passed": True, "scope": "Verified import and finite point evaluation; not a proof of vacuum stability or physical suitability.",
+    proof = {"passed": True, "scope": "Verified import only; numerical point evaluation was not run.",
+             "numerical_status": "not_run",
+             "numerical_skip_reason": "Numerical parameters or renormalization scale remain unresolved.",
              "numerical_ready": model.numerical_ready, "thermal_ready": model.thermal_ready,
              "unresolved_parameters": model.unresolved_parameters, "thermal_blockers": (model.thermal_result or {}).get("blockers", ["thermal_metadata_missing"])}
     if not model.numerical_ready:
@@ -140,12 +142,30 @@ def _numerical_checks(model) -> dict:
     spectra = {sector.name: np.linalg.eigvalsh([[evaluate_safe_expression(entry, values) for entry in row] for row in sector.matrix]).tolist() for sector in model.mass_sectors}
     if not all(math.isfinite(v) for v in [*vacuum.values(), *tadpoles, *(x for masses in spectra.values() for x in masses)]):
         raise SarahImportError("The imported reference point has non-finite tadpoles or masses.")
-    proof.update(reference_point=vacuum, tree_tadpoles=tadpoles, mass_squared_eigenvalues=spectra)
+    proof.update(reference_point=vacuum, tree_tadpoles=tadpoles, mass_squared_eigenvalues=spectra,
+                 numerical_status="passed", numerical_skip_reason=None,
+                 scope="Verified import and finite point evaluation; not a proof of vacuum stability or physical suitability.")
     return proof
 
 
 def render_prepared_contract(model, policy: dict, radiation: dict, suggestion: dict, manifest: Path) -> str:
     text = build_sarah_contract(model)
+    text = text.replace(
+        "Edit this Markdown file only. PTagent rebuilds `contract_resolved.json` and generated backend code from this file every time.",
+        "Review this hash-bound prepared contract. Changed physical inputs or choices require prepare-sarah in a fresh task; do not mutate this Markdown to bind them.",
+    )
+    text = _section(text, "## 0. How To Use This File", """1. Review the contract, graph and complete question batch in `proof_materials/user_questions.md` together.
+2. Answer all missing-input and pending-policy questions in one batch. Explicit choices already supplied are preserved, not asked again.
+3. Apply accepted physical inputs through `prepare-sarah --parameters` or `--slha` and accepted policies through `--choices`, using a fresh `--run-dir` and the same exported source files. Preserve prior explicit values. No repeat Wolfram export is required.
+4. Do not patch physical inputs, policies or formulas in this prepared Markdown and then resolve it: the prepared-physics digest would be stale. Unsupported source relations remain blockers, not permission to fit or invent values.
+5. Section 11 scan controls have a separate approval path. Confirming Tmax does not change the prepared physics; record its exact approved value there.
+6. After construction blockers are resolved, present the new contract and graph for separate final approval. Only actual user approval permits `approve-sarah` with the exact reviewed hash; never set approved=true manually.
+7. Source evidence, explicit numerical inputs and physics answers do not by themselves authorize backend compilation.""")
+    text = _kv(text, "## 8. Approval", {
+        "approved": "false",
+        "reviewer_notes": "Obtain separate explicit approval of the complete prepared contract, then use approve-sarah with its exact reviewed hash. Never set approved=true manually.",
+    })
+    text = _section(text, "## 10. Commands", "Use `prepare-sarah` with the same exports and a fresh `--run-dir` for changed parameters/policies. See `proof_materials/user_questions.md` for the complete answer batch. Use `approve-sarah --expected-sha256 <reviewed-hash> --user-approval-quote <actual-approval>` only after construction blockers are resolved and the user approves the reviewed contract.")
     scheme = policy["resummation_scheme"]
     for key, value in {
         "counterterm": "custom_expr" if policy["counterterm"] == "source_polynomial" else "none",
@@ -278,7 +298,10 @@ def prepare_sarah(*, vin_path, parameter_map_path, run_dir, model_source=None, t
         "radiation": {"values": radiation, "inventory": inventory, "explicit": sorted(radiation_keys & set(explicit)),
                       "status": "proposal_until_approval", "assumption": "Count the retained source modes only; no unlisted bath species. Review massless-vector polarization conventions and missing decoupled species."},
         "phase_filter_suggestion": suggestion, "explicit_overrides": {"parameters": explicit, "choices": choices or {}},
-        "software_versions": versions, "adapter_sha256": {"sarah_prepare.py": file_hash(Path(__file__))},
+        "software_versions": versions, "adapter_sha256": {
+            "sarah_prepare.py": file_hash(Path(__file__)),
+            "sarah_review.py": file_hash(Path(__file__).with_name("sarah_review.py")),
+        },
         "precedence": "explicit user inputs > SLHA > source parameter map; model-local SPheno example inputs are recommendations only until reviewed and bound; no guessed scale, Yukawa type or tadpole solution",
     }
     write_json(manifest_path, manifest)
@@ -319,17 +342,20 @@ def preparation_errors(contract: dict) -> list[str]:
 
 def refresh_review(template: Path):
     from ptagent.review_graph import render_graph
-    from .user_guidance import build_user_guidance_markdown
+    from .sarah_review import review_questions, render_questions
     proof_dir = template.parent / "proof_materials"
     text = template.read_text(encoding="utf-8")
     contract = parse_contract(text)
     backend = contract["model_card"]["compile_backend"]
     validation = validate_contract_template(text, compile_backend=backend)
+    manifest = json.loads(Path(contract["model_card"]["sarah_preparation_manifest"]).read_text(encoding="utf-8"))
+    questions = review_questions(contract, manifest, validation.to_report().to_dict())
+    # These are review outputs, not mutations of the hash-bound compiler input.
+    validation.contract["questions"] = questions
     write_resolved_contract_data(validation.contract, proof_dir/"contract_resolved.json")
     write_json(proof_dir/"model_ir.json", contract_to_model_ir(validation.contract, source_path=contract["model_card"]["source_vin_path"]).to_dict())
     write_json(proof_dir/"validation.json", validation.to_report().to_dict())
-    (proof_dir/"user_questions.md").write_text(build_user_guidance_markdown(
-        template_markdown=text, validation=validation.to_report(), compile_backend=backend), encoding="utf-8")
+    (proof_dir/"user_questions.md").write_text(render_questions(contract, manifest, questions), encoding="utf-8")
     spec = preparation_graph(template, contract)
     write_json(proof_dir/"contract_graph_spec.json", spec)
     render_graph(template, spec, proof_dir/"contract_graph")
@@ -337,43 +363,8 @@ def refresh_review(template: Path):
 
 
 def preparation_graph(template: Path, contract: dict) -> dict:
-    root = template.parent
-    source_file = contract["model_card"]["source_vin_path"]
-    def item(name, label, kind, refs, file, calculation=None):
-        row = {"id": name, "label": label, "kind": kind, "refs": refs,
-               "evidence": [{"file": str(file), "location": name}]}
-        if calculation:
-            row["calculation"] = calculation
-        return row
-    source = item("source", "SARAH export", "source", [], source_file)
-    default_file = root/"input/preparation_defaults.json"
-    if not default_file.exists():
-        default_file = Path(contract["model_card"]["sarah_preparation_manifest"])
-    proposal = item("defaults", "Review proposals", "proposal", [], default_file)
-    source.pop("refs"); proposal.pop("refs")
-    policies = [item("policies", "Spectrum, radiation and physical prescriptions", "proposal",
-                     ["/parameters", "/implementation", "/loops", "/model_card/compile_backend"], root/"proof_materials/sarah_preparation.json")]
-    if contract["review"]["approved"]:
-        approval = json.loads((root/"proof_materials/sarah_approval.json").read_text())
-        proposal.update(label="User approval", kind="user")
-        for row in policies:
-            row.update(kind="user", user_quote=approval["user_approval_quote"],
-                       evidence=[{"file": str(root/"proof_materials/sarah_approval.txt"), "location": "approval"}])
-    branches = [
-        {"source": "source", "inputs": [
-            item("tree", "Tree potential and background fields", "source", ["/potential/V0", "/fields"], source_file),
-            item("spectrum", "Imported scalar, gauge and fermion matrices", "source", ["/masses"], source_file)], "outputs": []},
-        {"source": "defaults", "inputs": policies, "outputs": []},
-    ]
-    thermal_file = root/"proof_materials/thermal_derivation.json"
-    thermal_hash = contract["model_card"].get("source_thermal_metadata_sha256")
-    metadata_file = next((p for p in sorted((root/"input").rglob("*.json")) if file_hash(p) == thermal_hash), None)
-    if str(contract["model_card"].get("thermal_ready")).lower() == "true" and thermal_file.exists() and metadata_file:
-        branches.insert(1, {"source": "source", "operation": "Thermal matrices", "inputs": [
-            item("metadata", "Companion invariants and basis mappings", "source", ["/model_card/source_thermal_metadata_sha256"], metadata_file)],
-            "outputs": [item("thermal", "Scalar and longitudinal self energies", "derived", ["/masses/boson_matrices"],
-                thermal_file, "Model-independent one-loop tensor contractions and alignment checks")]})
-    return {"version": 1, "template_sha256": file_hash(template), "sources": [source, proposal], "branches": branches, "links": []}
+    from .sarah_review import review_graph
+    return review_graph(template, contract)
 
 
 def approve_sarah(template: Path, expected_sha256: str, user_approval_quote: str) -> dict:

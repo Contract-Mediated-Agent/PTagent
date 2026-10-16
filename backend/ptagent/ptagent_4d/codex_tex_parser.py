@@ -34,6 +34,8 @@ class ParsedTexFormula:
     equation_number: str = ""
     kind: str = "unknown"
     confidence: float = 0.0
+    section_path: tuple[str, ...] = ()
+    tex_label: str = ""
 
 
 def parse_tex_formula_records(
@@ -68,6 +70,8 @@ def parse_tex_formula_records(
                 equation_number=item.equation_number,
                 context=item.context,
                 parser_sources=["codex_tex_parser"],
+                section_path=list(item.section_path),
+                tex_label=item.tex_label,
             )
         )
     return records
@@ -100,9 +104,30 @@ def parse_tex_formulas(
                 equation_number=_extract_equation_number(str(block["raw"])),
                 kind=kind,
                 confidence=_confidence(cleaned, str(block["env"]), kind),
+                section_path=_section_path(body, int(block["start"])),
+                tex_label=_source_label(str(block["raw"])),
             )
         )
     return formulas
+
+
+def _section_path(text: str, position: int) -> tuple[str, ...]:
+    levels = {"part": 0, "chapter": 1, "section": 2, "subsection": 3, "subsubsection": 4}
+    stack: list[tuple[int, str]] = []
+    pattern = r"\\(part|chapter|section|subsection|subsubsection)\*?\s*(?:\[[^\]]*\])?\s*\{"
+    for match in re.finditer(pattern, text[:position]):
+        title, end = _read_balanced_group(text, match.end() - 1)
+        if not end or end > position:
+            continue
+        level = levels[match.group(1)]
+        stack = [(depth, name) for depth, name in stack if depth < level]
+        stack.append((level, title))
+    return tuple(title for _level, title in stack)
+
+
+def _source_label(raw: str) -> str:
+    match = re.search(r"\\label\s*\{([^{}]+)\}", raw)
+    return match.group(1) if match else ""
 
 
 def _iter_math_blocks(text: str) -> list[dict[str, object]]:
@@ -285,10 +310,10 @@ def _confidence(value: str, env: str, kind: str) -> float:
 
 
 def _dedupe_formulas(items: list[ParsedTexFormula]) -> list[ParsedTexFormula]:
-    seen: set[str] = set()
+    seen: set[tuple[tuple[str, ...], str]] = set()
     result: list[ParsedTexFormula] = []
     for item in items:
-        key = re.sub(r"\s+", "", item.latex)[:300]
+        key = (item.section_path, re.sub(r"\s+", "", item.latex))
         if key in seen:
             continue
         seen.add(key)

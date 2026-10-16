@@ -229,6 +229,44 @@ Stop before PhaseTracer compile when:
 
 There is no separate user approval gate for wrapper generation or Mathematica run. Source preflight and validation blockers control those steps.
 
+## Opt-In Legacy Package Compatibility
+
+An older installed DRalgo may declare ``DRalgo` `` although its source requests
+``Needs["DRalgo`DRalgo`"]``. Older GroupMath can also define an unqualified
+`BlockDiagonalMatrix` that collides with a protected System function in newer
+Wolfram kernels. Package discovery or exit code zero alone is not successful
+initialization. Preserve failed-stage logs before retrying.
+
+For this diagnosed combination only, an explicit process-local opt-in is
+available. Set `PTAGENT_DRALGO_COMPAT=legacy-groupmath` and
+`PTAGENT_DRALGO_COMPAT_SOURCE` to the reviewed task-local `.m`/`.wl` source for
+the `env-check`, `generate-dralgo`, and `run` commands. Do not write persistent
+configuration. These settings do not approve physics or install anything.
+
+The loader accepts only a literal `$LoadGroupMath=True` or `False` assignment
+followed by a literal DRalgo `Needs` call at the beginning of the source.
+It preserves that policy, rejects additional/dynamic loading or context changes,
+and verifies the installed package's declared context and, when GroupMath is
+requested, the known unqualified matrix definition and System collision.
+Unsupported layouts abstain instead of guessing. Generated wrappers bind the
+decision to source/package hashes and require a fresh kernel.
+
+The prelude creates only the package-local matrix symbol before loading, checks
+that the warmed System matrix definitions/attributes and sample output remain
+unchanged, verifies initialization and public definitions, and registers an
+empty legacy alias context when needed. It never unprotects or redefines System
+functions, overrides `Needs`/`Get`, or edits installed packages or model source.
+This guarantee concerns the added prelude, not unrelated behavior already in
+the installed package. Normal generated wrappers contain the prelude; no
+task-specific bootstrap is required. Opt-in off retains the ordinary loader.
+
+`BetaFunctions3DS[]` is optional only when the contract's entire soft-beta audit
+table is explicitly `not_applicable` and the source does not request that call.
+An absent definition then yields a marked `Missing["OptionalAuditUnavailable",
+"BetaFunctions3DS"]` record and `unavailable_optional_audits`, never a zero beta.
+Applicable soft audits, 4D/3DUS betas and requested potential orders remain
+required; missing markers, failed calls and unevaluated outputs block the run.
+
 ## DRalgo Source Audit
 
 The audit should summarize the reviewed source; it should not synthesize a new model file.
