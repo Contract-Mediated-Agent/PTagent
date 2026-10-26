@@ -141,6 +141,24 @@ file is available. Do not ask the user to invent a parameter point before
 checking it, and do not require running SPheno merely to read these inputs.
 These model-local example values are proposals, not a universal benchmark or
 prior user approval. Preserve explicit user parameters and SLHA values.
+Use the bundled native tree-binding route described in
+`references/sarah_tree_bindings.md` before asking for derived parameters.
+SARAH exports tree tadpole solutions and boundary/matching relations; PTagent
+evaluates them deterministically. Do not build, install or run SPheno to fill
+these inputs unless the user separately requests a SPheno spectrum calculation.
+Reading `SPheno.m` as static model data does not invoke SPheno.
+For a calculation without a supplied loop-matched spectrum, recommend tree
+input matching and `equal_tree` for missing Loop aliases in the first consolidated
+review. Explain that CW/thermal loops remain, while numerical loop tadpole
+matching is not performed and the zero-temperature vacuum can shift.
+This recommendation needs acceptance, not another round of questions after
+the already accepted scheme has been deterministically bound. Preserve supplied
+Loop values and nonzero extra terms; never erase a correction by assumption.
+Use `tree_review.missing_source_inputs` to ask only for independent inputs;
+do not ask for each derived VEV, Yukawa element or quadratic mass. Inspect
+source numerical definitions for remaining SM inputs and label their convention;
+neither historical examples nor a successful tree solve fixes Q automatically.
+Keep the final exact-contract approval gate.
 Distinguish default inputs, source-defined boundary/matching relations and
 tadpole-derived quantities from additional SM inputs, the renormalization
 scale and physical prescriptions. Use only supported deterministic source

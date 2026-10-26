@@ -95,6 +95,9 @@ def build_parser() -> argparse.ArgumentParser:
     export_sarah.add_argument("--preset", choices=["auto", "none"], default="auto", help="Apply model-independent source-first review proposals; none keeps the raw import worksheet.")
     export_sarah.add_argument("--parameters", default="", help="Explicit numeric overrides for deterministic preparation.")
     export_sarah.add_argument("--choices", default="", help="Explicit policy overrides for deterministic preparation.")
+    export_sarah.add_argument("--source-parameters", default="", help="Explicit source input values, including real arrays; source defaults are never applied implicitly.")
+    export_sarah.add_argument("--tadpole-branch", type=int, default=None)
+    export_sarah.add_argument("--tree-loop-policy", choices=["unresolved", "equal_tree"], default="unresolved")
 
     prepare_sarah = sub.add_parser("prepare-sarah", help="Prepare any supported SARAH export with source-first defaults and explicit unresolved blockers.")
     prepare_sarah.add_argument("--vin", required=True)
@@ -105,6 +108,10 @@ def build_parser() -> argparse.ArgumentParser:
     prepare_sarah.add_argument("--slha", default="")
     prepare_sarah.add_argument("--parameters", default="", help="JSON object/file with source or normalized SLHA parameter names; overrides beat source and SLHA values.")
     prepare_sarah.add_argument("--choices", default="", help="JSON object/file with explicit policy overrides; unsupported choices stop, never silently fall back.")
+    prepare_sarah.add_argument("--tree-relations", default="", help="Native source-hashed SARAH tree-relation metadata.")
+    prepare_sarah.add_argument("--source-parameters", default="", help="Explicit scalar/array inputs in source-symbol names.")
+    prepare_sarah.add_argument("--tadpole-branch", type=int, default=None)
+    prepare_sarah.add_argument("--tree-loop-policy", choices=["unresolved", "equal_tree"], default="unresolved")
 
     approve_sarah = sub.add_parser("approve-sarah", help="Record explicit user approval of an exact prepared contract hash.")
     approve_sarah.add_argument("--template", required=True)
@@ -194,7 +201,10 @@ def main(argv: list[str] | None = None) -> int:
                                        model_source=args.model_source or None, run_dir=args.run_dir,
                                        thermal_metadata_path=args.thermal_metadata or None,
                                        slha_path=args.slha or None, parameters=_load_parameters(args.parameters),
-                                       choices=_load_parameters(args.choices))
+                                       choices=_load_parameters(args.choices),
+                                       tree_relations_path=args.tree_relations or None,
+                                       source_parameters=_load_parameters(args.source_parameters) if args.source_parameters else None,
+                                       tadpole_branch=args.tadpole_branch, tree_loop_policy=args.tree_loop_policy)
             else:
                 result = approve_sarah(Path(args.template).expanduser().resolve(), args.expected_sha256, args.user_approval_quote)
         except (SarahImportError, ValueError, OSError) as exc:
@@ -232,6 +242,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "export-sarah":
         from .sarah_export import SarahExportError, export_sarah_model
 
+        if args.preset != "auto" and (args.source_parameters or args.tadpole_branch is not None or args.tree_loop_policy != "unresolved"):
+            print(json.dumps({"ready": False, "error": "Source parameter binding requires --preset auto."}, indent=2))
+            return 2
         try:
             result = export_sarah_model(
                 sarah_root=args.sarah_root,
@@ -263,7 +276,10 @@ def main(argv: list[str] | None = None) -> int:
                                          model_source=result.get("model_source"), run_dir=args.run_dir,
                                          thermal_metadata_path=(result.get("thermal_metadata") or {}).get("path") or None,
                                          slha_path=(result.get("slha") or {}).get("path") or None,
-                                         parameters=_load_parameters(args.parameters), choices=_load_parameters(args.choices))
+                                         parameters=_load_parameters(args.parameters), choices=_load_parameters(args.choices),
+                                         tree_relations_path=(result.get("tree_relations") or {}).get("path"),
+                                         source_parameters=_load_parameters(args.source_parameters) if args.source_parameters else None,
+                                         tadpole_branch=args.tadpole_branch, tree_loop_policy=args.tree_loop_policy)
             except (SarahImportError, ValueError, OSError) as exc:
                 print(json.dumps({"export": result, "ready": False, "error": str(exc)}, indent=2))
                 return 2

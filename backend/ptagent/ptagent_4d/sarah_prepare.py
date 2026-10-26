@@ -120,7 +120,7 @@ def _policies(model, choices: dict) -> dict:
     return policy
 
 
-def _numerical_checks(model) -> dict:
+def _numerical_checks(model, *, require_tree_stationary=False) -> dict:
     """Check the imported point; do not solve or replace the source parameters."""
     proof = {"passed": True, "scope": "Verified import only; numerical point evaluation was not run.",
              "numerical_status": "not_run",
@@ -142,6 +142,14 @@ def _numerical_checks(model) -> dict:
     spectra = {sector.name: np.linalg.eigvalsh([[evaluate_safe_expression(entry, values) for entry in row] for row in sector.matrix]).tolist() for sector in model.mass_sectors}
     if not all(math.isfinite(v) for v in [*vacuum.values(), *tadpoles, *(x for masses in spectra.values() for x in masses)]):
         raise SarahImportError("The imported reference point has non-finite tadpoles or masses.")
+    if require_tree_stationary:
+        scales = [max(1.0, sum(abs(evaluate_safe_expression(str(term), values))
+                              for term in sp.Add.make_args(sp.expand(sp.diff(potential, symbols[f])))))
+                  for f in model.fields]
+        if any(abs(t) > 1e-10 * scale for t, scale in zip(tadpoles, scales)):
+            raise SarahImportError("Native tree bindings fail the independent imported-potential tadpole check.")
+        proof["native_tree_binding_check"] = {"status": "passed", "relative_tolerance": 1e-10,
+                                              "term_scales": scales}
     proof.update(reference_point=vacuum, tree_tadpoles=tadpoles, mass_squared_eigenvalues=spectra,
                  numerical_status="passed", numerical_skip_reason=None,
                  scope="Verified import and finite point evaluation; not a proof of vacuum stability or physical suitability.")
@@ -222,7 +230,8 @@ def render_prepared_contract(model, policy: dict, radiation: dict, suggestion: d
     return text + "\n## 12. Deterministic Preparation\n\n" + DEFAULT_RULES + "\n\nSee proof_materials/sarah_preparation.json for inputs, proposals and checks. No inverse fit or model-specific algebra was applied.\n"
 
 
-def prepare_sarah(*, vin_path, parameter_map_path, run_dir, model_source=None, thermal_metadata_path=None, parameters=None, choices=None, slha_path=None) -> dict:
+def prepare_sarah(*, vin_path, parameter_map_path, run_dir, model_source=None, thermal_metadata_path=None, parameters=None, choices=None, slha_path=None,
+                  tree_relations_path=None, source_parameters=None, tadpole_branch=None, tree_loop_policy="unresolved") -> dict:
     root = Path(run_dir).expanduser().resolve()
     contract_path = root / "contract_template.md"
     if contract_path.exists():
@@ -230,6 +239,8 @@ def prepare_sarah(*, vin_path, parameter_map_path, run_dir, model_source=None, t
     explicit = parameters or {}
     if not isinstance(explicit, dict):
         raise SarahImportError("Parameter overrides must be a JSON object.")
+    if source_parameters is not None and not isinstance(source_parameters, dict):
+        raise SarahImportError("Source parameter inputs must be a JSON object.")
     unbound = import_sarah_model(vin_path=vin_path, parameter_map_path=parameter_map_path,
                                 thermal_metadata_path=thermal_metadata_path)
     radiation_keys = {"num_boson_dof", "num_fermion_dof"}
@@ -242,8 +253,47 @@ def prepare_sarah(*, vin_path, parameter_map_path, run_dir, model_source=None, t
     model = import_sarah_model(vin_path=vin_path, parameter_map_path=parameter_map_path,
         thermal_metadata_path=thermal_metadata_path, parameters={k: v for k, v in explicit.items() if k not in radiation_keys},
         slha_path=slha_path)
+    tree_proof = None
+    tree_review = None
+    effective = dict(explicit)
+    if tree_relations_path is None and model_source:
+        candidate = Path(vin_path).expanduser().resolve().with_name("ptagent_sarah_tree_relations.json")
+        if candidate.is_file():
+            tree_relations_path = candidate
+    if source_parameters is not None or tree_relations_path:
+        from .sarah_tree_bindings import load_tree_metadata, resolve_tree_bindings, tree_review_summary
+        if not tree_relations_path or not model_source:
+            raise SarahImportError("Source bindings require native tree metadata and its archived model-source directory.")
+        metadata = load_tree_metadata(tree_relations_path)
+        if metadata.get("complete") is True:
+            load_tree_metadata(tree_relations_path, Path(model_source) / "SPheno.m")
+        provenance = metadata.get("provenance", {})
+        for key, path in (("vin_sha256", vin_path), ("parameter_map_sha256", parameter_map_path)):
+            if provenance.get(key) != file_hash(Path(path)):
+                raise SarahImportError("Tree-relation metadata is stale for " + key)
+        source_dir = Path(model_source).expanduser().resolve()
+        expected_sources = provenance.get("model_source_sha256")
+        observed_sources = {p.name: file_hash(p) for p in sorted(source_dir.iterdir())
+                            if p.is_file() and p.suffix in {".m", ".wl"}}
+        if not expected_sources or expected_sources != observed_sources:
+            raise SarahImportError("Tree-relation metadata is stale for its SARAH model-source files.")
+        tree_review = tree_review_summary(metadata, source_parameters or {}, model.parameter_values,
+                                          read_spheno_benchmark(model_source), branch=tadpole_branch)
+        # Unsupported/multibranch sources still produce an honest partial review.
+        binding_available = metadata.get("complete") is True and (
+            tadpole_branch is not None or len(metadata.get("tree_solutions", [])) == 1)
+        if binding_available or source_parameters is not None or tadpole_branch is not None or tree_loop_policy != "unresolved":
+            tree_proof = resolve_tree_bindings(metadata, source_parameters or {}, existing=model.parameter_values,
+                                               branch=tadpole_branch, loop_policy=tree_loop_policy)
+            derived = {k: v for k, v in tree_proof["bindings"].items() if k in known and k not in radiation_keys}
+            effective = {**derived, **explicit}
+            model = import_sarah_model(vin_path=vin_path, parameter_map_path=parameter_map_path,
+                thermal_metadata_path=thermal_metadata_path,
+                parameters={k: v for k, v in effective.items() if k not in radiation_keys}, slha_path=slha_path)
+    elif tadpole_branch is not None or tree_loop_policy != "unresolved":
+        raise SarahImportError("A tree prescription requires native tree-relation metadata.")
     policy = _policies(model, choices or {})
-    proof = _numerical_checks(model)
+    proof = _numerical_checks(model, require_tree_stationary=tree_proof is not None)
     inventory = [{"sector": s.name, "kind": s.kind, "eigenvalues": len(s.basis), "dof_per_eigenvalue": s.dof_per_eigenvalue} for s in model.mass_sectors]
     radiation = {key: sum(len(s.basis)*s.dof_per_eigenvalue for s in model.mass_sectors if (s.kind == "fermion") == (key == "num_fermion_dof")) for key in sorted(radiation_keys)}
     radiation.update({k: explicit[k] for k in radiation_keys if k in explicit})
@@ -263,10 +313,17 @@ def prepare_sarah(*, vin_path, parameter_map_path, run_dir, model_source=None, t
     if model_source and not Path(model_source).expanduser().is_dir():
         raise SarahImportError("The explicit SARAH model-source directory does not exist.")
     result = run_sarah_import(vin_path=vin_path, parameter_map_path=parameter_map_path,
-        thermal_metadata_path=thermal_metadata_path, parameters={k: v for k, v in explicit.items() if k not in radiation_keys},
+        thermal_metadata_path=thermal_metadata_path, parameters={k: v for k, v in effective.items() if k not in radiation_keys},
         slha_path=slha_path, run_dir=root)
     model = result.model
     input_dir, proof_dir = root / "input", root / "proof_materials"
+    if tree_relations_path:
+        tree_destination = input_dir / "ptagent_sarah_tree_relations.json"
+        if Path(tree_relations_path).resolve() != tree_destination.resolve():
+            shutil.copy2(tree_relations_path, tree_destination)
+        write_json(input_dir / "source_parameters.json", source_parameters or {})
+        if tree_proof is not None:
+            write_json(proof_dir / "tree_parameter_bindings.json", tree_proof)
     if model_source:
         source_dir = Path(model_source).expanduser().resolve()
         if not source_dir.is_dir():
@@ -277,7 +334,12 @@ def prepare_sarah(*, vin_path, parameter_map_path, run_dir, model_source=None, t
             if path.is_file() and path.suffix in {".m", ".wl"} and path.resolve() != (archived/path.name).resolve():
                 shutil.copy2(path, archived/path.name)
     write_json(input_dir/"preparation_defaults.json", {"id": DEFAULTS_ID, "rules": DEFAULT_RULES, "policies": POLICY_DEFAULTS})
-    write_json(input_dir/"explicit_overrides.json", {"parameters": explicit, "choices": choices or {}})
+    overrides = {"parameters": explicit, "choices": choices or {}}
+    if source_parameters is not None:
+        overrides["source_parameters"] = source_parameters
+    if tree_loop_policy != "unresolved":
+        overrides["tree_loop_policy"] = tree_loop_policy
+    write_json(input_dir/"explicit_overrides.json", overrides)
     benchmark = read_spheno_benchmark(input_dir / "sarah_model" if model_source else None)
     benchmark["missing_inputs"] = model.benchmark_request["missing_inputs"]
     if not model.unresolved_parameters:
@@ -295,9 +357,14 @@ def prepare_sarah(*, vin_path, parameter_map_path, run_dir, model_source=None, t
         "checks_sha256": file_hash(checks_path), "checks_file": str(checks_path), "passed": True,
         "bound_parameters": model.parameter_values, "policies": policy,
         "benchmark_recommendation": benchmark,
+        "tree_review": tree_review,
+        "tree_binding": {"proof": str(proof_dir / "tree_parameter_bindings.json"),
+                         "proof_sha256": file_hash(proof_dir / "tree_parameter_bindings.json"),
+                         "source_parameters": source_parameters or {}, "branch": tadpole_branch,
+                         "loop_policy": tree_loop_policy} if tree_proof is not None else None,
         "radiation": {"values": radiation, "inventory": inventory, "explicit": sorted(radiation_keys & set(explicit)),
                       "status": "proposal_until_approval", "assumption": "Count the retained source modes only; no unlisted bath species. Review massless-vector polarization conventions and missing decoupled species."},
-        "phase_filter_suggestion": suggestion, "explicit_overrides": {"parameters": explicit, "choices": choices or {}},
+        "phase_filter_suggestion": suggestion, "explicit_overrides": overrides,
         "software_versions": versions, "adapter_sha256": {
             "sarah_prepare.py": file_hash(Path(__file__)),
             "sarah_review.py": file_hash(Path(__file__).with_name("sarah_review.py")),
@@ -306,8 +373,17 @@ def prepare_sarah(*, vin_path, parameter_map_path, run_dir, model_source=None, t
     }
     write_json(manifest_path, manifest)
     validation = refresh_review(contract_path)
+    request = {**model.benchmark_request, "recommendation": benchmark}
+    if tree_review:
+        request["tree_review"] = tree_review
+        request["message"] = (
+            "Use tree_review and proof_materials/user_questions.md for one consolidated review. "
+            "The raw missing_inputs list contains dependent implementation symbols, not independent user inputs. "
+            "Bind accepted source inputs through --source-parameters; do not run SPheno. "
+            "Review the tree/loop prescription, remaining SM inputs and Q together; preserve explicit values."
+        )
     return {**result.to_dict(), "preparation": str(manifest_path), "checks": str(checks_path), "profile": DEFAULTS_ID,
-            "benchmark_request": {**model.benchmark_request, "recommendation": benchmark},
+            "benchmark_request": request, "tree_review": tree_review,
             "contract_sha256": file_hash(contract_path), "approval_required": True,
             "construction_ready": not any(i.severity == "error" and i.code != "review_required" for i in validation.issues),
             "graph": str(proof_dir/"contract_graph/contract_graph.png")}
@@ -331,6 +407,9 @@ def preparation_errors(contract: dict) -> list[str]:
         checks = Path(manifest["checks_file"])
         if file_hash(checks) != manifest["checks_sha256"] or json.loads(checks.read_text()).get("passed") is not True:
             return ["Preparation checks are stale or failed."]
+        tree_binding = manifest.get("tree_binding")
+        if tree_binding and file_hash(Path(tree_binding["proof"])) != tree_binding.get("proof_sha256"):
+            return ["Tree parameter binding proof changed after preparation."]
         if contract.get("review", {}).get("approved"):
             approval = json.loads((manifest_path.parent/"sarah_approval.json").read_text())
             if approval.get("contract_digest") != manifest["contract_digest"] or approval.get("manifest_sha256") != file_hash(manifest_path) or not approval.get("user_approval_quote"):

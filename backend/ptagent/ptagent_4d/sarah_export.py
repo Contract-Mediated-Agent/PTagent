@@ -48,9 +48,15 @@ def export_sarah_model(
 
     companion = Path(__file__).resolve().parents[3] / "references" / "sarah" / "ptagent_sarah_export.wl"
     component_exporter = companion.with_name("ptagent_sarah_components.wl")
-    for required in (companion, component_exporter):
+    tree_exporter = companion.with_name("ptagent_sarah_tree_relations.wl")
+    for required in (companion, component_exporter, tree_exporter):
         if not required.is_file():
             raise SarahExportError(f"Bundled companion exporter is missing: {required}")
+    from .spheno_benchmark import read_spheno_benchmark
+    source_directory = Path(model_search_path) / model
+    declarations = read_spheno_benchmark(source_directory)
+    (input_dir / "ptagent_source_declarations.json").write_text(
+        json.dumps(declarations, indent=2) + "\n", encoding="utf-8")
     driver = input_dir / "run_sarah_export.wl"
     driver.write_text(
         _render_driver(
@@ -94,8 +100,19 @@ def export_sarah_model(
         )
     thermal_path = input_dir / "ptagent_thermal_metadata.json"
     component_path = input_dir / "ptagent_sarah_components.json"
+    tree_path = input_dir / "ptagent_sarah_tree_relations.json"
     model_parent = Path(model_search_path).expanduser().resolve() if model_search_path else root / "Models"
     source_directory = model_parent / model
+    if tree_path.is_file():
+        tree_payload = json.loads(tree_path.read_text())
+        tree_payload["provenance"] = {
+            "vin_sha256": _record(vin_candidates[0])["sha256"],
+            "parameter_map_sha256": _record(map_path)["sha256"],
+            "exporter_sha256": _record(tree_exporter)["sha256"],
+            "model_source_sha256": {p.name: _record(p)["sha256"] for p in sorted(source_directory.iterdir())
+                                    if p.is_file() and p.suffix in {".m", ".wl"}},
+        }
+        tree_path.write_text(json.dumps(tree_payload, indent=2) + "\n")
     thermal_metadata_ready = False
     supplied_metadata = json.loads(thermal_path.read_text(encoding="utf-8")) if thermal_path.is_file() else {}
     if not isinstance(supplied_metadata, dict):
@@ -140,6 +157,7 @@ def export_sarah_model(
         "thermal_metadata": _record(thermal_path) if thermal_path.is_file() else None,
         "thermal_metadata_ready": thermal_metadata_ready,
         "component_data": _record(component_path) if component_path.is_file() else None,
+        "tree_relations": _record(tree_path) if tree_path.is_file() else None,
         "slha": _record(copied_slha) if copied_slha and copied_slha.is_file() else None,
         "driver": _record(driver),
         "companion_exporter": _record(companion),
@@ -151,8 +169,9 @@ def export_sarah_model(
     if source_directory.is_dir():
         archived = input_dir / "sarah_model"
         archived.mkdir(exist_ok=True)
-        for source in sorted(source_directory.glob("*.m")):
-            shutil.copy2(source, archived / source.name)
+        for source in sorted(source_directory.iterdir()):
+            if source.is_file() and source.suffix in {".m", ".wl"}:
+                shutil.copy2(source, archived / source.name)
         manifest["model_source"] = str(archived)
     manifest_path = proof_dir / "sarah_export.json"
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -202,6 +221,8 @@ def _render_driver(
         + f'Get["{_wl_path(companion)}"];\n'
         + 'PTagentExportThermalMetadata[FileNameJoin[{Directory[], "ptagent_thermal_metadata.json"}]];\n'
         + 'Export[FileNameJoin[{Directory[], "ptagent_sarah_components.json"}], PTagentComponentData[], "RawJSON"];\n'
+        + f'Get["{_wl_path(companion.with_name("ptagent_sarah_tree_relations.wl"))}"];\n'
+        + 'PTagentExportTreeRelations[FileNameJoin[{Directory[], "ptagent_sarah_tree_relations.json"}], FileNameJoin[{Directory[], "ptagent_source_declarations.json"}]];\n'
         + 'If[ValueQ[$sarahCurrentVevaciousDir], '
         + 'CopyFile[FileNameJoin[{$sarahCurrentVevaciousDir, "ScaleAndBlock.xml"}], FileNameJoin[{Directory[], "ScaleAndBlock.xml"}], OverwriteTarget -> True];\n'
         + f'CopyFile[FileNameJoin[{{$sarahCurrentVevaciousDir, "{_safe_filename(model)}.vin"}}], FileNameJoin[{{Directory[], "{_safe_filename(model)}.vin"}}], OverwriteTarget -> True]];\n'

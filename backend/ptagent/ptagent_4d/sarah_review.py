@@ -8,6 +8,7 @@ from pathlib import Path
 
 REPREPARE = (
     "Apply accepted inputs with prepare-sarah --parameters or --slha and policies with --choices, "
+    "using --source-parameters for source-symbol scalar/array inputs and --tree-loop-policy equal_tree only when that prescription is accepted. "
     "using the same exports, optional --model-source/--thermal-metadata, and a fresh --run-dir. "
     "Preserve existing explicit inputs. Do not patch prepared physics in Markdown and rerun resolve: "
     "that invalidates its digest. No repeat Wolfram export is needed. Unsupported conversions remain blockers."
@@ -56,12 +57,26 @@ def review_questions(contract, manifest, report):
     names = [n for n in missing if n != "renormScaleSq"]
     if inputs and not approved:
         example = benchmark.get("default_inputs", {}) if benchmark.get("status") == "pending_review" else {}
+        tree = manifest.get("tree_review") or {}
+        native = tree.get("status") == "pending_review"
+        independent = tree.get("missing_source_inputs", [])
+        unmapped = sorted(set(names) - set(tree.get("supported_aliases", [])))
         add("parameters.public_inputs", "Input basis and numerical point",
-            "Confirm the public input basis and provide remaining numeric bindings: " + (", ".join(names) or "input confirmations only") + ".",
+            ("Review the source benchmark and tree input prescription together. Remaining independent source inputs: "
+             + (", ".join(independent) or "none")
+             + ". Additional unmapped bindings: " + (", ".join(unmapped) or "none")
+             + ". Do not enter derived VEVs, matrix elements or tadpole masses individually."
+             if native else "Confirm the public input basis and provide remaining numeric bindings: " + (", ".join(names) or "input confirmations only") + "."),
             "Imported expressions, parameter map, SLHA/explicit bindings, SPheno defaults, boundary/matching relations and tadpole parameter declarations.",
             "Changes the build interface, vacuum and field-dependent spectrum.",
             ("Propose the source example, not yet applied: " + json.dumps(example, sort_keys=True) + ". " if example else "Preserve the supplied point. ")
-            + "Distinguish source inputs, supported derived quantities and remaining SM inputs; do not treat all unresolved implementation symbols as independent scan coordinates. No guessed Yukawas or tree/loop equality.")
+            + ("Use the native SARAH tree relations without running SPheno. Propose equal_tree for missing Loop aliases only as a reviewed tree input prescription, keeping CW/thermal loops but not claiming loop matching. Preserve existing SLHA and explicit Loop values. Inspect installed source numerical definitions before proposing any remaining SM input set, and state its mass/scale convention. Include this choice, Q and all other pending policies in this first batch; never ask again for derived elements after acceptance."
+               if native else "Distinguish source inputs, supported derived quantities and remaining SM inputs; do not treat all unresolved implementation symbols as independent scan coordinates. No guessed Yukawas or tree/loop equality."))
+        if tree.get("status") in {"branch_required", "blocked", "unavailable"}:
+            add("parameters.tree_binding", "Native tree binding limitation", json.dumps(tree, sort_keys=True),
+                "Native SARAH solutions, restricted source relations and source hashes.",
+                "Prevents automatic tree input binding; source import remains available.",
+                "Select an explicit branch or supply only the unsupported bindings. SPheno is not a required dependency.")
     if "renormScaleSq" in missing:
         add("parameters.renormalization_scale", "Renormalization scale",
             "Provide a positive Q or renormScaleSq consistent with the numerical point.",
@@ -218,6 +233,15 @@ def review_graph(template: Path, contract: dict) -> dict:
         if explicit.get("parameters"):
             policy("binding_explicit", "Supplied binding inputs", [], True)
             links.append(["binding_explicit", "bindings"])
+        if manifest.get("tree_binding"):
+            branches[-1]["inputs"].append(port("tree_relations", "Native tree relations", "source", [],
+                                              root / "input/ptagent_sarah_tree_relations.json"))
+            if explicit.get("source_parameters"):
+                policy("source_parameters", "Supplied source inputs", [], True)
+                links.append(["source_parameters", "bindings"])
+            if explicit.get("tree_loop_policy"):
+                policy("tree_loop_policy", "Tree input matching; no loop shifts", [], True)
+                links.append(["tree_loop_policy", "bindings"])
     for scale in (False, True):
         refs = [f"/parameters/public_inputs/{i}/test_value" for i, row in enumerate(contract["parameters"]["public_inputs"])
                 if (row["name"] == "renormScaleSq") == scale and row.get("test_value") in {None, "", "ASK_USER"}]
@@ -229,7 +253,7 @@ def review_graph(template: Path, contract: dict) -> dict:
     benchmark = manifest.get("benchmark_recommendation", {})
     if benchmark.get("status") == "pending_review" and benchmark.get("source"):
         source = benchmark["source"]["path"]
-        sources.append(dict(id="benchmark_source", label="Model SPheno inputs", kind="source", evidence=[dict(file=source, location="DefaultInputValues")]))
+        sources.append(dict(id="benchmark_source", label="Model source defaults", kind="source", evidence=[dict(file=source, location="DefaultInputValues")]))
         branches.append(dict(source="benchmark_source", operation="Static source reading", inputs=[
             port("benchmark_inputs", "Example inputs and relations", "source", [], source)], outputs=[
             port("benchmark", "Source example (not applied)", "proposal", [], root / "proof_materials/spheno_benchmark.json")]))

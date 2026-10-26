@@ -35,8 +35,12 @@ starting point, with the source path and hash. `prepare-sarah --model-source`
 and the default export/preparation route write `spheno_benchmark.json` with
 static defaults, MINPAR/EXTPAR mappings, boundary/matching relations and
 `ParametersToSolveTadpoles`. No SPheno execution is needed to read this file.
-The reader does not evaluate arbitrary Wolfram code, apply defaults, or solve
-tadpoles; unsupported expressions and computed assignments are reported.
+The static reader does not evaluate arbitrary Wolfram code or apply defaults.
+The separate native tree exporter calls SARAH's core `SolveTadpoleEquations`
+and exports bounded relation ASTs for deterministic binding. Read
+`sarah_tree_bindings.md` for the interface and limits. No SPheno executable,
+generated Fortran or spectrum run is needed. Never choose that route merely
+because the source declaration file is called `SPheno.m`.
 
 Separate (1) file-provided inputs, (2) quantities computable through supported
 source relations and tree tadpole equations, and (3) remaining SM inputs,
@@ -46,6 +50,18 @@ previous THDM example's SM values, scale, Yukawa truncation or tree/loop equalit
 to another task. Do not require SPheno as the only way to complete a point.
 When the current converter cannot resolve a source relation or branch, state
 that limitation and request the missing binding, not an unrelated new benchmark.
+
+Use the automatically discovered `ptagent_sarah_tree_relations.json` before
+asking about missing bindings. The review preview applies example inputs only
+in a separate proposal calculation, never to the actual contract. It lists
+remaining independent source inputs and supported derived targets. Accept a
+source benchmark, remaining SM input set, Q and tree/loop prescription in one
+batch. For a no-spectrum tree-input calculation, recommend `equal_tree` for
+missing Loop aliases, explaining that CW/thermal loops remain but loop matching
+is absent. Do not ask again for algebraically dependent quantities after that
+batch is accepted. Missing source values, multiple branches and unsupported
+expressions remain explicit blockers. Do not claim full loop matching or a
+physically validated vacuum from tree residuals alone.
 
 Present acceptance of the recommended example and all remaining settings in
 one batch, using `benchmark_request.missing_inputs` and the source mappings.
@@ -78,7 +94,9 @@ The deterministic precedence is explicit parameter JSON > SLHA > source
 parameter mapping. Use names in the imported expressions or normalized SLHA
 names. Model-local SPheno example values are recommendations until reviewed
 and explicitly bound. There are no hard-coded Yukawa types, electroweak values,
-model-specific benchmarks, mass-to-coupling inversions or tree/loop parameter equalities.
+model-specific benchmarks, inverse fits or implicit tree/loop equalities.
+Native source relations and an explicitly accepted `equal_tree` prescription
+are supported; their provenance and limitations are recorded separately.
 Unknown names fail instead of being ignored. An unresolved input requires
 source evidence or a user value, not an LLM fit.
 
