@@ -175,8 +175,9 @@ or pass it to PhaseTracer compile commands as `--phasetracer-root`.
      generators. Do not recommend disabled filtering for an established symmetry.
      Use `symmetry_orbits` for coupled reflections, with a positive absolute
      trajectory-comparison tolerance; pointwise cuts can erase both full branches
-     when they cross the selected half-space. Only verified complete trajectory
-     duplicates are merged; other branches remain available.
+     when they cross the selected half-space. Match one fixed transform over the
+     common temperature interval; preserve unmatched intervals and native phases.
+     Only verified source-to-own-orbit channels are excluded from Tc/Tn searches.
      For `phasetracer`, do not ask the CosmoTransitions-style phase-filter
      question; ask whether PhaseTracer should use `apply_symmetry(phi)` to
      identify reviewed symmetry-equivalent field points and avoid duplicate
@@ -480,9 +481,20 @@ truth. Derived JSON must not be hand-edited:
 - CosmoTransitions phase filtering: for `cosmotransitions`, use
   `negative_field_threshold`, `symmetry_orbits`, `custom_expr`, or an explicitly
   chosen `none`. This is not a potential term. Sign cuts and custom expressions
-  map to `forbidPhaseCrit`; `symmetry_orbits` compares complete traced trajectories
-  under the reviewed group. Its `symmetry_phase_history` is a grouped copy with
-  rewired links; the original `phases` and all channels remain intact for Tc/Tn.
+  map to `forbidPhaseCrit`; `symmetry_orbits` compares traced trajectories over their
+  common interval under one fixed reviewed group element. Its `symmetry_phase_history`
+  is a grouped copy with rewired links; `symmetry_phase_groups` retains native member
+  intervals. Unequal-domain matches are separate `symmetry_phase_associations`,
+  not whole-history representatives. The original `phases` remains intact. Tc/Tn searches omit verified
+  source-to-own-orbit channels, keeping all orientations of distinct target phases.
+  Matching never extrapolates. It also checks stationary points of the squared
+  native-spline residual between knots, not just a sparse sample grid.
+  Bounded local refinement resolves interpolation
+  error without relaxing the field tolerance. Inspect `symmetry_pair_diagnostics`
+  and test tolerance sensitivity; uncertain matches and solver errors stay visible.
+  A visited orbit is removed from later destinations only if its verified domain
+  covers the candidate's remaining cooling interval. Native CT search heuristics,
+  including `overlapAngle`, still apply to the supplied channels.
   Each orbit rule has comma-separated fields, `comparison=orbit`, and a positive
   absolute tolerance in `threshold`. If enabled, the template must state the removed
   phase type, field component, comparison, and numeric tolerance threshold.

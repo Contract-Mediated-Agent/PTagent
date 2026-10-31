@@ -24,7 +24,7 @@ DEFAULT_RULES = (
     "Keep an imported extra polynomial as a proposed separate correction when nonzero, otherwise propose none. "
     "Propose radiation counts from the retained spectrum only, explicitly listing any missing bath species. "
     "Propose PhaseTracer sign-flip generators or CosmoTransitions symmetry handling from the "
-    "detected symmetry: independent sign cuts, or history-only whole-trajectory symmetry_orbits for coupled generators. "
+    "detected symmetry: independent sign cuts, or trajectory symmetry_orbits for coupled generators. "
     "Check loop, thermal, counterterm and gauge terms before final approval. "
     "All proposals require the same final human review for every model."
 )
@@ -77,14 +77,16 @@ def phase_handling_recommendation(contract: dict, backend: str) -> dict:
     field_step = (contract.get("numerical_settings") or {}).get("x_eps", 0.001)
     if any(len(set(group)) > 1 for group in groups):
         tolerance = -phase_filter_suggestion("", field_step=field_step)["threshold"] or 0.01
-        reason = ("Keep all points during tracing and all native CT phases for critical-temperature and tunnelling searches. "
-                  "Group only the separate symmetry_phase_history: whole trajectories with identical temperature "
-                  "domains that match under one fixed group transformation at every sampled knot and midpoint. "
+        reason = ("Keep all points during tracing and preserve all native CT phases and intervals. "
+                  "Compare trajectories under one fixed transformation over their common temperature interval, "
+                  "without extrapolation. Record unequal-domain matches separately from complete history groups. "
+                  "Exclude only the current source's "
+                  "verified symmetry partners from Tc/tunnelling searches; keep all orientations of distinct phases. "
                   "The threshold is an absolute Euclidean field-distance tolerance, not a sign cut. " + review)
         return {"status": "pending_review", "mode": "symmetry_orbits", "rules": [
             {"enabled": True, "field": ",".join(group), "comparison": "orbit", "threshold": tolerance,
              "phase_type": "symmetry_duplicate", "reason": reason,
-             "source_reference": "V0 parity check; whole-trajectory numerical matching convention"}
+             "source_reference": "V0 parity check; common-interval numerical matching convention"}
             for group in groups], "reason": reason}
     rules = []
     for field in fundamental_domain_fields(groups, fields):

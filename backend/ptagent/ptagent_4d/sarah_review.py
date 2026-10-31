@@ -90,7 +90,7 @@ def review_questions(contract, manifest, report):
                 "Accept or revise the pending proposals: " + json.dumps(proposed, sort_keys=True) + ".",
                 "Source spectrum, extra polynomial, thermal derivation and tree-level sign-flip analysis; explicit choices were excluded from this question.",
                 "Changes resummation, special-mode treatment, counterterm interpretation or phase handling.",
-                "Review the proposed values together. Preserve the imported extra polynomial only with its reviewed interpretation; it is not an inferred on-shell fit. Check full-potential symmetry before use. Coupled flips require whole-trajectory symmetry_orbits in symmetry_phase_history, retaining all native phases for Tc/tunnelling; tolerances are numerical conventions and need sensitivity checks.")
+                "Review the proposed values together. Preserve the imported extra polynomial only with its reviewed interpretation; it is not an inferred on-shell fit. Check full-potential symmetry before use. Coupled flips require common-interval symmetry_orbits matching and a separate symmetry_phase_history. Keep all native phases; Tc/tunnelling excludes only verified partners of the current source, retaining orientations of distinct phases. Tolerances are numerical conventions and need sensitivity checks.")
         add("loops.spectrum", "Spectrum and loop assembly",
             "Accept the complete imported spectrum, standard Coleman-Weinberg and thermal integrals, with no selective species removal?",
             "Imported matrices, d.o.f., CW constants and source gauge/scheme; matrix-based thermal routing.",

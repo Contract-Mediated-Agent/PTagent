@@ -124,8 +124,11 @@ Generic physical proposals, subordinate to source/user choices, are:
   use the exact zero boundary. These are concrete pending-review proposals, not
   user confirmations. Check all potential terms before approval and preserve
   explicit user overrides; never recommend disabled filtering by default.
-  Coupled-orbit grouping is exposed as `symmetry_phase_history`; Tc/Tn calculations
-  retain the full phase dictionary and its relative-orientation channels.
+  Coupled-orbit grouping is exposed as `symmetry_phase_history`, with native intervals
+  recorded in `symmetry_phase_groups`. Matching checks the common interval without
+  extrapolation; unequal-domain matches stay in `symmetry_phase_associations`, not
+  collapsed full histories. Tc/Tn calculations retain the full phase dictionary and exclude
+  only verified partners of the current source, not orientations of distinct phases.
 
 Supported `--choices` keys are `backend`, `resummation_scheme`,
 `counterterm` (`none` or `source_polynomial`), `goldstone` (`included`),

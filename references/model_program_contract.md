@@ -130,15 +130,27 @@ previous artifacts.
     agent's concrete recommendation and reason. For detected symmetries, propose
     `negative_field_threshold` rules for independent single-field reflections.
     Do not default to `none` merely because the source did not specify a filter.
-    For coupled generators use `symmetry_orbits`, which compares full trajectories
+    For coupled generators use `symmetry_orbits`, which compares traced trajectories
     after tracing instead of rejecting phase endpoints. Each rule contains a
     comma-separated simultaneous field group in `field`, `comparison=orbit`, and
     a positive absolute field tolerance in `threshold`. Matching requires the
-    same temperature domain and one fixed group transformation over the sampled
-    trajectory; unmatched branches remain. Do not replace a coupled generator
+    one fixed group transformation over the common temperature interval. Check
+    knots, midpoints, and stationary points of the squared native-spline residual
+    without extrapolation; unsupported spline layouts stay unresolved.
+    Small interpolation discrepancies may be locally refined, with each point's
+    movement bounded by the same reviewed field tolerance. The full potential
+    must also pass an offset-independent numerical symmetry check; insufficient
+    floating-point precision leaves the match unresolved. Do not replace a coupled generator
     with independent cuts. Grouped trajectories live in `symmetry_phase_history`;
-    `phases` and its links remain complete for Tc/Tn calculations, because distinct
-    relative-orientation channels can have different tunnelling actions.
+    `symmetry_phase_groups` records every native member and its interval; matches
+    with unequal domains remain separate `symmetry_phase_associations`, not
+    whole-history representatives. `phases`
+    and its links remain complete. Tc/Tn searches exclude only verified partners
+    of the current source; distinct target phases retain all relative orientations,
+    which can have different tunnelling actions. Inspect `symmetry_pair_diagnostics`
+    and vary the matching tolerance. Visited partners are excluded from later
+    destinations only when their verified domain covers the remaining cooling
+    interval. CT's native search heuristics and convergence limits still apply.
     The threshold-cut mode maps to `forbidPhaseCrit`. It
     discards traced phases when the method returns true; it is not part of
     `Vtot`. If enabled, list the phase type, field component, comparison,

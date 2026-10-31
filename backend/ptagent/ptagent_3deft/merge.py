@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 import re
 from dataclasses import dataclass
@@ -895,32 +896,164 @@ def _rewrite_potential_to_matched_coefficients(
     )
     used_names = set(re.findall(r"\b[A-Za-z_][A-Za-z0-9_]*\b", expression))
     replacements: dict[str, str] = {}
+    squared_replacements: dict[str, str] = {}
     for name in sorted(used_names, key=len, reverse=True):
         if name not in protected_names:
             continue
         target = _matched_coefficient_name(name, coefficient_names)
         if target:
-            replacements[name] = target
-    if not replacements:
+            if target.endswith("_sq"):
+                squared_replacements[name] = target
+            else:
+                replacements[name] = target
+    if not replacements and not squared_replacements:
         return expression, ""
     rewritten = expression
     for source, target in replacements.items():
         rewritten = re.sub(rf"\b{re.escape(source)}\b", target, rewritten)
-    notes = ", ".join(f"{source}->{target}" for source, target in sorted(replacements.items()))
+    if squared_replacements:
+        rewritten = _rewrite_squared_couplings(rewritten, squared_replacements)
+    notes = ", ".join(
+        [f"{source}->{target}" for source, target in sorted(replacements.items())]
+        + [f"{source}**2->{target}" for source, target in sorted(squared_replacements.items())]
+    )
     return rewritten, notes
 
 
 def _matched_coefficient_name(name: str, coefficient_names: set[str]) -> str:
-    candidates = (
-        f"{name}3dUS",
-        f"{name}_3dUS",
-        f"{name}3d",
-        f"{name}_3d",
-    )
-    for candidate in candidates:
-        if candidate in coefficient_names:
-            return candidate
+    for stage in ("3dUS", "3d"):
+        candidates = {
+            f"{name}{separator}{stage}{power}"
+            for separator in ("", "_")
+            for power in ("", "_sq")
+        } & coefficient_names
+        if len(candidates) > 1:
+            raise ThreeDeftBlocked(
+                f"Ambiguous matched 3D coefficient for {name!r}: {', '.join(sorted(candidates))}. "
+                "Resolve the coefficient naming/power convention before merging the potential."
+            )
+        if candidates:
+            return next(iter(candidates))
     return ""
+
+
+def _rewrite_squared_couplings(expression: str, replacements: dict[str, str]) -> str:
+    """Map g**2 to its dimensionful 3D square, never g to g_sq or sqrt(g_sq).
+
+    Matching definitions already include the temperature normalization. Only
+    potential references are rewritten; no extra T factor belongs here.
+    """
+    try:
+        tree = _SquaredCouplingRewriter(replacements).visit(ast.parse(expression, mode="eval"))
+        remaining = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)} & replacements.keys()
+        if remaining:
+            raise ThreeDeftBlocked(
+                "Cannot rewrite squared 3D coupling references for "
+                + ", ".join(sorted(remaining))
+                + ": unsupported or sign-sensitive use remains. Only explicit integer even powers "
+                "and even products can be inferred from a squared coefficient; review the source convention."
+            )
+        return ast.unparse(tree)
+    except (SyntaxError, ValueError, RecursionError) as exc:
+        raise ThreeDeftBlocked(f"Cannot parse/rewrite squared 3D coupling references: {exc}") from exc
+
+
+def _integer_exponent(node: ast.AST) -> int | None:
+    if isinstance(node, ast.Constant):
+        if type(node.value) is int:
+            return node.value
+        if type(node.value) is float and node.value.is_integer():
+            return int(node.value)
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+        value = _integer_exponent(node.operand)
+        if value is not None:
+            return -value if isinstance(node.op, ast.USub) else value
+    return None
+
+
+def _power_node(base: ast.expr, exponent: int) -> ast.expr:
+    return base if exponent == 1 else ast.BinOp(left=base, op=ast.Pow(), right=ast.Constant(value=exponent))
+
+
+class _SquaredCouplingRewriter(ast.NodeTransformer):
+    def __init__(self, replacements: dict[str, str]) -> None:
+        self.replacements = replacements
+
+    def _contains_source(self, node: ast.AST) -> bool:
+        return any(isinstance(item, ast.Name) and item.id in self.replacements for item in ast.walk(node))
+
+    def visit_Call(self, node: ast.Call) -> ast.AST:
+        if (isinstance(node.func, ast.Name) and node.func.id == "pow"
+                and len(node.args) == 2 and not node.keywords and self._contains_source(node)):
+            return self.visit_BinOp(ast.BinOp(left=node.args[0], op=ast.Pow(), right=node.args[1]))
+        return self.generic_visit(node)
+
+    def visit_BinOp(self, node: ast.BinOp) -> ast.AST:
+        if isinstance(node.op, ast.Pow):
+            exponent = _integer_exponent(node.right)
+            if exponent is not None and self._contains_source(node.left):
+                return self._integer_power(node.left, exponent)
+        node = self.generic_visit(node)
+        if isinstance(node.op, ast.Mult):
+            return self._even_products(node)
+        return node
+
+    def _integer_power(self, base: ast.expr, exponent: int) -> ast.expr:
+        if not self._contains_source(base):
+            return _power_node(base, exponent)
+        if isinstance(base, ast.Name) and base.id in self.replacements:
+            if exponent % 2 == 0:
+                return _power_node(ast.Name(id=self.replacements[base.id], ctx=ast.Load()), exponent // 2)
+            return _power_node(base, exponent)
+        if isinstance(base, ast.BinOp) and isinstance(base.op, ast.Pow):
+            inner = _integer_exponent(base.right)
+            # Do not cancel inverse powers: that could erase a zero-domain singularity.
+            if inner is not None and inner > 0 and exponent > 0:
+                return self._integer_power(base.left, inner * exponent)
+        if isinstance(base, ast.UnaryOp) and isinstance(base.op, (ast.UAdd, ast.USub)):
+            result = self._integer_power(base.operand, exponent)
+            return ast.UnaryOp(op=ast.USub(), operand=result) if isinstance(base.op, ast.USub) and exponent % 2 else result
+        if isinstance(base, ast.BinOp) and isinstance(base.op, ast.Mult):
+            # Integer powers distribute over products without choosing a square-root branch.
+            return self._even_products(ast.BinOp(
+                left=self._integer_power(base.left, exponent), op=ast.Mult(),
+                right=self._integer_power(base.right, exponent),
+            ))
+        return _power_node(self.visit(base), exponent)
+
+    def _even_products(self, node: ast.BinOp) -> ast.expr:
+        factors: list[ast.expr] = []
+
+        def collect(item: ast.expr) -> None:
+            if isinstance(item, ast.BinOp) and isinstance(item.op, ast.Mult):
+                collect(item.left)
+                collect(item.right)
+            else:
+                factors.append(item)
+
+        collect(node)
+        groups: dict[tuple[str, bool], list[tuple[int, int]]] = {}
+        for index, factor in enumerate(factors):
+            base, exponent = factor, 1
+            if isinstance(factor, ast.BinOp) and isinstance(factor.op, ast.Pow):
+                base, exponent = factor.left, _integer_exponent(factor.right)
+            if isinstance(base, ast.Name) and base.id in self.replacements and exponent is not None:
+                groups.setdefault((base.id, exponent < 0), []).append((index, exponent))
+        removed: set[int] = set()
+        for (name, _negative), entries in groups.items():
+            exponent = sum(power for _index, power in entries)
+            if exponent % 2 == 0:
+                factors[entries[0][0]] = _power_node(
+                    ast.Name(id=self.replacements[name], ctx=ast.Load()), exponent // 2,
+                )
+                removed.update(index for index, _power in entries[1:])
+        if not removed:
+            return node
+        retained = [factor for index, factor in enumerate(factors) if index not in removed]
+        result = retained[0]
+        for factor in retained[1:]:
+            result = ast.BinOp(left=result, op=ast.Mult(), right=factor)
+        return result
 
 
 def _squared_beta_base(parameter: str, allowed_names: set[str]) -> str:

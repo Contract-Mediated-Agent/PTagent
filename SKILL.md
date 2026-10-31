@@ -226,8 +226,16 @@ representative sign cuts. Coupled flips require `symmetry_orbits` trajectory
 comparison after tracing: a pointwise half-space cut can reject both members
 when a physical branch crosses that boundary.
 Use `symmetry_phase_history` for grouped presentation; retain the complete
-`phases` dictionary for critical-temperature and tunnelling calculations so
-relative-orientation channels are not silently lost.
+`phases` dictionary and the native intervals in `symmetry_phase_groups`.
+Matching uses one fixed transform over the common temperature interval, not
+exact endpoint equality, and checks native spline residual extrema between knots.
+Unequal-domain matches are recorded separately in
+`symmetry_phase_associations`, not collapsed into one complete history. Tc/Tn
+searches exclude a source phase's verified symmetry partners; orientations of
+distinct target phases remain available. A visited partner is excluded only
+where its verified domain covers the candidate's remaining cooling interval.
+Inspect `symmetry_pair_diagnostics` and `symmetry_tunnelling_channels`. Uncertain
+matches stay, and numerical solver failures must still be reported as failures.
 Use `phase_handling_recommendation` for these proposals. Numerical boundary
 tolerances are conventions, not source evidence. Retain the origin and test
 boundary sensitivity. Proposals still require final contract approval; preserve

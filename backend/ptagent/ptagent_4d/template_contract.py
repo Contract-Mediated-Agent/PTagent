@@ -449,7 +449,7 @@ def _render_human_contract_template(
             "1. If no compile backend has been specified, stop and ask the user to choose exactly one supported backend: `cosmotransitions` or `phasetracer`. Any other backend is not supported yet.",
             "2. Present all available unresolved decisions together in one numbered checklist, grouping related blockers. Explain the evidence, impact, and recommendation for each; do not repeat explicit user choices. Show the contract provenance graph with the Markdown review target.",
             "3. Resolve the public-input gate from source/user/proof evidence: record the final public input list and one numeric `test_value` for every public input. Ask the user only when candidate inputs or test values cannot be safely determined.",
-            "4. Review backend-specific phase handling together with the other physics choices. Recommend the detected generators for PhaseTracer apply_symmetry(phi). For CosmoTransitions, independent single-field reflections can use negative_field_threshold; if any generator couples fields, propose symmetry_orbits to group whole trajectories in a separate symmetry_phase_history after tracing. getPhases returns and retains every native CT phase for numerical transition searches, preserving relative-orientation channels. Even one fixed sign cut can discard every branch of a coupled orbit when trajectories cross its boundary. One row h,s means a simultaneous reflection; separate h and s rows are independent generators. Check the complete potential for symmetry breaking, preserve explicit user choices, and obtain final approval before compilation.",
+            "4. Review backend-specific phase handling together with the other physics choices. Recommend the detected generators for PhaseTracer apply_symmetry(phi). For CosmoTransitions, independent single-field reflections can use negative_field_threshold; if any generator couples fields, propose symmetry_orbits to compare trajectories over their common interval and group a separate symmetry_phase_history. getPhases retains every native CT phase and interval. Tc/tunnelling excludes only verified partners of the current source, preserving orientations of distinct phases. Even one fixed sign cut can discard every branch of a coupled orbit when trajectories cross its boundary. One row h,s means a simultaneous reflection; separate h and s rows are independent generators. Check the complete potential for symmetry breaking, preserve explicit user choices, and obtain final approval before compilation.",
             "5. Fill the remaining `ASK_USER` cells and review the physics choices below.",
             "6. When the reviewed model is complete, stop and ask the user to review this rendered Markdown. Set `approved` to `true` only after explicit user approval to generate/compile backend code.",
             "7. Run `python -m ptagent compile --template contract_template.md --backend cosmotransitions` or `python -m ptagent compile --template contract_template.md --backend phasetracer`; this regenerates `proof_materials/contract_resolved.json` first.",
@@ -682,7 +682,7 @@ def _render_human_contract_template(
             "",
             "### CosmoTransitions Phase Filtering",
             "",
-            "This section is used only by the CosmoTransitions backend. Spatial filters use `forbidPhaseCrit(X)` to discard branches. In `symmetry_orbits` mode this hook always returns false; `getPhases` builds a separate deduplicated `symmetry_phase_history`, requiring identical temperature domains and one fixed group transformation at all sampled knots and midpoints. Its return value and `self.phases` remain complete for `calcTcTrans` and `findAllTransitions`: grouped history must not replace numerical transition inputs because distinct relative orientations can have different tunnelling actions. PhaseTracer instead uses `apply_symmetry(phi)` below.",
+            "This section is used only by the CosmoTransitions backend. Spatial filters use `forbidPhaseCrit(X)` to discard branches. In `symmetry_orbits` mode this hook always returns false; `getPhases` builds a separate grouped `symmetry_phase_history`, checking one fixed group transformation at all knots and midpoints of the common temperature interval without extrapolation. Its return value and `self.phases` remain complete. `calcTcTrans` and `findAllTransitions` exclude only verified partners of the current source, keeping orientations of distinct phases because their tunnelling actions can differ. PhaseTracer instead uses `apply_symmetry(phi)` below.",
             f"Tree-level static check: `{symmetry_analysis.status}`; candidate sign-flip generator(s): `{symmetry_generators}`. This is a recommendation only. Confirm that loop, thermal, counterterm, and gauge choices preserve the symmetry before using it to remove a duplicate branch.",
             "",
             _render_table_with_notes(
@@ -690,14 +690,14 @@ def _render_human_contract_template(
                 [
                     {"key": "mode", "value": "ASK_USER", "notes": f"Review the concrete symmetry-handling proposal. Choices: none, negative_field_threshold, custom_expr, symmetry_orbits. Proposed mode: {filter_candidate['mode']}. Use whole-trajectory symmetry_orbits when any generator couples fields. Tree-level candidate generators: {symmetry_generators}. Thresholds are numerical conventions, not physical deductions from V0."},
                     {"key": "custom_expr", "value": "0.0", "notes": "Only used when mode=custom_expr; use a reviewed boolean expression with an explicit tolerance. Python and/or are compiled to NumPy-safe elementwise logic. For PhaseTracer symmetry equivalence, use the PhaseTracer Symmetry section instead."},
-                    {"key": "notes", "value": "ASK_USER", "notes": "State the recommendation and reason. For spatial filters, explain the removed region. For symmetry_orbits, confirm the full-potential generators and absolute history-matching tolerance; no point or numerical transition channel is removed by this grouping. For none, no branch is removed. PhaseTracer uses its separate Symmetry section."},
+                    {"key": "notes", "value": "ASK_USER", "notes": "State the recommendation and reason. For spatial filters, explain the removed region. For symmetry_orbits, confirm the full-potential generators and absolute matching tolerance; no traced point is removed, but verified source-to-own-orbit transition channels are excluded. For none, no branch is removed. PhaseTracer uses its separate Symmetry section."},
                 ],
                 id_key="key",
             ),
             "",
             "### CosmoTransitions Phase Filter Rules",
             "",
-            "For `mode=symmetry_orbits`, each row uses comma-separated simultaneously flipped fields in `field`, `comparison=orbit`, `phase_type=symmetry_duplicate`, and the same positive absolute Euclidean field-distance tolerance in `threshold`. Generator closure is used; at most 4096 transformations are supported. Only trajectories with exactly equal temperature endpoints are compared, at the union of their knots and interval midpoints under one fixed transform. Nonfinite, invalid, unequal-domain, or unmatched trajectories stay. This is finite-sample numerical matching, not a proof of equivalence between samples; review tolerance convergence. Only the copied `symmetry_phase_history` has links rewired to representatives; native CT phases and links remain unchanged for all numerical transition searches. History grouping does not establish equivalence of tunnelling channels or guarantee Tn accuracy. For `mode=negative_field_threshold`, rows instead compile to spatial cuts in `forbidPhaseCrit`; the following tolerance guidance applies to those cuts only. " + FILTER_GUIDANCE,
+            "For `mode=symmetry_orbits`, each row uses comma-separated simultaneously flipped fields in `field`, `comparison=orbit`, `phase_type=symmetry_duplicate`, and the same positive absolute Euclidean field-distance tolerance in `threshold`. Generator closure is used; at most 4096 transformations are supported. Compare one fixed transform at knots, midpoints, and squared native-spline residual extrema within the common interval; matching never extrapolates. Small interpolation discrepancies may be locally refined, with each point's displacement bounded by the same reviewed tolerance. Check full-potential symmetry with an offset-independent residual; insufficient numerical precision is unresolved. Nonfinite, invalid, nonoverlapping, or unmatched trajectories stay. Review tolerance convergence. Only complete matched histories share a `symmetry_phase_history` representative; unequal-domain matches are recorded in `symmetry_phase_associations`. `symmetry_phase_groups` retains native intervals, and native phases/links remain unchanged. Tc/tunnelling omits verified source-to-own-orbit channels, retaining orientations of distinct phases; previously visited partners are excluded only where the verified domain covers their remaining cooling interval. Inspect `symmetry_pair_diagnostics` and `symmetry_tunnelling_channels`; native CT search heuristics and convergence limits still apply. For `mode=negative_field_threshold`, rows instead compile to spatial cuts in `forbidPhaseCrit`; the following tolerance guidance applies to those cuts only. " + FILTER_GUIDANCE,
             "",
             _render_table(
                 ["enabled", "field", "comparison", "threshold", "phase_type", "reason", "source_reference"],
@@ -3216,8 +3216,12 @@ def _render_cosmotransitions_source(
         derived,
     )
     get_phases_result = "super().getPhases(*args, **kwargs)"
+    calc_tc_result = "super().calcTcTrans(*args, **kwargs)"
+    find_transitions_result = "super().findAllTransitions(*args, **kwargs)"
     if str(implementation_phase_filter.get("mode", "")).strip() == "symmetry_orbits":
         get_phases_result = f"self._record_symmetry_phase_history({get_phases_result})"
+        calc_tc_result = "self._symmetry_calc_tc(*args, **kwargs)"
+        find_transitions_result = "self._symmetry_find_all_transitions(*args, **kwargs)"
     metadata = {
         "contract_schema": CONTRACT_SCHEMA,
         "artifact_backend": "cosmotransitions",
@@ -3408,11 +3412,11 @@ class GeneratedPotential(generic_potential.generic_potential):
 
     def calcTcTrans(self, *args, **kwargs):
         self._require_scan_approval()
-        return super().calcTcTrans(*args, **kwargs)
+        return {calc_tc_result}
 
     def findAllTransitions(self, *args, **kwargs):
         self._require_scan_approval()
-        return super().findAllTransitions(*args, **kwargs)
+        return {find_transitions_result}
 
     def _zeroT_vacuum_point(self):
 {vacuum_bindings}

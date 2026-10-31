@@ -208,6 +208,16 @@ Do not ask the user to hand-copy DRalgo-derived outputs before DRalgo has run. T
 - effective potential pieces from `PrintEffectivePotential[...]`;
 - beta functions from `BetaFunctions4D[]`, `BetaFunctions3DS[]`, and `BetaFunctions3DUS[]` when available.
 
+Potential references must use the matched 3D coefficients, including gauge
+coupling squares. The merger maps even powers/products of a parent coupling
+to its `_sq` coefficient, preferring the ultrasoft coefficient when present.
+The matching expression already contains its temperature normalization; do not
+add another factor of T or replace a linear coupling with its square. Odd,
+sign-sensitive, or ambiguously named uses require an explicit reviewed convention
+and block automatic rewriting. Check every retained perturbative order, not only
+the total potential. Matching definitions and 4D beta functions retain their
+parent input symbols. Any physical change invalidates the previous approval.
+
 ## Hard Blocks
 
 Stop before wrapper generation/run when:
