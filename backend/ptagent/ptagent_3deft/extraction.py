@@ -154,7 +154,7 @@ def _apply_prefill(template: str, prefill: dict[str, Any]) -> str:
         "yukawa_sector": ("Yukawa Sector", "| ASK_USER | ASK_USER | ASK_USER | ASK_USER |"),
         "yukawa_construction_map": (
             "Yukawa Construction Map",
-            "| ASK_USER | ASK_USER | ASK_USER | ASK_USER | ASK_USER | ASK_USER | Review the source-derived coupling -> invariant_label -> operator_structure map; do not use xSM defaults unless the reviewed source actually contains them. |",
+            "| ASK_USER | ASK_USER | ASK_USER | ASK_USER | ASK_USER | ASK_USER | Review the source-derived coupling -> invariant_label -> operator_structure map; do not import couplings or particle labels from another model. |",
         ),
         "scalar_potential_construction_map": (
             "Scalar Potential Construction Map",

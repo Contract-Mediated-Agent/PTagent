@@ -25,6 +25,7 @@ from .mathematica_compare import compare_mathematica_fixed_v3d, compare_source_d
 from .merge import MERGED_CONTRACT_NAME, merge_dralgo_output_into_contract
 from .model_check import DEFAULT_ATOL, DEFAULT_RTOL, configure_build_run_phasetracer_model
 from .phasetracer import compile_phasetracer_template
+from .reference_check import check_reference_template
 from .runner import DRALGO_OUTPUT_NAME, run_dralgo_template
 from .scriptgen import GENERATED_DRALGO_SCRIPT_NAME, generate_marked_dralgo_script
 
@@ -46,15 +47,21 @@ def build_parser() -> argparse.ArgumentParser:
     resolve.add_argument("--template", required=True, help=f"{CONTRACT_TEMPLATE_NAME} path.")
     resolve.add_argument("--require-compile-approval", action="store_true", help="Treat PhaseTracer approval as a validation blocker.")
 
+    reference = sub.add_parser("check-reference", help="Check a draft reference's numerical domain before approval; never change the contract or generate C++.")
+    reference.add_argument("--template", required=True, help="Merged 3DEFT contract with concrete inputs and reference rows.")
+    reference.add_argument("--output", default="", help="JSON report path; default proof_materials/three_deft_reference_check.json.")
+
     run = sub.add_parser("run", help="Run the reviewed DRalgo source and normalize marked output.")
     run.add_argument("--template", required=True, help="Resolved 3DEFT contract template path.")
     run.add_argument("--output", default="", help=f"Output JSON path. Default: proof_materials/{DRALGO_OUTPUT_NAME} for task-local runs.")
     run.add_argument("--wolframscript", default="", help="wolframscript executable path for real DRalgo execution.")
+    run.add_argument("--timeout-seconds", type=float, default=None, help="Finite source-run time limit (default PTAGENT_WOLFRAM_TIMEOUT or 600 seconds).")
     run.add_argument("--install-dralgo", action="store_true", help="If DRalgo is missing, install it before running.")
     run.add_argument("--install-source", choices=["wolfram", "github"], default="wolfram", help="DRalgo install source used with --install-dralgo.")
 
     generate = sub.add_parser("generate-dralgo", help="Generate a marked Wolfram wrapper around a reviewed user-supplied DRalgo .m file.")
     generate.add_argument("--template", required=True, help="3DEFT contract template path.")
+    generate.add_argument("--wolframscript", default="", help="Use this same Wolfram launcher for compatibility discovery.")
     generate.add_argument("--output", default="", help=f"Output .m path. Default: DRalgo_model/{GENERATED_DRALGO_SCRIPT_NAME} for task-local runs.")
 
     merge = sub.add_parser("merge-output", help="Merge normalized DRalgo output back into a 3DEFT contract candidate.")
@@ -73,7 +80,7 @@ def build_parser() -> argparse.ArgumentParser:
     approve.add_argument("--template", required=True, help="3DEFT contract template or merged contract path.")
     approve.add_argument("--gate", required=True, choices=["phasetracer_compile"], help="Review gate to approve.")
     approve.add_argument("--user-approval", default="", help="Exact user review/approval sentence required for phasetracer_compile.")
-    approve.add_argument("--output", default="", help="Optional output path. Default: update template in place.")
+    approve.add_argument("--output", default="", help="Approved copy path in the same directory as --template; any basename is allowed. Default: update template in place. The source stays unchanged when writing a copy.")
 
     check_model = sub.add_parser("check-model", help="Configure/build/run the generated 3DEFT PhaseTracer run_model target.")
     check_model.add_argument("--project-dir", required=True, help="Generated 3DEFT PhaseTracer project directory.")
@@ -122,6 +129,10 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_extract(args)
         if args.command == "resolve":
             return _cmd_resolve(args)
+        if args.command == "check-reference":
+            report = check_reference_template(args.template, output_path=args.output or None)
+            print(json.dumps(report, indent=2, sort_keys=True, allow_nan=False))
+            return 0 if report["ok"] else 2
         if args.command == "run":
             return _cmd_run(args)
         if args.command == "generate-dralgo":
@@ -217,6 +228,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         output_path=args.output or None,
         wolframscript_path=args.wolframscript or None,
         install_dralgo_if_missing=args.install_dralgo,
+        timeout_seconds=args.timeout_seconds,
         install_source=args.install_source,
     )
     print(f"DRalgo 3DEFT output: {output}")
@@ -224,7 +236,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
 
 def _cmd_generate_dralgo(args: argparse.Namespace) -> int:
-    result = generate_marked_dralgo_script(args.template, output_path=args.output or None)
+    result = generate_marked_dralgo_script(args.template, output_path=args.output or None,
+                                         wolframscript_path=args.wolframscript or None)
     print(f"Generated marked DRalgo wrapper: {result.output_path}")
     print("Capture labels: " + ", ".join(result.capture_labels))
     return 0
@@ -248,11 +261,6 @@ def _cmd_compile(args: argparse.Namespace) -> int:
     if args.backend.casefold() != "phasetracer":
         raise ThreeDeftBlocked("3DEFT v1 supports only --backend phasetracer.")
     template = Path(args.template)
-    if template.name != MERGED_CONTRACT_NAME:
-        raise ThreeDeftBlocked(
-            f"PhaseTracer compile must use {MERGED_CONTRACT_NAME}; "
-            "run merge-output, review the merged contract, then approve PhaseTracer compile."
-        )
     result = compile_phasetracer_template(template, output_dir=args.output_dir or None, atol=args.atol, rtol=args.rtol)
     print(f"Generated 3DEFT PhaseTracer project: {result.output_dir}")
     print(f"Header: {result.header_path}")
@@ -288,6 +296,10 @@ def _cmd_check_model(args: argparse.Namespace) -> int:
     print(f"Numerical validation: {result.validation_status}")
     if result.report_path:
         print(f"Numerical report: {result.report_path}")
+    if result.log_dir:
+        print(f"Stage logs: {result.log_dir}")
+    if result.attempt_report_path:
+        print(f"Attempt report: {result.attempt_report_path}")
     if result.validation_status != "passed":
         print("Warning: do not use this unverified/failed model for production phase scans.")
     if result.stdout_preview:
@@ -341,6 +353,9 @@ def _cmd_env_check(args: argparse.Namespace) -> int:
     result = check_wolfram_and_dralgo(args.wolframscript or None)
     print(f"wolframscript: {result.wolframscript_path or '<not found>'}")
     print(f"DRalgo available: {result.dralgo_available}")
+    print(f"Wolfram probe status: {result.status}; DRalgo status: {result.dralgo_status}")
+    if result.runtime:
+        print("Wolfram runtime: " + json.dumps(result.runtime.describe(), ensure_ascii=True))
     if result.stdout.strip():
         _safe_print(result.stdout.strip())
     if result.stderr.strip():

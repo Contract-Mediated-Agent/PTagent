@@ -99,12 +99,18 @@ explain the checked paths and request installation of the missing dependency;
 never install SARAH or Wolfram automatically. A failed package-path probe is not
 proof that SARAH is absent.
 
-On macOS, if `wolframscript` is found but its local evaluation probe times out,
-test the configured `WolframKernel` directly. If the kernel returns normally,
-do not ask the user to reactivate, reconfigure, or reinstall Mathematica. A
-restricted agent sandbox may be blocking WSTP shared memory. Ask for permission
-to run the existing local `wolframscript` outside that sandbox, rerun the
-environment gate there, and continue only after the local probe succeeds.
+Wolfram discovery and execution use the shared runtime reported under
+`wolfram.runtime`. A bounded startup probe may fall back to the exact local
+kernel reported by `wolframscript`; it never substitutes another installation
+or retries an already started model evaluation. If `runtime.mode` is `kernel`,
+reuse its `kernel` path as `PTAGENT_WOLFRAM_KERNEL` for subsequent task commands.
+Keep the same task-local temporary directory (`PTAGENT_WOLFRAM_TMPDIR`) and
+execution context. Successful read-only probes are reused within a command;
+separate commands revalidate startup. Do not persistently reconfigure Wolfram.
+A timeout or package load error does not prove missing installation, activation
+failure or a permission problem. Inspect the recorded startup attempts and
+stage-specific diagnostics before proposing installation or requesting broader
+execution access. Proceed only after the requested operation's check succeeds.
 
 Do not install Python packages, download PhaseTracer, install DRalgo, or modify
 persistent config until the user explicitly approves. When PhaseTracer is
@@ -112,6 +118,40 @@ missing and the user approves a download, use the `phasetracer_download_command`
 reported by the gate; it downloads the latest PhaseTracer `main` branch. If the
 user already has PhaseTracer or provides a path, validate that path only; do not
 check or enforce its version.
+Validation means checking the generated-code interfaces and compiling, linking
+and loading a minimal consumer of the existing libraries, not accepting a
+directory name. Without an explicit/configured root, use the gate's bounded
+local discovery and record its selected root and rejected candidates. Never
+silently replace an incompatible explicitly selected checkout. Missing builds,
+architecture mismatches and restricted probes require distinct diagnostics.
+Distinguish `phasetracer_source_ready`, `phasetracer_build_required`, and
+`phasetracer_runtime_ready`: eligible source can be initialized, emitted against,
+or built after approval without already having compiled libraries. Runtime
+readiness is established only by a successful native compile/link/load check;
+source eligibility alone is never evidence that a calculation ran.
+When only the dependency build is missing, request approval to build that
+checkout's sources inside the task build directory and obtain any missing
+prerequisites, not to download a duplicate. Generated projects keep native
+libraries inside their own build directory; do not manually rebuild shared
+PhaseTracer installations as a workaround. Regenerate older generated projects
+to obtain the isolated build layout. Include
+download and build scope together in the dependency request for a new install.
+Keep the selected Python invocation path intact: resolving a virtual
+environment's executable symlink can accidentally select the base interpreter.
+The discovery report lists its bounded ancestor/sibling search directories.
+Failure to find a checkout in that scope does not mean it is absent from the
+machine; use a supplied or previously selected path without another search.
+
+After dependency-install approval, prefer a task-local virtual environment and
+use its interpreter with `-m pip install --no-user -r <skill-dir>/requirements.txt`.
+An inherited pip `user=true` setting conflicts with virtual environments;
+override it for this invocation instead of editing global configuration or
+using `--break-system-packages`. Keep using that interpreter for the workflow.
+
+For PhaseTracer delivery, retain `phasetracer_run.json` and its per-attempt
+configure/build/run logs. Read `execution_results` for Tc/Tn and their separate
+statuses; do not rerun the model solely to recover successful output. An
+unavailable Tn is not a numerical value or proof of no physical transition.
 
 ## Routing
 
@@ -158,6 +198,9 @@ Use `tree_review.missing_source_inputs` to ask only for independent inputs;
 do not ask for each derived VEV, Yukawa element or quadratic mass. Inspect
 source numerical definitions for remaining SM inputs and label their convention;
 neither historical examples nor a successful tree solve fixes Q automatically.
+Use the preparation manifest's `renormalization_scale_recommendation` for a
+repeatable, source-first proposal. A proposed scale remains unbound until
+accepted; preserve explicit overrides and previously accepted scan settings.
 Keep the final exact-contract approval gate.
 Distinguish default inputs, source-defined boundary/matching relations and
 tadpole-derived quantities from additional SM inputs, the renormalization
@@ -199,6 +242,13 @@ dimensionally reduced EFT, hard/soft/ultrasoft matching, or supplies a
 Mathematica/Wolfram `.m` or `.wl` file that is clearly a DRalgo/3DEFT source.
 Before acting, read `references/ptagent_3deft_workflow.md`.
 
+For 3DEFT, run `check-reference --template <merged-contract>` after source
+outputs and numerical inputs are filled, before presenting the final approval
+batch. Use its numerical-domain diagnostics and unconfirmed suggestions in
+that review; `resolve` alone is not a numerical check. Never change the physical
+benchmark or silently replace a reviewed reference to obtain finite values.
+The approval command rechecks the current reference and blocks invalid points.
+
 For the documented xSM 3DEFT example, use the user's provided `.m` file first.
 If they request `xsm_test.m` without supplying a local file, use the copy already
 downloaded with this repository at `assets/examples/xsm_test.m` via
@@ -236,6 +286,11 @@ distinct target phases remain available. A visited partner is excluded only
 where its verified domain covers the candidate's remaining cooling interval.
 Inspect `symmetry_pair_diagnostics` and `symmetry_tunnelling_channels`. Uncertain
 matches stay, and numerical solver failures must still be reported as failures.
+Orbit tracing uses native CT routines with a displacement target no larger
+than the reviewed orbit tolerance. Compilation also records a conservative
+full-potential parity proof, including retained spectra and thermal terms.
+Only proven transforms bypass the subtraction-sensitive numerical parity
+residual; finite-value and trajectory checks always remain mandatory.
 Use `phase_handling_recommendation` for these proposals. Numerical boundary
 tolerances are conventions, not source evidence. Retain the origin and test
 boundary sensitivity. Proposals still require final contract approval; preserve
@@ -275,10 +330,18 @@ question checklist. Use `scripts/render_contract_graph.py` and the current
 contract/evidence, not an image-generation model or a previous example's data.
 The graph ends at `Contract for review`; regenerate it after changes. Green is
 source evidence, blue is deterministic calculation, orange is explicit user
-input/confirmation, pale red is a pending recommendation (including grounded
-policy suggestions), and gray is unavailable/blocked. Never label an agent's
-interpretation or approval as the user's confirmation. A graph is a review
+input/confirmation, pale red denotes recommendations or unverified-origin
+choices (including grounded policy suggestions), and gray is unavailable/blocked.
+Keep origin separate from review status: a saved JSON file or approval record
+does not prove that a human authored a choice, and acceptance does not turn a
+proposal into a deterministic derivation. Never label an agent's interpretation
+or delegated approval as the user's personal confirmation. A graph is a review
 artifact, not approval to compile or evidence of a completed numerical run.
+If graph delivery fails, present the saved Markdown and question batch with the
+exact error. Inspect SARAH's `proof_materials/review_delivery.json`: a
+`graph_failed` status does not undo completed preparation or recorded approval.
+Redraw from the current contract; do not repeat scientific stages for a graphic,
+and never display an older graph as if it matched the current contract.
 
 Use the source document's displayed equation numbers, including section and
 appendix prefixes, in contracts and graphs. Internal formula ids and extraction

@@ -15,7 +15,7 @@ from ..runtime_metadata import collect_software_versions
 from .artifact_layout import generated_models_dir, model_artifact_slug, proof_materials_dir
 from .compiler import CompileBlocked, CompileResult, compile_usage_instructions
 from .config import ConfigurationError, Settings, require_configured_phasetracer_root, require_configured_runtime_python
-from .phasetracer_runner import run_phasetracer_smoke
+from .phasetracer_runner import phasetracer_stderr_warnings, run_phasetracer_smoke
 from .smoke_output import parse_detailed_smoke_output
 from ._model_probe import evaluate_vtot, load_model
 from .numerical_settings import OS_MASS_CRITERION
@@ -51,6 +51,8 @@ class BackendCompareResult:
             "report_json_path": str(self.report_json_path),
             "report_markdown_path": str(self.report_markdown_path),
             "phasetracer_smoke_status": self.phasetracer_smoke_status,
+            "phasetracer_execution_report": str(self.phasetracer_result.execution_report_path) if self.phasetracer_result.execution_report_path else None,
+            "phasetracer_transition_results": self.phasetracer_result.execution_results,
             "contract_reference_status": self.contract_reference_status,
             "python_model_status": self.python_model_status,
             "comparison_points": list(self.comparison_points),
@@ -126,12 +128,13 @@ def compare_backends_template(
     )
     if not smoke_result.ok:
         raise CompileBlocked(f"Generated PhaseTracer project failed cross-backend smoke check: {smoke_result.status}\n{smoke_result.stderr or smoke_result.stdout}")
+    phasetracer_result.execution_report_path = smoke_result.report_path
+    phasetracer_result.execution_results = smoke_result.transition_results
     contract_reference_status = compare_phasetracer_smoke_output(contract, smoke_result.stdout)
     python_model_status, comparison_points = _compare_phasetracer_smoke_output_to_python_model_details(
         contract, python_result.model_path, smoke_result.stdout, runtime_python=settings.runtime_python)
     warnings = list(python_result.warnings) + list(phasetracer_result.warnings)
-    if smoke_result.stderr.strip():
-        warnings.append("PhaseTracer smoke emitted stderr output.")
+    warnings.extend(phasetracer_stderr_warnings(smoke_result))
     status = f"{smoke_result.status}; {contract_reference_status}; {python_model_status}"
     result = BackendCompareResult(
         status=status,
@@ -202,10 +205,12 @@ def _reuse_or_compile_phasetracer_artifact(
     clang_format: bool,
     phasetracer_root: str,
 ) -> tuple[CompileResult, str]:
-    from .phasetracer_backend import compile_phasetracer_template
+    from .phasetracer_backend import _render_cmake, compile_phasetracer_template
 
     header_path = _candidate_phasetracer_header_path(contract, candidate_root)
-    if not force_regenerate and _phasetracer_contract_hash(header_path.parent) == contract_sha256:
+    cmake_path = header_path.parent / "CMakeLists.txt"
+    current_build_layout = cmake_path.is_file() and cmake_path.read_text(encoding="utf-8").strip() == _render_cmake().strip()
+    if not force_regenerate and current_build_layout and _phasetracer_contract_hash(header_path.parent) == contract_sha256:
         return (
             CompileResult(
                 model_path=header_path,

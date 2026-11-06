@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ptagent.wolfram_runtime import WolframRuntime, WolframRuntimeError, get_wolfram_runtime
+
 from .contract import CONTRACT_SCHEMA, ThreeDeftBlocked, ensure_ready, parse_contract, validate_contract_template
 from .layout import dralgo_model_dir_for_template
-from .loader import compatibility_prelude
+from .loader import COMPAT_ENV, compatibility_prelude
 from .environment import find_wolframscript
 from .wolfram_source import format_multiple_perform_drsoft_message, perform_drsoft_calls, wolfram_calls
 
@@ -24,6 +27,8 @@ def generate_marked_dralgo_script(
     template_path: str | Path,
     *,
     output_path: str | Path | None = None,
+    wolframscript_path: str | None = None,
+    runtime: WolframRuntime | None = None,
 ) -> DRalgoScriptResult:
     """Generate a Wolfram wrapper around a reviewed user-supplied DRalgo file."""
 
@@ -51,8 +56,17 @@ def generate_marked_dralgo_script(
 
     target = Path(output_path) if output_path else dralgo_model_dir_for_template(template_path) / GENERATED_DRALGO_SCRIPT_NAME
     target.parent.mkdir(parents=True, exist_ok=True)
-    executable = find_wolframscript(runner.get("wolframscript_path")) or "wolframscript"
-    prelude = compatibility_prelude(source, executable)
+    hint = runner.get("wolframscript_path")
+    hint = None if hint == "wolframscript" else hint
+    executable = runtime.executable if runtime else find_wolframscript(
+        wolframscript_path or hint) or "wolframscript"
+    try:
+        # Pure wrapper generation remains offline unless compatibility needs package evidence.
+        if runtime is None and os.environ.get(COMPAT_ENV):
+            runtime = get_wolfram_runtime(executable)
+        prelude = compatibility_prelude(source, executable, runtime=runtime)
+    except WolframRuntimeError as exc:
+        raise ThreeDeftBlocked(str(exc)) from exc
     script = _render_wrapper_script(source, labels_and_calls, prelude=prelude)
     target.write_text(script, encoding="utf-8")
     return DRalgoScriptResult(output_path=target, capture_labels=tuple(label for label, _call in labels_and_calls))

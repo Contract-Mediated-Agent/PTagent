@@ -46,7 +46,10 @@ The Markdown remains the source of truth. Save the specification at
   supported by an exact quote saved in an input message file. Agent-reviewed
   formulas, inferred defaults and requests to analyze a model are not user
   confirmation of policies or compilation approval.
-- Pale red: pending interpretation/recommendation. A tree-potential symmetry
+- Pale red: interpretation/recommendation or a recorded choice with unverified
+  authorship. Keep `review_status` (`pending`, `selected`, `accepted`) separate
+  from its origin; acceptance does not make a choice a deterministic result.
+  A tree-potential symmetry
   candidate or interpretation of `Vextra` as counterterms stays pale red until
   confirmed. Connect grounded recommendations to their evidence port, e.g.
   `Vtree -> proposed symmetry policy`. Use a single LLM source box only for
@@ -139,6 +142,8 @@ fails on stale templates, invalid pointers, missing evidence, cyclic links,
 omitted major review sections, unsupported user-confirmed claims, or overlapping
 labels. These checks do not prove scientific truth or complete field-level
 coverage: inspect every relevant contract block and proof when authoring.
+The renderer reserves vertical space for wrapped evidence and pending-choice
+labels; wrapping never changes the labels' bindings or provenance categories.
 
 Open the generated PNG and check routing, labels and provenance against the
 contract. Shorten labels, split a crowded branch or use explicit newlines if
@@ -147,6 +152,11 @@ in the SAME response as the contract link and the complete question batch.
 If the client cannot display images, supply a direct image link and say so.
 If rendering fails, report the exact problem and continue with the Markdown
 review; never substitute a stale picture or claim the graph was generated.
+SARAH preparation and approval save `proof_materials/review_delivery.json`
+separately from the scientific validation and approval receipts. It identifies
+the current template hash, graph files on success, or the exact delivery error.
+Repair the presentation from the saved contract without repeating export,
+parameter binding or approval that already completed.
 Do not install missing plotting dependencies without permission.
 
 ## Display Specification
@@ -169,6 +179,10 @@ The JSON has `version: 1`, `template_sha256`, `sources`, `branches`, and optiona
   `/masses/boson_matrices/0`. Use multiple ports where provenance differs;
   never color a mixed section as though all values shared the same source.
   A source-only contextual quantity may instead set `context_only: true`.
+- Proposal ports may carry `review_status: pending|selected|accepted`. Selected
+  or accepted records require evidence and resolved referenced values. This
+  status is separate from authorship: an explicit JSON file or delegated
+  approval must not be used as proof that a human supplied the values.
 - Source, user and derived ports require `evidence` with file and location.
   User ports also require `user_quote`, an exact substring of a saved user
   message. Derived ports require `calculation`, identifying the deterministic

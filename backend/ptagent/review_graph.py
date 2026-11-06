@@ -173,7 +173,11 @@ def validate_spec(template: Path, spec: dict[str, Any]) -> dict[str, Any]:
             kind = item.get("kind")
             if kind not in COLORS:
                 raise ValueError(f"{name}: invalid provenance kind")
-            paths = evidence(item, kind in {"source", "user", "derived"})
+            review_status = item.get("review_status", "pending")
+            if review_status not in {"pending", "selected", "accepted"}:
+                raise ValueError(f"{name}: invalid review status")
+            recorded_proposal = kind == "proposal" and review_status != "pending"
+            paths = evidence(item, kind in {"source", "user", "derived"} or recorded_proposal)
             if kind == "user":
                 quote = item.get("user_quote", "")
                 if not quote or not any(quote in p.read_text(encoding="utf-8") for p in paths):
@@ -192,6 +196,8 @@ def validate_spec(template: Path, spec: dict[str, Any]) -> dict[str, Any]:
             values = {p: pointer_value(snapshot["contract"], p) for p in pointers}
             if kind in {"source", "user", "derived"} and any(_unresolved(v) for v in values.values()):
                 raise ValueError(f"{name}: unresolved values must be pending or blocked, not {kind}")
+            if recorded_proposal and any(_unresolved(v) for v in values.values()):
+                raise ValueError(f"{name}: unresolved values cannot be selected or accepted")
             bindings[name] = values
             refs.extend(pointers)
     for start, end in spec.get("links", []):
@@ -226,6 +232,24 @@ def validate_spec(template: Path, spec: dict[str, Any]) -> dict[str, Any]:
             "note": "Bindings checked; evidence labels and scientific interpretations require agent review."}
 
 
+def _port_label(item: dict[str, Any], width: int) -> str:
+    label = item.get("label", "")
+    locations = [e["location"] for e in item.get("evidence", [])]
+    if item["kind"] == "source" and locations:
+        label += "  [" + "; ".join(dict.fromkeys(locations)) + "]"
+    if item["kind"] == "proposal":
+        label += " (" + item.get("review_status", "pending") + ")"
+    # Keep mathtext intact; callers may supply explicit line breaks.
+    if "$" not in label:
+        label = "\n".join(textwrap.fill(line, width, break_long_words=False)
+                          for line in label.splitlines())
+    return label
+
+
+def _port_span(item: dict[str, Any], width: int) -> float:
+    return max(.42, .14 + .155 * len(_port_label(item, width).splitlines()))
+
+
 def compact_layout(spec: dict[str, Any]) -> dict[str, Any]:
     """Separate the evidence fan from horizontal user/proposal input lanes."""
     sources = {s["id"]: s for s in spec["sources"]}
@@ -236,15 +260,18 @@ def compact_layout(spec: dict[str, Any]) -> dict[str, Any]:
     proposals = [item for i in upper for item in branches[i].get("outputs", [])
                  if item["kind"] == "proposal"]
     proposal_ids = {p["id"] for p in proposals}
-    pitch, gap = .42, .10
+    gap = .10
     heights = {}
     for i in upper:
         b = branches[i]
         outputs = [p for p in b.get("outputs", []) if p["id"] not in proposal_ids]
-        heights[i] = max(len(b["inputs"]), len(outputs), 2 if b.get("operation") else 1)*pitch
+        heights[i] = max(sum(_port_span(p, 36) for p in b["inputs"]),
+                         sum(_port_span(p, 52) for p in outputs),
+                         .84 if b.get("operation") else .42)
     upper_height = sum(heights.values()) + max(len(upper)-1, 0)*gap
-    lower_height = sum(len(branches[i]["inputs"])*pitch for i in lower) + max(len(lower)-1, 0)*.32
-    roof = len(proposals)*.40
+    lower_height = sum(sum(_port_span(p, 52) for p in branches[i]["inputs"])
+                       for i in lower) + max(len(lower)-1, 0)*.32
+    roof = sum(_port_span(p, 52) for p in proposals)
     height = max(4.2, roof+upper_height+lower_height+1.1)
     top = height-.32-roof
     result: dict[str, Any] = {"height": height, "width": 12.0, "upper": upper,
@@ -256,19 +283,28 @@ def compact_layout(spec: dict[str, Any]) -> dict[str, Any]:
         result["branches"][i] = center
         outputs = [p for p in b.get("outputs", []) if p["id"] not in proposal_ids]
         for items, x in ((b["inputs"], 4.35), (outputs, 9.6)):
-            for n, item in enumerate(items):
-                result["ports"][item["id"]] = (x, center+(len(items)-1)*pitch/2-n*pitch)
+            spans = [_port_span(p, 36 if x < 5 else 52) for p in items]
+            cursor = center + sum(spans)/2
+            for item, span in zip(items, spans):
+                result["ports"][item["id"]] = (x, cursor-span/2)
+                cursor -= span
         top -= heights[i]+gap
     upper_bottom = top+gap if upper else height-.32-roof
     top = upper_bottom-.42
     for i in lower:
         items = branches[i]["inputs"]
-        for n, item in enumerate(items):
-            result["ports"][item["id"]] = (9.6, top-n*pitch)
-        result["branches"][i] = top-(len(items)-1)*pitch/2
-        top -= len(items)*pitch+.32
-    for n, item in enumerate(proposals):
-        result["ports"][item["id"]] = (9.6, height-.33-n*.40)
+        for item in items:
+            span = _port_span(item, 52)
+            result["ports"][item["id"]] = (9.6, top-span+.14)
+            top -= span
+        ys = [result["ports"][p["id"]][1] for p in items]
+        result["branches"][i] = (min(ys)+max(ys))/2
+        top -= .32
+    cursor = height-.16
+    for item in proposals:
+        span = _port_span(item, 52)
+        result["ports"][item["id"]] = (9.6, cursor-span+.10)
+        cursor -= span
     occupied = []
     for source in spec["sources"]:
         source_branches = [i for i, b in enumerate(branches) if b["source"] == source["id"]]
@@ -340,17 +376,8 @@ def render_graph(template: Path, spec: dict[str, Any], output: Path) -> dict[str
     def port(item, *, horizontal=False, rooftop=False):
         x, y = coords[item["id"]]
         kind = item["kind"]
-        label = item["label"]
-        locations = [e["location"] for e in item.get("evidence", [])]
-        if kind == "source" and locations:
-            label += "  [" + "; ".join(dict.fromkeys(locations)) + "]"
-        if kind == "proposal":
-            label += " (pending)"
         width = 36 if x < 5 else 52
-        # Explicit newlines are allowed; never split a mathtext expression.
-        if "$" not in label:
-            label = "\n".join(textwrap.fill(line, width, break_long_words=False)
-                              for line in label.splitlines())
+        label = _port_label(item, width)
         ax.scatter([x], [y], s=13, marker="s" if kind == "source" else "o",
                    color=COLORS[kind][1], edgecolor="white", linewidth=.4, zorder=7)
         tx = 6.55 if rooftop else 6.2 if horizontal else x-.065

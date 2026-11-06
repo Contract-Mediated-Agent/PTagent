@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import json
 import os
 import re
-import subprocess
 import sys
 from pathlib import Path
 from typing import Any
+
+from ptagent.wolfram_runtime import WolframRuntimeError, get_wolfram_runtime, marker_json
 
 
 class SarahDiscoveryError(ValueError):
@@ -38,17 +38,15 @@ def _wolfram_search_paths(executable: str) -> tuple[list[Path], str]:
         'FileNameJoin[{$BaseDirectory,"Applications"}]}, $Path], StringQ], "RawJSON"]];'
     )
     try:
-        result = subprocess.run([executable, "-code", code], capture_output=True, text=True,
-                                timeout=8, check=False)
-        if result.returncode == 0:
-            for line in result.stdout.splitlines():
-                if line.startswith("PTAGENT_SARAH_PATHS="):
-                    values = json.loads(line.split("=", 1)[1])
-                    if isinstance(values, list) and all(isinstance(item, str) for item in values):
-                        return [Path(item).expanduser() for item in values], ""
+        result = get_wolfram_runtime(None if executable == "wolframscript" else executable).run(
+            code=code, stage="SARAH package discovery", probe=True)
+        if result["returncode"] == 0:
+            values = marker_json(result["stdout"], "PTAGENT_SARAH_PATHS=")
+            if isinstance(values, list) and all(isinstance(item, str) for item in values):
+                return [Path(item).expanduser() for item in values], ""
         return [], "Wolfram package-path query failed; installation absence is not confirmed."
-    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
-        return [], f"Wolfram package-path query failed ({type(exc).__name__}); installation absence is not confirmed."
+    except (OSError, ValueError, WolframRuntimeError) as exc:
+        return [], f"Wolfram package-path query failed ({exc}); installation absence is not confirmed."
 
 
 def discover_sarah(sarah_root: str | Path = "", *, wolframscript: str = "",

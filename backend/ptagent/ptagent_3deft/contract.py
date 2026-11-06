@@ -13,6 +13,7 @@ from typing import Any
 from .layout import proof_dir_for_template
 
 from .mathematica_expr import (
+    canonical_source_symbol,
     convert_mathematica_inputform_expression,
     is_reserved_identifier,
     looks_like_mathematica_inputform,
@@ -350,7 +351,7 @@ def build_contract_template(
             "",
             "| coupling | invariant_label | operator_structure | invariant_expression | source | status | notes |",
             "| --- | --- | --- | --- | --- | --- | --- |",
-            "| ASK_USER | ASK_USER | ASK_USER | ASK_USER | ASK_USER | ASK_USER | Review the source-derived coupling -> invariant_label -> operator_structure map; do not use xSM defaults unless the reviewed source actually contains them. |",
+            "| ASK_USER | ASK_USER | ASK_USER | ASK_USER | ASK_USER | ASK_USER | Review the source-derived coupling -> invariant_label -> operator_structure map; do not import couplings or particle labels from another model. |",
             "",
             "### Scalar Invariant Basis",
             "",
@@ -449,7 +450,7 @@ def build_contract_template(
             "| evaluator_mode | ASK_USER | ASK_USER | analytic, table_interpolator, or dralgo_runtime. |",
             "| running_owner | ASK_USER | ASK_USER | Must be dralgo_generated. |",
             "| mu_3_scale | ASK_USER | ASK_USER | Mandatory reviewed soft scale for evaluating DRalgo 3D parameters. Recommended central value: T. |",
-            "| mu_3_us_scale | ASK_USER | ASK_USER | Mandatory reviewed ultrasoft target scale for BetaFunctions3DUS[] parameter running. Recommended value: factor*T, with factor chosen from the reviewed SU(2) coupling convention, e.g. g2*T when g2 is an input parameter. |",
+            "| mu_3_us_scale | ASK_USER | ASK_USER | Mandatory reviewed ultrasoft target scale for BetaFunctions3DUS[] parameter running. Use the source scale prescription when present; otherwise review factor*T using the actual coupling convention or an explicit dimensionless scale factor. |",
             "",
             "### 3D Beta Functions",
             "",
@@ -698,7 +699,7 @@ def build_user_questions(report: ValidationReport) -> str:
             [
                 "No mandatory blockers remain.",
                 "",
-                "Next agent action: run `env-check`, generate/run the marked DRalgo wrapper, merge the output, then ask for whole-template PhaseTracer compile approval.",
+                "Next agent action: if source capture is still pending, run and merge it. For a completed merged contract, run `check-reference`, include its diagnostics/proposals in the contract and graph review, then ask for whole-template PhaseTracer compile approval. Do not rerun completed source stages.",
             ]
         )
         return "\n".join(lines) + "\n"
@@ -722,7 +723,7 @@ def build_user_questions(report: ValidationReport) -> str:
     )
     if packets:
         for number, packet in enumerate(packets, 1):
-            lines.extend(_render_question_packet(packet, number=number, total=len(packets)))
+            lines.extend(_render_question_packet(packet, number=number, total=len(packets), contract=report.contract))
             lines.append("")
         lines.append("Apply the answer batch, rerun `resolve`, and ask again only for unanswered or newly exposed blockers; do not repeat confirmed choices.")
     else:
@@ -734,7 +735,7 @@ def build_user_questions(report: ValidationReport) -> str:
         lines.append("")
         for issue in agent_backfill:
             lines.append(f"- `{issue.field_key}`: {issue.message}")
-            hint = _question_hint(issue)
+            hint = _question_hint(issue, contract=report.contract)
             if hint:
                 lines.append(f"  Agent action: {hint}")
 
@@ -760,7 +761,7 @@ def build_user_questions(report: ValidationReport) -> str:
         lines.append("")
         for issue in issues:
             lines.append(f"- [ ] `{issue.field_key}`: {issue.message}")
-            hint = _question_hint(issue)
+            hint = _question_hint(issue, contract=report.contract)
             if hint:
                 lines.append(f"  Hint: {hint}")
         lines.append("")
@@ -1627,7 +1628,7 @@ def _validate_symbol_audit(contract: dict[str, Any], issues: list[ValidationIssu
     fields = contract.get("three_d_fields", [])
     field_names = {str(row.get("name", "")).strip() for row in fields if not _missing(row.get("name"))}
     field_raw_symbols = {
-        str(row.get("dralgo_background_symbol", "")).strip()
+        canonical_source_symbol(str(row.get("dralgo_background_symbol", "")))
         for row in fields
         if not _missing(row.get("dralgo_background_symbol"))
     }
@@ -1668,7 +1669,7 @@ def _validate_symbol_audit(contract: dict[str, Any], issues: list[ValidationIssu
             issues.append(_issue(f"{prefix}.status", "invalid_review_status", f"status must be one of {sorted(REVIEW_STATUS_VALUES)}."))
         if physics_role == "field":
             audited_field_names.add(compiler_symbol)
-            audited_raw_symbols.add(raw_symbol)
+            audited_raw_symbols.add(canonical_source_symbol(raw_symbol))
             if compiler_symbol not in field_names:
                 issues.append(
                     _issue(
@@ -1677,7 +1678,7 @@ def _validate_symbol_audit(contract: dict[str, Any], issues: list[ValidationIssu
                         "Field compiler_symbol must match a reviewed 3D Fields.name entry.",
                     )
                 )
-            if raw_symbol not in field_raw_symbols:
+            if canonical_source_symbol(raw_symbol) not in field_raw_symbols:
                 issues.append(
                     _issue(
                         f"{prefix}.raw_symbol",
@@ -1955,7 +1956,7 @@ def _question_packet_key(issue: ValidationIssue) -> str:
     return key
 
 
-def _render_question_packet(packet: QuestionPacket, *, number: int, total: int) -> list[str]:
+def _render_question_packet(packet: QuestionPacket, *, number: int, total: int, contract: dict[str, Any] | None = None) -> list[str]:
     representative = packet.representative
     title = _packet_title(packet)
     agent_action = _packet_agent_action(packet)
@@ -1970,9 +1971,9 @@ def _render_question_packet(packet: QuestionPacket, *, number: int, total: int) 
         "- Missing or conflicting information: the fields below remain unresolved in this contract; source review may resolve them without a user decision.",
         "- Why this blocks: resolving this packet differently could change physics intent, field content, matching policy, PhaseTracer implementation, or numerical interpretation.",
         f"- Edit targets: {_packet_edit_targets(packet)}",
-        f"- Accepted format: {_packet_format(packet)}",
+        f"- Accepted format: {_packet_format(packet, contract=contract)}",
         f"- Ask the user: {_packet_prompt(packet)}",
-        f"- My current thought (reviewable): {_packet_recommendation(packet)}",
+        f"- My current thought (reviewable): {_packet_recommendation(packet, contract=contract)}",
         f"- The agent should handle first: {agent_action}",
         f"- If you accept my recommendation: the agent will {agent_action} Then it will apply the answer batch and rerun `resolve` to check remaining blockers.",
     ]
@@ -2049,21 +2050,31 @@ def _packet_edit_targets(packet: QuestionPacket) -> str:
     return "; ".join(targets[:3]) + f"; plus {len(targets) - 3} related cells listed below"
 
 
-def _packet_format(packet: QuestionPacket) -> str:
+def _review_field_tuple(contract: dict[str, Any] | None) -> str:
+    fields = (contract or {}).get("three_d_fields", [])
+    if not fields or any(_missing(row.get("name")) or not str(row.get("phase_tracer_slot", "")).isdigit() for row in fields):
+        return "<one value per field in the reviewed PhaseTracer slot order>"
+    ordered = sorted(fields, key=lambda row: int(row["phase_tracer_slot"]))
+    if [int(row["phase_tracer_slot"]) for row in ordered] != list(range(len(ordered))):
+        return "<one value per field after resolving the PhaseTracer slot order>"
+    return ",".join(f"<{row['name']}>" for row in ordered)
+
+
+def _packet_format(packet: QuestionPacket, *, contract: dict[str, Any] | None = None) -> str:
     if packet.key == "input_parameters.review":
         return "One compact list: `name -> test_value=<number>, input_scale_GeV=<number>, review_status=source_reviewed|user_confirmed`; mark non-inputs as constant/derived/remove."
     if packet.key == "model.source_audit":
         return "`RepScalar entries=...; RepFermion/RepFermion1Gen entries=...; physical labels if known=...; Yukawa policy=...; scalar potential terms=...; ImportModelDRalgo mode=...`; approve or correct the source-audit summary."
     if packet.key == "scale.rg_matching_policy":
-        return "`matching_scale=4*pi*exp(-EulerGamma)*xi4*T with xi4=1 by default; mu_3_scale=T; mu_3_us_scale=factor*T`, where `factor` is the reviewed SU(2)-coupling scale factor, for example `g2` if `g2` is an input parameter."
+        return "`matching_scale=4*pi*exp(-EulerGamma)*xi4*T with xi4=1 by default; mu_3_scale=T; mu_3_us_scale=<reviewed expression>`. " + _ultrasoft_scale_guidance(contract)
     if packet.key == "rg_matching.orders":
         return "`hard=<source-explicit order or not_applicable>; soft=<source-explicit order or not_applicable>; effective_potential=<source-explicit order or not_applicable>; pressure=<source-explicit order or not_applicable>`."
     if packet.key == "phasetracer.v3d_mapping":
         return "`field_order=...; V3D=<DRalgo output expression>`; default map is `field_i_3d=phi[i]/sqrt(T)` and default prefactor is `V=T*V3D`."
     if packet.key == "phasetracer.hooks":
-        return "`symmetry_hook=none|z2_reflection; symmetry_rules=none|<field groups>; low_t_phase_guesses=none|0,0;246,0; status=user_confirmed|human_reviewed`."
+        return f"`symmetry_hook=none|z2_reflection; symmetry_rules=none|<field groups>; low_t_phase_guesses=none|{_review_field_tuple(contract)}; status=user_confirmed|human_reviewed`. Separate multiple tuples with semicolons; supply only source-supported or explicitly reviewed numerical guesses, otherwise use `none`."
     if packet.key == "phasetracer.reference_point":
-        return "`reference_fields=100,100; reference_temperature=100; reference_expected_v=not_applicable` unless a fixed-3D-parameter direct V comparison value is supplied."
+        return f"`reference_fields={_review_field_tuple(contract)}; reference_temperature=<positive temperature in the reviewed model's applicable range>; reference_expected_v=not_applicable` unless a fixed-3D-parameter direct V comparison value is supplied."
     return "Patch the listed Markdown cells with reviewed values."
 
 
@@ -2085,13 +2096,13 @@ def _packet_prompt(packet: QuestionPacket) -> str:
     return packet.representative.message
 
 
-def _packet_recommendation(packet: QuestionPacket) -> str:
+def _packet_recommendation(packet: QuestionPacket, *, contract: dict[str, Any] | None = None) -> str:
     if packet.key == "input_parameters.review":
         return "use explicit numeric assignments already present in the source as candidates, then ask the user to confirm test values and input scales."
     if packet.key == "model.source_audit":
         return "treat the source program as authoritative for representations and tensors; present physical particle labels as unknown unless the source evidence makes them clear."
     if packet.key == "scale.rg_matching_policy":
-        return "production default: `matching_scale=4*pi*exp(-EulerGamma)*xi4*T` with `xi4=1`, `mu_3_scale=T`, and `mu_3_us_scale=g2*T` when `g2` is the reviewed SU(2) coupling input; otherwise use a reviewed `us_scale_factor*T`."
+        return "Preserve reviewed scales. Where the source supplies no prescription, propose `matching_scale=4*pi*exp(-EulerGamma)*xi4*T` with `xi4=1` and `mu_3_scale=T` for review. " + _ultrasoft_scale_guidance(contract)
     if packet.key == "rg_matching.orders":
         return "do not recommend LO/NLO/NNLO; copy only explicit ordered print calls from the reviewed source and set missing order rows to not_applicable."
     if packet.key == "phasetracer.v3d_mapping":
@@ -2099,10 +2110,10 @@ def _packet_recommendation(packet: QuestionPacket) -> str:
     if packet.key == "phasetracer.hooks":
         return "preserve explicit prior symmetry choices. When sign-flip generators are detected, recommend `symmetry_hook=z2_reflection` with those minimal generators in `symmetry_rules`, including correlated field flips. Treat tree-level generators as candidates: check loop, thermal, counterterm, gauge, and matching terms for symmetry breaking before user confirmation. When no equivalence is established, report the missing evidence or specific breaking term instead of a blanket disabled recommendation. Keep low-T guesses `none` unless numeric phase hints are intentionally supplied."
     if packet.key == "phasetracer.reference_point":
-        return "use fields around 100 and T around 100 for a stable reference point when the model scale allows it; otherwise ask the user for a source-program test point."
-    recommendations = [_question_recommendation(issue) for issue in packet.issues]
+        return "preserve any reviewed reference fields and temperature. For an unconfirmed diagnostic point, first use a source-program test point or propose dimensionless rescalings of the current reference in the reviewed field order, subject to the model's applicable scales. A proposal is not a verified point or a vacuum; obtain explicit review before using it. Never replace an invalid reviewed point during compilation."
+    recommendations = [_question_recommendation(issue, contract=contract) for issue in packet.issues]
     recommendations = [item for item in recommendations if item]
-    return "; ".join(recommendations[:2]) or _question_hint(packet.representative) or "patch source-evident values first, then ask only the uncertain part."
+    return "; ".join(recommendations[:2]) or _question_hint(packet.representative, contract=contract) or "patch source-evident values first, then ask only the uncertain part."
 
 
 def _packet_agent_action(packet: QuestionPacket) -> str:
@@ -2117,7 +2128,7 @@ def _packet_agent_action(packet: QuestionPacket) -> str:
     if packet.key == "phasetracer.hooks":
         return "inspect the reviewed V3D/source for even-field reflection candidates and present that reasoning, but do not silently accept an empty or non-empty apply_symmetry() policy."
     if packet.key == "phasetracer.reference_point":
-        return "choose a stable reference point if obvious; ask only when no physically sensible point is available."
+        return "preserve reviewed reference rows. Run `check-reference` on the completed merged contract before the final review batch. Present its domain diagnostics and checked, unconfirmed proposal; identify the finite-value check separately from approval. Never substitute a different point during compilation or change model parameters/orders to make a diagnostic point pass."
     return "patch any field directly supported by DRalgo source/output, then keep only the remaining physics choice in this packet."
 
 
@@ -2189,7 +2200,18 @@ def _question_priority(issue: ValidationIssue) -> tuple[int, str]:
     return (9, key)
 
 
-def _question_recommendation(issue: ValidationIssue) -> str:
+def _ultrasoft_scale_guidance(contract: dict[str, Any] | None) -> str:
+    groups = (contract or {}).get("parent_theory_4d", {}).get("gauge_groups", [])
+    couplings = [f"{row['coupling']} ({row['group']})" for row in groups
+                 if not _missing(row.get("coupling")) and not _missing(row.get("group"))]
+    context = f" Current source/contract coupling symbols to verify: {', '.join(couplings)}." if couplings else " No source coupling convention is established yet."
+    return ("For mu_3_us, preserve a source-specified scale; otherwise review `factor*T`, "
+            "with an explicit dimensionless factor or a source-supported coupling expression. "
+            "Do not choose a gauge sector or infer coupling versus coupling-squared normalization from its name."
+            + context)
+
+
+def _question_recommendation(issue: ValidationIssue, *, contract: dict[str, Any] | None = None) -> str:
     key = issue.field_key
     if key == "rg_matching.four_d_to_three_d_matching_scale":
         return "Use a hard 4D->3D matching scale near the thermal scale, for example `4*pi*exp(-EulerGamma)*xi4*T`, and ask/record the default hard-scale factor `xi4=1`."
@@ -2202,15 +2224,15 @@ def _question_recommendation(issue: ValidationIssue) -> str:
     if key == "three_d_parameter_evaluator.mu_3_scale":
         return "Use central `T` for mu_3. This is mandatory even if the merged expressions do not visibly contain a mu_3 symbol."
     if key == "three_d_parameter_evaluator.mu_3_us_scale":
-        return "Use `factor*T` for mu_3_us, with factor reviewed from the SU(2) coupling convention; in many DRalgo models this can be `g2*T` when `g2` is an input parameter."
+        return _ultrasoft_scale_guidance(contract)
     if key.startswith("input_parameters"):
         return "Use explicit numeric assignments if present; otherwise ask the user for test_value and input_scale_GeV."
     if key.startswith("phasetracer."):
-        return "Use a reference point around fields `(100, ...)` and `T ~ 100` when it is physically sensible for the model, then compare the generated C++ value against the Python metadata."
+        return "Use the reviewed field order and a positive temperature within the source model's applicable range, then compare the generated C++ value against the Python metadata. A diagnostic reference point is not a proposed vacuum."
     return ""
 
 
-def _question_hint(issue: ValidationIssue) -> str:
+def _question_hint(issue: ValidationIssue, *, contract: dict[str, Any] | None = None) -> str:
     key = issue.field_key
     if key.startswith("input_parameters"):
         return "For each input parameter give test_value, input_scale_GeV, and review_status=source_reviewed/dralgo_generated/user_confirmed/human_reviewed. Scan/fixed metadata is not part of the 3DEFT PhaseTracer contract."
@@ -2223,7 +2245,11 @@ def _question_hint(issue: ValidationIssue) -> str:
     if "scalar_potential_construction_map" in key:
         return "Review the tree-level scalar potential terms: coupling, invariant label, operator structure, potential term, and which DRalgo derivative helper should be generated."
     if "yukawa_construction_map" in key:
-        return "Review the mapping coupling -> invariant_label -> operator_structure. If the reviewed source contains an xSM-like top Yukawa, yt is the numeric coupling and YukawaTop is only the invariant label; Ysff/YsffC are generated containers."
+        rows = (contract or {}).get("parent_theory_4d", {}).get("yukawa_construction_map", [])
+        mappings = [" -> ".join(str(row[name]) for name in ("coupling", "invariant_label", "operator_structure"))
+                    for row in rows if not any(_missing(row.get(name)) for name in ("coupling", "invariant_label", "operator_structure"))]
+        context = f" Current source/contract mappings to verify: {'; '.join(mappings)}." if mappings else " No concrete source mapping is established yet."
+        return "Review coupling -> invariant_label -> operator_structure from the actual source. Distinguish numeric couplings from invariant labels and generated tensor containers; do not infer particle identity from an example." + context
     if "four_d_beta_dependent_variable_policy" in key:
         return "Use dralgo_native if BetaFunctions4D[] rows follow DRalgo output directly: gauge betas are for g^2, while masses, scalar couplings, and Yukawas are linear. Use converted_to_contract_variables only after explicitly converting RHSs."
     if key.startswith("rg_matching.four_d_to_three_d_matching_scale_variation"):
@@ -2235,7 +2261,7 @@ def _question_hint(issue: ValidationIssue) -> str:
     if "mu_3_scale" in key:
         return "Confirm the mandatory soft-scale substitution. Recommended central value is `T`."
     if "mu_3_us_scale" in key:
-        return "Confirm the mandatory ultrasoft target scale. Recommended form is `factor*T`, where `factor` is a reviewed SU(2)-coupling scale factor such as `g2` or an input parameter like `us_scale_factor`."
+        return _ultrasoft_scale_guidance(contract)
     if "three_d_scale_dependence_mode" in key or "three_d_matching_scale" in key or "three_d_phase_tracer_target_scale" in key:
         return "This is a legacy 3DUS policy field. Remove it and use the mandatory reviewed mu_3_scale / mu_3_us_scale rows."
     if "three_d_beta_functions" in key or "three_d_to_three_d_us_rg" in key or "three_d_us_ode" in key or "three_d_us_beta" in key:
@@ -2245,7 +2271,13 @@ def _question_hint(issue: ValidationIssue) -> str:
     if "fermion" in key or "yukawa" in key:
         return "Confirm the fermion/Yukawa sector encoded in the reviewed DRalgo source. Report RepFermion/RepFermion1Gen entries as raw representations first; attach particle labels only when the source or user confirms them."
     if "scalar_index" in key:
-        return "Use the agent's representation-order guess as guidance, but treat PrintScalarRepPositions[] as authoritative. For xSM with Higgs doublet first and singlet second, the likely singlet index is 5; confirm from DRalgo before trusting PerformDRsoft[{5}]."
+        mapped = [
+            f"{row['scalar_index']} -> {row['field_component']}"
+            for row in (contract or {}).get("scalar_index_map", [])
+            if not any(_missing(row.get(name)) for name in ("scalar_index", "field_component", "print_scalar_rep_positions_evidence"))
+        ]
+        context = f" Current contract map to verify: {'; '.join(mapped)}." if mapped else ""
+        return "Use the current source's PrintScalarRepPositions[] output as authoritative; match each index to its scalar component and parent multiplet, then check the source PerformDRsoft[...] list against that map. Do not infer an index from a model name or another example." + context
     if key == "three_d_consumption.v3d_expression":
         return "This is the concrete total 3D potential, not the field-normalization policy. Prefer merging a successful DRalgo PrintEffectivePotential[...] capture; otherwise record a reviewed V3D expression from the DRalgo source/output before PhaseTracer compile approval."
     if "three_d_consumption" in key:
@@ -2609,9 +2641,24 @@ def _as_bool(value: Any) -> bool | None:
 def looks_like_compile_approval_text(text: Any) -> bool:
     normalized = _norm(text)
     normalized = normalized.replace("\u2019", "'")
-    # Fail closed for refusals, uncertainty, questions, and future/conditional consent.
-    if re.search(r"\b(?:no|not|never|neither|false|cannot|can['\u2019]?t|don['\u2019]?t|doesn['\u2019]?t|didn['\u2019]?t|won['\u2019]?t|haven['\u2019]?t|hasn['\u2019]?t|unapproved|disapprov\w*|reject\w*|refus\w*|withhold\w*|withdr\w*|revok\w*|rescind\w*|den(?:y|ied)|defer\w*|without|pending|if|unless|until|whether|might|maybe|would|could|should|will)\b|[?\uff1f]", normalized):
+    # Conditions and revocations can qualify an earlier affirmative sentence.
+    if re.search(r"\b(?:unapproved|disapprov\w*|reject\w*|refus\w*|withhold\w*|withdr\w*|revok\w*|rescind\w*|den(?:y|ied)|defer\w*|pending|if|unless|until|whether|might|maybe|would|could|should|will|once|when|tomorrow|later|future|eventually|conditional|provisional)\b|\b(?:only\s+after|provided\s+that|providing\s+that|subject\s+to|contingent\s+on|on\s+condition)\b|[?\uff1f]", normalized):
         return False
+    # Scope negation to review/consent/compilation clauses. Unrelated disclaimers
+    # must survive verbatim in the record, not be erased to manufacture consent.
+    negative = r"\b(?:no|not|never|neither|false|cannot|can't|don't|doesn't|didn't|won't|haven't|hasn't|hadn't|isn't|aren't|wasn't|weren't|without)\b"
+    consent_context = r"\b(?:review\w*|approv\w*|consent\w*|compil\w*|generat\w*|authori[sz](?:ation|ed)|permission|phasetracer|proceed\w*|answer|decision)\b"
+    for clause in re.split(r"[.!;,\n]|\b(?:but|and)\b", normalized):
+        if re.search(r"\bafter\b", clause) and re.search(consent_context, clause):
+            return False
+        if re.search(negative, clause) and (
+            re.search(consent_context, clause)
+            or re.fullmatch(
+                r"\s*(?:(?:i|we|it|this|that)\s+(?:(?:do|did|have|has|am|is|are|was|were)\s+)?)?"
+                r"(?:no|not|never|false|don't|didn't|haven't|hasn't|isn't|aren't|wasn't|weren't)"
+                r"(?:\s+(?:yet|now|today|at all|final|true|valid))?\s*", clause)
+        ):
+            return False
     if re.search(r"(?:\u4e0d|\u672a|\u6ca1\u6709|\u62d2\u7edd|\u6682\u7f13|\u6682\u4e0d|\u7b49\u5f85|\u5982\u679c|\u82e5|\u5c1a\u672a|\u662f\u5426|\u5c06\u6765)", normalized):
         return False
     affirmative = r"(?:^|[.!;,:]\s*|\band\s+)(?:(?:i|we|(?:the\s+)?user)\s+)?(?:(?:have|has|hereby|explicitly|now)\s+)*approve(?:d)?\b"

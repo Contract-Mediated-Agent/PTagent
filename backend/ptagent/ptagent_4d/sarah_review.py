@@ -5,6 +5,8 @@ import hashlib
 import json
 from pathlib import Path
 
+from .numerical_settings import resolve_numerical_settings
+
 
 REPREPARE = (
     "Apply accepted inputs with prepare-sarah --parameters or --slha and policies with --choices, "
@@ -55,10 +57,11 @@ def review_questions(contract, manifest, report):
     inputs = contract["parameters"]["public_inputs"]
     missing = [r["name"] for r in inputs if r.get("test_value") in {None, "", "ASK_USER"}]
     names = [n for n in missing if n != "renormScaleSq"]
-    if inputs and not approved:
-        example = benchmark.get("default_inputs", {}) if benchmark.get("status") == "pending_review" else {}
+    if any(row["name"] != "renormScaleSq" for row in inputs) and not approved:
+        example = (benchmark.get("remaining_default_inputs", benchmark.get("default_inputs", {}))
+                   if benchmark.get("status") in {"pending_review", "partially_bound"} else {})
         tree = manifest.get("tree_review") or {}
-        native = tree.get("status") == "pending_review"
+        native = tree.get("status") in {"pending_review", "partially_bound"}
         independent = tree.get("missing_source_inputs", [])
         unmapped = sorted(set(names) - set(tree.get("supported_aliases", [])))
         add("parameters.public_inputs", "Input basis and numerical point",
@@ -78,10 +81,14 @@ def review_questions(contract, manifest, report):
                 "Prevents automatic tree input binding; source import remains available.",
                 "Select an explicit branch or supply only the unsupported bindings. SPheno is not a required dependency.")
     if "renormScaleSq" in missing:
+        scale = manifest.get("renormalization_scale_recommendation", {})
+        recommendation = scale.get("basis", "Use the point's sourced or explicitly selected scale; do not substitute a scale bound or invent a value.")
+        if scale.get("status") == "pending_review":
+            recommendation += f" Proposed Q={scale['Q']:.17g}, renormScaleSq={scale['renormScaleSq']:.17g}; not applied."
         add("parameters.renormalization_scale", "Renormalization scale",
             "Provide a positive Q or renormScaleSq consistent with the numerical point.",
             "Source scale selection and available SLHA/explicit parameters; no numerical scale resolved.",
-            "Changes the Coleman-Weinberg logarithms.", "Use the point's sourced or explicitly selected scale; do not substitute a scale bound or invent a value.")
+            "Changes the Coleman-Weinberg logarithms.", recommendation)
     if not approved:
         pending = [(key, label) for key, label, _, _ in _policy_rows(contract, manifest) if key not in choices]
         if pending:
@@ -91,11 +98,12 @@ def review_questions(contract, manifest, report):
                 "Source spectrum, extra polynomial, thermal derivation and tree-level sign-flip analysis; explicit choices were excluded from this question.",
                 "Changes resummation, special-mode treatment, counterterm interpretation or phase handling.",
                 "Review the proposed values together. Preserve the imported extra polynomial only with its reviewed interpretation; it is not an inferred on-shell fit. Check full-potential symmetry before use. Coupled flips require common-interval symmetry_orbits matching and a separate symmetry_phase_history. Keep all native phases; Tc/tunnelling excludes only verified partners of the current source, retaining orientations of distinct phases. Tolerances are numerical conventions and need sensitivity checks.")
-        add("loops.spectrum", "Spectrum and loop assembly",
-            "Accept the complete imported spectrum, standard Coleman-Weinberg and thermal integrals, with no selective species removal?",
-            "Imported matrices, d.o.f., CW constants and source gauge/scheme; matrix-based thermal routing.",
-            "Changes the effective potential and which species contribute.",
-            "Retain the source spectrum; a changed species inventory requires a consistently reviewed thermal treatment. Source gauge and scheme are already recorded, not guessed.")
+        if choices.get("spectrum") != "complete":
+            add("loops.spectrum", "Spectrum and loop assembly",
+                "Accept the complete imported spectrum, standard Coleman-Weinberg and thermal integrals, with no selective species removal?",
+                "Imported matrices, d.o.f., CW constants and source gauge/scheme; matrix-based thermal routing.",
+                "Changes the effective potential and which species contribute.",
+                "Retain the source spectrum; a changed species inventory requires a consistently reviewed thermal treatment. Source gauge and scheme are already recorded, not guessed.")
         radiation = {k: v for k, v in manifest["radiation"]["values"].items() if k not in explicit.get("parameters", {})}
         if radiation:
             add("parameters.radiation", "Radiation inventory",
@@ -162,9 +170,11 @@ def review_graph(template: Path, contract: dict) -> dict:
     def policy(name, label, refs, explicit_value=False, anchor=None):
         if explicit_value or approved:
             file = explicit_file if explicit_value else approval_file
-            row = port(name, label, "user", refs, file)
-            # This is the exact saved structured input, never invented prose approval.
-            row["user_quote"] = file.read_text(encoding="utf-8").strip()
+            # Files establish recorded decisions, not the identity of their author.
+            row = port(name, label, "proposal", refs, file)
+            row["review_status"] = "accepted" if approved else "selected"
+            row["authorship"] = "unverified"
+            row["decision_origin"] = "explicit_record" if explicit_value else "approved_proposal"
             supplied.append(row)
         else:
             row = port(name, label, "proposal", refs, manifest_path)
@@ -212,7 +222,8 @@ def review_graph(template: Path, contract: dict) -> dict:
         display = str(value) if not isinstance(value, list) else "see rules"
         policy(key, label + ": " + display, refs, key in explicit.get("choices", {}),
                "symmetry" if anchor == "tree" else anchor if anchor != "defaults" else None)
-    policy("spectrum_policy", "Complete spectrum; standard loops", ["/model_card/species_policy", "/loops/zero_temperature", "/loops/thermal"], anchor="spectrum")
+    policy("spectrum_policy", "Complete spectrum; standard loops", ["/model_card/species_policy", "/loops/zero_temperature", "/loops/thermal"],
+           explicit.get("choices", {}).get("spectrum") == "complete", anchor="spectrum")
     constants = contract["parameters"]["constants"]
     derived_refs, explicit_refs = [], []
     for i, row in enumerate(constants):
@@ -247,9 +258,10 @@ def review_graph(template: Path, contract: dict) -> dict:
                 if (row["name"] == "renormScaleSq") == scale and row.get("test_value") in {None, "", "ASK_USER"}]
         if refs:
             pending.append(port("missing_scale" if scale else "missing_parameters", "Renormalization scale missing" if scale else "Numerical bindings missing", "blocked", refs))
-    if contract["parameters"]["public_inputs"] and not approved:
+    if any(row["name"] != "renormScaleSq" for row in contract["parameters"]["public_inputs"]) and not approved:
         policy("input_basis", "Public input basis pending", [
-            f"/parameters/public_inputs/{i}/confirmed" for i in range(len(contract["parameters"]["public_inputs"]))])
+            f"/parameters/public_inputs/{i}/confirmed" for i, row in enumerate(contract["parameters"]["public_inputs"])
+            if row["name"] != "renormScaleSq"])
     benchmark = manifest.get("benchmark_recommendation", {})
     if benchmark.get("status") == "pending_review" and benchmark.get("source"):
         source = benchmark["source"]["path"]
@@ -257,11 +269,12 @@ def review_graph(template: Path, contract: dict) -> dict:
         branches.append(dict(source="benchmark_source", operation="Static source reading", inputs=[
             port("benchmark_inputs", "Example inputs and relations", "source", [], source)], outputs=[
             port("benchmark", "Source example (not applied)", "proposal", [], root / "proof_materials/spheno_benchmark.json")]))
-        if contract["parameters"]["public_inputs"] and not approved:
+        if any(row["name"] != "renormScaleSq" for row in contract["parameters"]["public_inputs"]) and not approved:
             links.append(["benchmark", "input_basis"])
-    if str(contract["numerical_settings"].get("Tmax_approved")).lower() == "true":
-        branches.append(dict(source="source", inputs=[port("scan", "Recorded scan settings", "derived",
-            ["/numerical_settings"], template, "Separate recorded scan settings; not physical preparation approval.")], outputs=[]))
+    if resolve_numerical_settings(contract)["Tmax_approved"]:
+        scan = port("scan", "Recorded scan settings", "proposal", ["/numerical_settings"], template)
+        scan.update(review_status="accepted", authorship="unverified")
+        supplied.append(scan)
     else:
         pending.append(port("scan", "Temperature range review", "proposal", ["/numerical_settings"], template))
     if pending:
@@ -269,6 +282,7 @@ def review_graph(template: Path, contract: dict) -> dict:
     else:
         sources = [s for s in sources if s["id"] != "defaults"]
     if supplied:
-        sources.append(dict(id="explicit", label="Explicit inputs / review", kind="user"))
+        sources.append(dict(id="explicit", label="Recorded choices", kind="proposal",
+                            evidence=[dict(file=str(explicit_file), location="Saved structured inputs; authorship unverified")]))
         branches.append(dict(source="explicit", inputs=supplied, outputs=[]))
     return dict(version=1, template_sha256=hashlib.sha256(template.read_bytes()).hexdigest(), sources=sources, branches=branches, links=links)

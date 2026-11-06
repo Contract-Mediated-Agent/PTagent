@@ -150,6 +150,13 @@ _UNICODE_GREEK_NAMES = {
     "\u03a9": "capitalOmega",
 }
 
+_UNICODE_WOLFRAM_ESCAPES = {
+    char: "\\[" + name + "]"
+    for char, identifier in _UNICODE_GREEK_NAMES.items()
+    for name, escaped_identifier in _ESCAPE_NAMES.items()
+    if identifier == escaped_identifier
+}
+
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _PYTHON_IDENTIFIER_RE = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\b")
 _EXCLUDED_IDENTIFIERS = frozenset(_FUNCTIONS.values()) | {"pi", "True", "False"}
@@ -310,8 +317,15 @@ def convert_mathematica_inputform_expression(
     ``symbol_overrides``.
     """
 
-    overrides = dict(field_map or {})
-    overrides.update(symbol_overrides or {})
+    overrides: dict[str, str] = {}
+    for mapping in (field_map or {}, symbol_overrides or {}):
+        canonical_mapping: dict[str, str] = {}
+        for raw, replacement in mapping.items():
+            canonical = canonical_source_symbol(raw)
+            if canonical in canonical_mapping and canonical_mapping[canonical] != replacement:
+                raise ValueError(f"conflicting overrides for source symbol {raw!r}")
+            canonical_mapping[canonical] = replacement
+        overrides.update(canonical_mapping)
     for raw, replacement in overrides.items():
         if not _IDENTIFIER_RE.fullmatch(replacement):
             raise ValueError(f"override for {raw!r} is not a valid identifier: {replacement!r}")
@@ -419,8 +433,9 @@ def _convert_symbol(
     treat_pi_as_variable: bool,
     repair_reserved_identifiers: bool,
 ) -> str:
-    if raw in overrides:
-        replacement = overrides[raw]
+    canonical = canonical_source_symbol(raw)
+    if canonical in overrides:
+        replacement = overrides[canonical]
         symbol_map[raw] = replacement
         return replacement
     if raw in _FUNCTIONS:
@@ -566,6 +581,11 @@ def _consume_string(text: str, index: int) -> tuple[str, int]:
         elif char == '"':
             break
     return text[start:index], index
+
+
+def canonical_source_symbol(raw: str) -> str:
+    """Unify known Unicode/escaped Wolfram spellings, never ASCII lookalikes."""
+    return "".join(_UNICODE_WOLFRAM_ESCAPES.get(char, char) for char in raw.strip())
 
 
 def _sanitize_symbol(raw: str) -> str:

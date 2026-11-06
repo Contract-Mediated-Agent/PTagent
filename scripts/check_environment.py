@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shlex
 import subprocess
 import sys
@@ -43,37 +44,41 @@ def main() -> int:
     from ptagent import get_settings
     from ptagent.runtime_metadata import collect_software_versions
     from ptagent.ptagent_4d.config import validate_phasetracer_root
+    from ptagent.ptagent_4d.phasetracer_discovery import discover_phasetracer
     from ptagent.ptagent_4d.sarah_discovery import SarahDiscoveryError, discover_sarah, resolve_sarah_model
 
     settings = get_settings()
     project_root = project_root or settings.project_root
 
-    current_python = Path(sys.executable).resolve()
+    current_python = Path(os.path.abspath(sys.executable))
     current_python_ok = True
     current_modules = _probe_modules(current_python, CURRENT_MODULES)
     current_has_cosmo = current_modules["cosmoTransitions"]["ok"]
     current_has_defusedxml = current_modules["defusedxml"]["ok"]
     runtime_ok, runtime_message = _check_python_executable(settings.runtime_python)
     runtime_modules = ({name: current_modules[name] for name in RUNTIME_MODULES}
-                       if Path(settings.runtime_python).expanduser().resolve() == current_python
+                       if Path(os.path.abspath(os.path.expanduser(str(settings.runtime_python)))) == current_python
                        else _probe_modules(settings.runtime_python, RUNTIME_MODULES,
                                            python_ready=runtime_ok, python_message=runtime_message))
     runtime_has_cosmo = runtime_modules["cosmoTransitions"]["ok"]
     runtime_cosmo_message = runtime_modules["cosmoTransitions"]["message"]
 
     explicit_phase_root = str(args.phasetracer_root or "").strip()
-    configured_phase_root = explicit_phase_root or str(settings.phasetracer_root or "").strip()
-    configured_phase_ok = False
-    configured_phase_message = "not configured"
-    if configured_phase_root:
-        configured_phase_ok, configured_phase_message = validate_phasetracer_root(configured_phase_root)
-
-    project_phase_candidates = _project_phasetracer_candidates(project_root, validate_phasetracer_root)
-    phasetracer_ready = configured_phase_ok or bool(project_phase_candidates)
+    phase_discovery = discover_phasetracer(
+        project_root,
+        explicit_root=explicit_phase_root or settings.phasetracer_root,
+        explicit_source="command_line" if explicit_phase_root else "configuration",
+        validator=validate_phasetracer_root,
+    )
+    configured_phase_root = str(phase_discovery["root"])
+    configured_phase_ok = bool(phase_discovery["available"])
+    configured_phase_message = str(phase_discovery["message"])
+    phasetracer_ready = configured_phase_ok
+    phasetracer_source_ready = bool(phase_discovery["source_ready"])
 
     check_sarah = args.workflow in {"all", "sarah"} or bool(args.sarah_root or args.sarah_model)
     check_wolfram = args.workflow != "4d" or check_sarah
-    wolfram_status = _check_wolfram_and_dralgo(probe=check_wolfram)
+    wolfram_status = _check_wolfram_and_dralgo(probe=check_wolfram, check_dralgo=args.workflow in {"all", "3deft"})
     wolfram_ready = bool(wolfram_status.get("wolfram_ready", wolfram_status["dralgo_available"]))
     dralgo_ready = bool(wolfram_status["dralgo_available"])
     sarah_options = {"sarah_root": args.sarah_root, "wolframscript": wolfram_status["wolframscript_path"]}
@@ -98,6 +103,7 @@ def main() -> int:
         runtime_python_ok=runtime_ok,
         cosmotransitions_ready=runtime_has_cosmo,
         phasetracer_ready=phasetracer_ready,
+        phasetracer_source_ready=phasetracer_source_ready,
         wolfram_ready=wolfram_ready,
         dralgo_ready=dralgo_ready,
         sarah_ready=sarah_ready,
@@ -107,13 +113,15 @@ def main() -> int:
     missing = _missing_components(
         runtime_python_ok=runtime_ok,
         cosmotransitions_ready=runtime_has_cosmo,
-        phasetracer_ready=phasetracer_ready,
+        phasetracer_ready=phasetracer_source_ready,
         wolfram_ready=wolfram_ready,
         dralgo_ready=dralgo_ready,
         defusedxml_ready=current_has_defusedxml,
         sarah_ready=sarah_ready,
     )
     not_checked = ([] if check_wolfram else ["wolfram", "dralgo"]) + ([] if check_sarah else ["sarah"])
+    if wolfram_status.get("dralgo_status") == "not_checked" and "dralgo" not in not_checked:
+        not_checked.append("dralgo")
     missing = [name for name in missing if name not in not_checked]
     advisories = _advisories(
         missing=missing,
@@ -124,6 +132,8 @@ def main() -> int:
         sarah_root=str(sarah_status.get("root") or ""),
     )
     advisories.extend(sarah_status.get("diagnostics", []))
+    if phasetracer_source_ready and not phasetracer_ready:
+        advisories.append(configured_phase_message)
     for label, modules, python in (("current", current_modules, current_python),
                                    ("runtime", runtime_modules, settings.runtime_python)):
         failed = [name for name, row in modules.items() if not row["ok"]]
@@ -159,10 +169,21 @@ def main() -> int:
         "runtime_python_has_cosmoTransitions": runtime_has_cosmo,
         "runtime_python_cosmoTransitions_message": runtime_cosmo_message,
         "phasetracer_root": configured_phase_root,
-        "phasetracer_root_configured": bool(configured_phase_root),
+        "phasetracer_root_configured": phase_discovery["configured"],
         "phasetracer_root_check_ok": configured_phase_ok,
         "phasetracer_root_check_message": configured_phase_message,
-        "project_phasetracer_candidates": [str(path) for path in project_phase_candidates],
+        "phasetracer_source_ready": phasetracer_source_ready,
+        "phasetracer_build_required": phase_discovery["build_required"],
+        "phasetracer_runtime_ready": phasetracer_ready,
+        "phasetracer_readiness_meaning": (
+            "source_ready permits initialization, source generation and a requested/approved project build. "
+            "runtime_ready requires a successful native compile/link/load probe. "
+            "build_required means the runtime is not verified: complete the requested build and native validation "
+            "before use; it does not authorize installation or download. Preflight never builds the dependency."
+        ),
+        "project_phasetracer_candidates": [row["root"] for row in phase_discovery["attempts"]
+                                          if row["ok"] and not phase_discovery["configured"]],
+        "phasetracer_discovery": phase_discovery,
         "phasetracer_existing_version_check": "not_checked",
         "phasetracer_download_branch": PHASETRACER_DOWNLOAD_BRANCH,
         "phasetracer_download_url": PHASETRACER_DOWNLOAD_URL,
@@ -176,6 +197,7 @@ def main() -> int:
             "dralgo_available": dralgo_ready,
             "dralgo_status": wolfram_status.get("dralgo_status", "available" if dralgo_ready else "not_checked"),
             "message": wolfram_status["message"],
+            "runtime": wolfram_status.get("runtime", {}),
         },
         "sarah": {
             **sarah_status,
@@ -192,22 +214,10 @@ def main() -> int:
 
 
 def _project_phasetracer_candidates(project_root: Path, validate_phasetracer_root) -> list[Path]:
-    names = (
-        "PhaseTracer",
-        "phasetracer",
-        "phase-tracer",
-        "external/PhaseTracer",
-        "external/phasetracer",
-        "extern/PhaseTracer",
-        "extern/phasetracer",
-        "third_party/PhaseTracer",
-        "third_party/phasetracer",
-        "vendor/PhaseTracer",
-        "vendor/phasetracer",
-    )
+    from ptagent.ptagent_4d.phasetracer_discovery import local_phasetracer_candidates
+
     candidates: list[Path] = []
-    for name in names:
-        path = (project_root / name).expanduser()
+    for path in local_phasetracer_candidates(project_root):
         ok, _message = validate_phasetracer_root(str(path))
         if ok:
             candidates.append(path.resolve())
@@ -215,7 +225,7 @@ def _project_phasetracer_candidates(project_root: Path, validate_phasetracer_roo
 
 
 def _check_python_executable(python_path: str | Path) -> tuple[bool, str]:
-    path = Path(python_path).expanduser().resolve()
+    path = Path(os.path.abspath(os.path.expanduser(str(python_path))))
     if not path.exists():
         return False, f"Runtime Python does not exist: {path}"
     command = [str(path), "-c", "import sys; print('ok')"]
@@ -237,7 +247,7 @@ def _check_python_module(
 ) -> tuple[bool, str]:
     if not python_ready:
         return False, f"Runtime Python is not usable: {python_message}"
-    path = Path(python_path).expanduser().resolve()
+    path = Path(os.path.abspath(os.path.expanduser(str(python_path))))
     command = [str(path), "-c", f"import {module}; print('ok')"]
     try:
         result = subprocess.run(command, capture_output=True, text=True, timeout=30, check=False)
@@ -260,7 +270,7 @@ def _probe_modules(python_path, modules, *, python_ready=True, python_message="o
     return results
 
 
-def _check_wolfram_and_dralgo(*, probe: bool = True) -> dict[str, Any]:
+def _check_wolfram_and_dralgo(*, probe: bool = True, check_dralgo: bool = True) -> dict[str, Any]:
     executable = ""
     try:
         from ptagent.ptagent_3deft.environment import check_wolfram_and_dralgo, find_wolframscript
@@ -270,23 +280,24 @@ def _check_wolfram_and_dralgo(*, probe: bool = True) -> dict[str, Any]:
             return {"wolframscript_path": executable, "probe_status": "not_required",
                     "wolfram_ready": False, "dralgo_available": False, "dralgo_status": "not_checked",
                     "message": "No Wolfram process was started for this 4D preflight. Run the SARAH/3DEFT preflight before using those operations."}
-        result = check_wolfram_and_dralgo(executable or None)
-        runtime_ready = result.ok or "PTAGENT_DRALGO_MISSING" in result.stdout
+        result = check_wolfram_and_dralgo(executable or None, check_dralgo=check_dralgo)
+        runtime_ready = result.runtime_ready
         return {
             "wolframscript_path": result.wolframscript_path,
-            "probe_status": "passed" if runtime_ready else "failed" if result.wolframscript_path else "not_found",
+            "probe_status": result.status,
             "wolfram_ready": runtime_ready,
             "dralgo_available": result.dralgo_available,
-            "dralgo_status": "available" if result.dralgo_available else "load_failed" if runtime_ready else "not_checked",
+            "dralgo_status": result.dralgo_status,
             "message": result.message,
+            "runtime": result.runtime.describe() if result.runtime else {},
         }
     except Exception as exc:
         timed_out = isinstance(exc, subprocess.TimeoutExpired) or isinstance(exc.__cause__, subprocess.TimeoutExpired)
         advice = (
             " The executable was found, but its runtime probe did not complete. "
             "DRalgo availability is unknown; this is not evidence that a package is missing. "
-            "On macOS, test the existing WolframKernel directly. If it works, request permission "
-            "to rerun the existing wolframscript outside the restricted sandbox; do not reinstall or reactivate solely on this result."
+            "Inspect the recorded launcher/kernel and temporary-directory configuration; "
+            "do not reinstall, reactivate, or attribute this to permissions solely on this result."
         ) if timed_out and executable else ""
         return {
             "wolframscript_path": executable,
@@ -310,12 +321,14 @@ def _operation_blockers(
     sarah_ready: bool,
     current_modules: dict[str, bool] | None = None,
     runtime_modules: dict[str, bool] | None = None,
+    phasetracer_source_ready: bool | None = None,
 ) -> dict[str, list[str]]:
     python_blockers = [] if current_python_ok else ["python_current"]
     xml_blockers = [] if defusedxml_ready else ["defusedxml"]
     runtime_blockers = [] if runtime_python_ok else ["python_runtime"]
     cosmo_blockers = [] if (cosmotransitions_ready or not runtime_python_ok) else ["cosmotransitions"]
-    phasetracer_blockers = [] if phasetracer_ready else ["phasetracer"]
+    source_ready = phasetracer_ready if phasetracer_source_ready is None else phasetracer_source_ready
+    phasetracer_blockers = [] if source_ready else ["phasetracer"]
     wolfram_blockers = [] if wolfram_ready else ["wolfram"]
     dralgo_blockers = [] if dralgo_ready else ["dralgo"]
     sarah_blockers = [] if sarah_ready else ["sarah"]

@@ -28,6 +28,23 @@ Downstream `11. Numerical Settings` use the shared 4D scan-approval gate. These
 numerical controls are separate from the prepared-physics digest: confirming
 `Tmax` does not require repeating SARAH export or changing physical inputs.
 Changing `Tmax` still requires a new matching `Tmax_approved_value` confirmation.
+When preparing a fresh directory after binding, carry the accepted settings in
+`--choices` under `numerical_settings`, using the same Section 11 keys. An
+explicit `Tmax` takes precedence over newly available scale-based suggestions;
+only a matching `Tmax_approved_value` plus `Tmax_approved=true` preserves scan
+acceptance. These flags never grant compilation approval.
+
+The preparation manifest records `renormalization_scale_recommendation`.
+Explicit `Q`/`renormScaleSq` overrides win, then the existing source scale
+selection from the parameter map and SLHA. If neither resolves Q, propose
+`Q = sqrt(sum_i v_i^2)` using every source reference-vacuum component in the
+exported field basis. This is a deterministic convention in contract units,
+not a source-mandated scale: review normalization and scale dependence. No
+model name, stored benchmark number, scale bound, or incomplete vacuum is used.
+An unresolved, zero, or nonfinite reference vacuum leaves Q unresolved. A
+fallback recommendation is `pending_review`, `applied=false`; Q remains a
+construction blocker until the accepted number is explicitly supplied through
+`--parameters`. Neither recommendation nor binding approves the contract.
 
 If the user has not specified a benchmark, inspect the selected model's
 `SPheno.m` before asking for numbers. Recommend its `DefaultInputValues` as the
@@ -79,12 +96,42 @@ that invalidates its prepared-physics digest. No repeat Wolfram export is needed
 Source relations not supported by the deterministic converter remain blockers;
 neither a source recommendation nor a test point authorizes guessed bindings.
 Section 11 scan controls retain their separate approval path described above.
+Record acceptance of the complete imported spectrum and standard loop assembly
+as `"spectrum":"complete"` in `--choices`; carry it forward with the other
+choices to avoid repeating that question. Changed species inventories require
+new review and are not supported by this choice. Never reuse acceptance for a
+different source. For example, after the corresponding decisions were made:
+
+```json
+{
+  "spectrum": "complete",
+  "numerical_settings": {
+    "Tmax": 500,
+    "Tmax_basis": "Explicitly accepted search range for this task",
+    "Tmax_approved": true,
+    "Tmax_approved_value": 500
+  }
+}
+```
+
+The number above illustrates the interface; it is not a recommended range.
+Benchmark reports distinguish `bound`, `overridden`, and `partially_bound`
+source-example inputs using actual native bindings or source block mappings.
+`applied=true` means all source-example inputs match the bindings, not that
+remaining SM parameters, Q, the full prescription or compilation are approved.
 
 The prepared review packet includes unresolved parameters/scale and all pending
 policy proposals, omits requests to reconstruct already imported formulas, and
 preserves explicit overrides without treating them as compilation approval.
 The graph distinguishes sourced expressions, calculated thermal/binding values,
 explicit structured inputs, pending recommendations and unavailable values.
+Saved JSON and approval receipts do not establish human authorship. Automatic
+graphs retain `kind=proposal` for recorded choices with `review_status=selected`
+or `accepted`, separately from pending proposals. This also applies to blanket
+or delegated approvals and accepted scan settings. Only physical calculations
+receive `kind=derived`. Exact approval text stays in the receipt (including the
+legacy `user_approval_quote` field); that field name is not proof of personal
+human confirmation. The automatic path does not infer authorship from prose.
 `sarah_preparation_checks.json` reports `numerical_status=not_run` for an unbound
 point; `passed=true` then refers only to the completed import checks. A finite
 point check is reported only with actual reference-point/tadpole/mass records,
@@ -136,7 +183,10 @@ Supported `--choices` keys are `backend`, `resummation_scheme`,
 `phase_filter` (`none`, `negative_field_threshold` or `symmetry_orbits`),
 `phase_filter_field`, `phase_filter_threshold`,
 `phasetracer_symmetry` (`none` or `z2_reflection`), and
-`symmetry_generators` (a list of field-name lists, one simultaneous flip per list).
+`symmetry_generators` (a list of field-name lists, one simultaneous flip per list),
+`spectrum` (`complete` only), and `numerical_settings` (a mapping of Section 11
+keys: `Tmax`, `Tmax_basis`, `Tmax_approved`, `Tmax_approved_value`,
+`source_temperature_max`, `model_scale`, and `x_eps`).
 Unsupported choices fail; they are never replaced with a different prescription.
 For `symmetry_orbits`, `phase_filter_field` is a comma-separated simultaneous
 field group and `phase_filter_threshold` is a positive absolute comparison

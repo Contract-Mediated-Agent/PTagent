@@ -23,8 +23,9 @@ Contract section `11. Numerical Settings` controls downstream scans independentl
 of model construction. Include the proposed `Tmax`, its basis and truncation/runtime
 impact in the same question batch when phase tracing is requested. Prefer the
 source temperature range (`source_temperature_max`), then a sourced `model_scale`
-or available dimensional model information. An exploratory fallback is not a
-universal physical bound. Never silently apply 1000 to an unknown-scale model.
+or available dimensional model information. Without such evidence the range is
+unresolved: request an upper temperature and its units in the same review batch.
+Never substitute an electroweak benchmark or silently apply 1000.
 
 After the user confirms a range, set `Tmax`, `Tmax_approved=true` and
 `Tmax_approved_value` to the same value. A changed maximum invalidates the scan
@@ -33,6 +34,57 @@ single-point potential evaluation and ordinary smoke checks are allowed, but
 `getPhases`, transition searches and PhaseTracer transition mode are blocked.
 `x_eps` defaults to 0.001 and may be explicitly overridden without a separate
 physics approval. Preserve legitimate 4D zero-temperature calls.
+
+Use `python <skill-dir>/scripts/ptagent_cli.py run --model <model.py>
+--stage critical` for critical transitions and `--stage nucleation` when
+nucleation is requested. The latter must run the actual tunnelling calculation;
+Tc-only success is not a Tn result. Regenerate legacy models that do not support
+this control. The runner transports JSON separately from solver stdout/stderr,
+preserves both logs, and propagates numerical errors. Do not parse progress text
+as JSON or interpret solver failure as no transition.
+Generated results retain native `phases` with every stored `T`, `X`, `dXdT`,
+phase ID and low/high transition link. `phase_diagnostics` separately retains
+symmetry-group histories, memberships, overlap associations and tunnelling
+channels when available. These are read-only snapshots, not another trace or a
+replacement for native phases. `null` means unavailable; `[]` means available
+but empty. Nonfinite diagnostic samples are explicit `__float__` tags, not
+valid physical values. Legacy models may lack these fields; never reconstruct
+missing trajectories from the transition list. Inspect the saved result before
+rerunning a completed phase calculation just to retrieve its history.
+Inspect `nucleation_diagnostics` for per-channel samples, handled exceptions,
+termination and `history_complete`. A returned empty list does not override an
+incomplete history. Diagnostics observe native searches without changing their
+brackets, skipping channels or retrying with different physics. A recovered
+intermediate exception alone does not invalidate a subsequently converged result.
+Second-order events retain their native transition temperature but are not
+reported as bubble nucleation temperatures. Generated transition output rejects
+nonfinite quantities and negative force residuals. A finite force residual is
+diagnostic evidence, not a standalone convergence test: CT has an iteration-dependent
+first-step criterion and can use custom deformation settings. Inspect the actual
+native decisions in `nucleation_diagnostics.path_deformations` and solver logs;
+neither a plausible action nor a fixed residual cutoff certifies the final bounce.
+Keep model construction, phase/critical-temperature calculations, and a complete
+nucleation history as separate completion claims. If a later channel fails,
+preserve earlier diagnostic results but mark the requested full history as
+incomplete. Never drop a failing channel, trim its temperature interval, or
+change the potential to obtain a successful status. Numerical comparisons to
+another implementation are a separate check, not an excuse to fit the model.
+
+PhaseTracer compilation stores full configure/build/run stdout and stderr under
+the generated project's `logs/phasetracer-*/`, with an immutable per-attempt
+`report.json` and the current `phasetracer_run.json`. The compile wrapper returns
+`execution_report` and `execution_results`; the latter separates critical and
+nucleation statuses, retaining Tc even when Tn is unavailable. Failed or timed-out
+attempts must not reuse an earlier successful receipt. Read these artifacts
+instead of repeating the calculation just to obtain its output. Generated CMake
+projects keep dependency libraries within the task build directory and disable
+package-registry exports. Regenerate legacy projects before rebuilding them.
+Warnings name the emitting stage: compiler stderr is not solver stderr. Native
+logs are retained verbatim. Generated runners record
+`PTAGENT_TN_METHOD direct_action` when action-curve fitting is disabled; a native
+fit-related message alone does not diagnose failure of the subsequent direct
+action calculation. Check the final per-transition statuses and finite Tn values;
+the method marker never turns missing or failed results into success.
 
 OS-like vacuum-mass exclusion uses the same criterion in Python, C++ and the
 reference evaluator: `abs(m2_vac) <= 1e-12*max(1,max(abs(m2_vac_group)))`.
@@ -120,7 +172,12 @@ or pass it to PhaseTracer compile commands as `--phasetracer-root`.
      or task directory. In this mode, that Markdown file is the source of truth;
      patch it, then resolve/validate/compile from it without re-extracting the
      paper unless the user asks for a fresh run.
-2. Save or identify the attached paper/source file path.
+2. Save or identify the attached paper/source file path. For an arXiv ID or URL,
+   use `python <skill-dir>/scripts/ptagent_cli.py extract --arxiv <ID-or-URL>
+   --model <model>`. This uses the configured artifact root and the existing
+   arXiv source acquisition workflow. `prepare_paper.py --input` accepts local
+   files only; it has no `--paper` URL option. To use that wrapper with a chosen
+   `--run-dir`, first acquire the source and pass its saved local path.
 3. For `fresh`, run `scripts/prepare_paper.py --mode fresh --input <path>` from this skill. If the user has
    already specified the target model branch, pass it as `--model <short-name>`,
    for example `--model XSM` or `--model 2HDM`. The script first performs a
@@ -374,6 +431,12 @@ contract only when its role is clear and it passes physics checks:
   eigenvalues. If the paper gives a field basis, mixing matrix, or basis
   thermal self-energy/Debye correction, keep the basis structure in a reviewed
   boson mass matrix and let the backend diagonalize it.
+- When a reviewed species policy excludes part of a mixed sector, retain the
+  full source matrix and use its `eigenvalue_indices` metadata with a reviewed
+  selection reason. These are ascending mass ranks, not basis components.
+  Check the branch interpretation at zero and finite temperature, including
+  possible crossings; never infer a particle label from an index alone. See
+  `model_program_contract.md` for the selection fields and limitations.
 - Check dimensions, vacuum anchors, d.o.f., and whether the formula is used in
   V_CW, V1T, Daisy, parameter solving, or only phenomenology.
 - If a source TeX formula appears dimensionally inconsistent with its declared

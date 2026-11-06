@@ -557,6 +557,13 @@ class PhaseHistoryResult:
     path_labels: list[str] = field(default_factory=list)
     summary: str = ""
     warnings: list[str] = field(default_factory=list)
+    solver_stdout: str = ""
+    solver_stderr: str = ""
+    stage: str = "critical"
+    nucleation_diagnostics: dict[str, Any] = field(default_factory=dict)
+    symmetry_diagnostics: list[dict[str, Any]] = field(default_factory=list)
+    phases: list[dict[str, Any]] | None = None
+    phase_diagnostics: dict[str, Any] | None = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "PhaseHistoryResult":
@@ -571,6 +578,13 @@ class PhaseHistoryResult:
             path_labels=[str(item) for item in _as_list(data.get("path_labels"))],
             summary=str(data.get("summary", "")),
             warnings=[str(item) for item in _as_list(data.get("warnings"))],
+            solver_stdout=str(data.get("solver_stdout", "")),
+            solver_stderr=str(data.get("solver_stderr", "")),
+            stage=str(data.get("stage", "critical")),
+            nucleation_diagnostics=dict(data.get("nucleation_diagnostics", {})),
+            symmetry_diagnostics=[dict(item) for item in _as_list(data.get("symmetry_diagnostics"))],
+            phases=([dict(item) for item in data["phases"]] if data.get("phases") is not None else None),
+            phase_diagnostics=(dict(data["phase_diagnostics"]) if data.get("phase_diagnostics") is not None else None),
         )
 
     def to_dict(self) -> dict[str, Any]:

@@ -4,7 +4,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .contract import ThreeDeftBlocked, looks_like_compile_approval_text, physical_spec_hash, validate_contract_template, write_resolved_artifacts
-from .merge import MERGED_CONTRACT_NAME
 
 
 @dataclass(frozen=True)
@@ -34,10 +33,10 @@ def approve_contract_gate(
 
     template_path = Path(template_path)
     target = Path(output_path) if output_path else template_path
-    if key == "approve_compile" and target.name != MERGED_CONTRACT_NAME:
+    if target.resolve().parent != template_path.resolve().parent:
         raise ThreeDeftBlocked(
-            f"PhaseTracer compile approval must be recorded on {MERGED_CONTRACT_NAME} "
-            "after DRalgo output has been merged and reviewed."
+            "An approved copy must stay in the same directory as the reviewed contract "
+            "so relative source paths retain their meaning. Choose a different basename there."
         )
     if key == "approve_compile" and not looks_like_compile_approval_text(user_approval):
         raise ThreeDeftBlocked(
@@ -57,6 +56,18 @@ def approve_contract_gate(
     if not ready:
         preview = "; ".join(f"{issue.field_key}: {issue.message}" for issue in blocking[:5])
         raise ThreeDeftBlocked(f"Cannot approve {gate}: contract still has blockers. {preview}")
+
+    # Diagnose the reviewed point before freezing approval, not after building.
+    # Import locally to keep contract parsing independent of numerical tooling.
+    from .reference_check import check_reference_template
+
+    reference = check_reference_template(template_path)
+    if not reference["ok"]:
+        raise ThreeDeftBlocked(
+            "Cannot approve phasetracer_compile: numerical reference preflight failed. "
+            f"{reference.get('reason', '')} See {reference['report_path']}. "
+            f"{reference['next_action']} No reference or approval was changed."
+        )
 
     updated = _replace_key_value(markdown, heading=heading, key=key, value="true")
     if key == "approve_compile":

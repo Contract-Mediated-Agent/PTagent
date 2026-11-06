@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import inspect
 import json
 import keyword
 import math
@@ -16,9 +17,12 @@ from ..runtime_metadata import collect_software_versions
 from .artifact_layout import generated_models_dir, model_artifact_slug
 from .compiler import CompileBlocked, CompileResult, compile_usage_instructions
 from .config import Settings
+from .ct_diagnostics import observe_ct_nucleation
+from .ct_phase_history import snapshot_ct_phase_history
 from .latex_display import clean_latex_evidence_for_markdown, render_latex_evidence_block
 from .model_preflight import focused_formula_records, selected_model_from_memory
 from .model_defaults import DEFAULT_RULES, FILTER_GUIDANCE, phase_handling_recommendation
+from .matrix_selection import eigenvalue_slice, selected_eigenvalue_indices
 from .paper_expression import scalar_expression
 from .numerical_settings import (
     OS_MASS_CRITERION, OS_MASS_RELATIVE_CUTOFF, OS_MASS_SCALE_FLOOR,
@@ -99,6 +103,7 @@ ZERO_LOOP_MODES = {"none", "standard_CW_V1", "paper_os_like_V1", "custom_expr"}
 THERMAL_MODES = {"none", "standard_thermal_integrals", "custom_expr"}
 DAISY_MODES = {"none", "custom_expr"}
 COUNTERTERM_MODES = {"none", "implicit_in_V1", "explicit_linear_system", "custom_expr"}
+RUNTIME_CONTROL_NAMES = {"stage", "run_tc", "print_tc"}
 RESUMMATION_SCHEMES = {"none", "Parwani", "Arnold-Espinosa", "custom_expr"}
 PHASE_FILTER_MODES = {"none", "negative_field_threshold", "custom_expr", "symmetry_orbits"}
 PHASETRACER_SYMMETRY_MODES = {"none", "z2_reflection"}
@@ -557,6 +562,7 @@ def _render_human_contract_template(
             "",
             "Default route: fill and review a field-dependent matrix, then let PTagent diagonalize it. Matrix entries live in named code blocks so long expressions do not clutter the table. Each entry heading must include both the matrix name and the component, for example `Matrix entry: scalar_matrix[h1,h2]`. Disable this matrix only when the paper gives already-reviewed diagonal field-dependent eigenvalues in Direct Bosons.",
             "This matrix route is model-independent and also applies to vector/gauge sectors. If the source gives neutral gauge-basis information such as W3/B, gamma/Z, photon/Z, Debye matrices, longitudinal/transverse mixing, or thermal self-energies in a non-mass basis, add a `kind = vector` or `kind = gauge` matrix here unless the source explicitly gives the final thermal eigenvalues.",
+            "To retain only selected modes, keep the full source matrix and set `eigenvalue_indices` to zero-based ascending eigenvalue ranks (for example `1` for the larger eigenvalue of a 2x2 matrix). A subset requires `eigenvalue_selection_status = agent_reviewed` and an `eigenvalue_selection_reason` explaining the retained branches at zero and finite temperature. Indices are sorted mass ranks, not basis components or particle identities; crossings require separate review. Omitted/all selects every mode.",
             "",
             "#### Matrix: scalar_matrix",
             "",
@@ -566,6 +572,7 @@ def _render_human_contract_template(
             "| kind | scalar |",
             f"| basis | {', '.join(matrix_basis)} |",
             f"| dof_per_eigenvalue | {matrix_dof} |",
+            "| eigenvalue_indices | all |",
             "| c | 1.5 |",
             "| source_role | field_dependent |",
             f"| notes | {matrix_notes} |",
@@ -697,7 +704,7 @@ def _render_human_contract_template(
             "",
             "### CosmoTransitions Phase Filter Rules",
             "",
-            "For `mode=symmetry_orbits`, each row uses comma-separated simultaneously flipped fields in `field`, `comparison=orbit`, `phase_type=symmetry_duplicate`, and the same positive absolute Euclidean field-distance tolerance in `threshold`. Generator closure is used; at most 4096 transformations are supported. Compare one fixed transform at knots, midpoints, and squared native-spline residual extrema within the common interval; matching never extrapolates. Small interpolation discrepancies may be locally refined, with each point's displacement bounded by the same reviewed tolerance. Check full-potential symmetry with an offset-independent residual; insufficient numerical precision is unresolved. Nonfinite, invalid, nonoverlapping, or unmatched trajectories stay. Review tolerance convergence. Only complete matched histories share a `symmetry_phase_history` representative; unequal-domain matches are recorded in `symmetry_phase_associations`. `symmetry_phase_groups` retains native intervals, and native phases/links remain unchanged. Tc/tunnelling omits verified source-to-own-orbit channels, retaining orientations of distinct phases; previously visited partners are excluded only where the verified domain covers their remaining cooling interval. Inspect `symmetry_pair_diagnostics` and `symmetry_tunnelling_channels`; native CT search heuristics and convergence limits still apply. For `mode=negative_field_threshold`, rows instead compile to spatial cuts in `forbidPhaseCrit`; the following tolerance guidance applies to those cuts only. " + FILTER_GUIDANCE,
+            "For `mode=symmetry_orbits`, each row uses comma-separated simultaneously flipped fields in `field`, `comparison=orbit`, `phase_type=symmetry_duplicate`, and the same positive absolute Euclidean field-distance tolerance in `threshold`. Generator closure is used; at most 4096 transformations are supported. Compare one fixed transform at knots, midpoints, and squared native-spline residual extrema within the common interval; matching never extrapolates. Native tracing uses a displacement target no larger than the reviewed matching tolerance. Small interpolation discrepancies may be locally refined, with each point's displacement bounded by the same reviewed tolerance. The compiler records a conservative full-potential static symmetry proof; only proven transforms bypass the offset-sensitive parity residual, never finite-value or trajectory checks. Unproven transforms use an offset-independent numerical residual; insufficient numerical precision is unresolved. Nonfinite, invalid, nonoverlapping, or unmatched trajectories stay. Review tolerance convergence. Only complete matched histories share a `symmetry_phase_history` representative; unequal-domain matches are recorded in `symmetry_phase_associations`. `symmetry_phase_groups` retains native intervals, and native phases/links remain unchanged. Tc/tunnelling omits verified source-to-own-orbit channels, retaining orientations of distinct phases; previously visited partners are excluded only where the verified domain covers their remaining cooling interval. Inspect `symmetry_pair_diagnostics` and `symmetry_tunnelling_channels`; native CT search heuristics and convergence limits still apply. For `mode=negative_field_threshold`, rows instead compile to spatial cuts in `forbidPhaseCrit`; the following tolerance guidance applies to those cuts only. " + FILTER_GUIDANCE,
             "",
             _render_table(
                 ["enabled", "field", "comparison", "threshold", "phase_type", "reason", "source_reference"],
@@ -1510,6 +1517,9 @@ def _parse_mass_matrices(section_text: str) -> list[dict[str, Any]]:
                 "thermal_matrix_entry_statuses": thermal_matrix_entry_statuses,
                 "thermal_matrix_mode": meta.get("thermal_matrix_mode", "none"),
                 "dof_per_eigenvalue": meta.get("dof_per_eigenvalue", "1"),
+                **{key: meta[key] for key in (
+                    "eigenvalue_indices", "eigenvalue_selection_status", "eigenvalue_selection_reason",
+                ) if key in meta},
                 "transverse_dof_per_eigenvalue": meta.get("transverse_dof_per_eigenvalue", "0"),
                 "longitudinal_dof_per_eigenvalue": meta.get("longitudinal_dof_per_eigenvalue", "0"),
                 "c": meta.get("c", "1.5"),
@@ -1760,6 +1770,15 @@ def validate_contract(
     _check_duplicate_names(field_names + input_names + constant_names + derived_names, "symbols", issues)
 
     for index, row in enumerate(public_inputs):
+        if str(row.get("name", "")).strip() in RUNTIME_CONTROL_NAMES:
+            issues.append(
+                _error(
+                    f"parameters.public_inputs[{index}].name",
+                    "reserved_control_name",
+                    f"Public input {row['name']!r} conflicts with a generated runtime control.",
+                    "Choose a distinct program symbol for this physical input and update its expression references; preserve the source notation in the LaTeX metadata.",
+                )
+            )
         default = row.get("default")
         confirmed = row.get("confirmed")
         if not _truthy(confirmed):
@@ -2360,7 +2379,8 @@ def _validate_model_card_and_implementation(
                 "Fill Section 6 `Daisy Particle Terms` for every bosonic mode or mode group affected by resummation.",
             )
         )
-    _validate_daisy_particles(daisy_particles, allowed_names, issues)
+    _validate_daisy_particles(daisy_particles, allowed_names, issues, implementation=daisy_implementation)
+    _validate_matrix_daisy_selection(contract, issues)
     daisy_mode = str(_dict(loops.get("daisy")).get("mode", "")).strip()
     if daisy_scheme == "Parwani":
         if daisy_implementation != "parwani_thermal_masses":
@@ -2419,6 +2439,50 @@ def _validate_model_card_and_implementation(
         _validate_phase_filter(phase_filter, field_names, allowed_names, issues)
 
 
+def _validate_matrix_daisy_selection(contract: dict[str, Any], issues: list[ValidationIssue]) -> None:
+    daisy = _dict(_dict(contract.get("implementation")).get("daisy"))
+    rows = [_dict(row) for row in _list(daisy.get("particles"))]
+    required = str(daisy.get("scheme", "")).strip() in {"Parwani", "Arnold-Espinosa"}
+    for matrix_index, raw_matrix in enumerate(_list(_dict(contract.get("masses")).get("boson_matrices"))):
+        matrix = _dict(raw_matrix)
+        if not _truthy(matrix.get("enabled", True)) or not _list(matrix.get("basis")):
+            continue
+        try:
+            selected = set(selected_eigenvalue_indices(matrix))
+        except ValueError:
+            continue  # The matrix validator reports the invalid selection.
+        size = len(_list(matrix.get("basis")))
+        name = str(matrix.get("name", ""))
+        discarded = {
+            f"{prefix}_eig{rank + 1}"
+            for prefix in (name, f"{name}_transverse", f"{name}_longitudinal")
+            for rank in range(size) if rank not in selected
+        }
+        for index, row in enumerate(rows):
+            if _truthy(row.get("enabled", True)) and str(row.get("name", "")).strip() in discarded:
+                issues.append(_error(
+                    f"implementation.daisy.particles[{index}].name", "discarded_eigenvalue_daisy_row",
+                    f"Daisy row {row.get('name')!r} refers to a discarded eigenmode of matrix {name!r}.",
+                    "Review and remove/disable the obsolete row or revise the matrix selection; excluded species must not remain in thermal or Daisy sums.",
+                ))
+        has_thermal_matrix = str(matrix.get("thermal_matrix_mode", "none")).strip() != "none" and bool(matrix.get("thermal_matrix"))
+        if has_thermal_matrix:
+            continue
+        labels = {f"{name}_eig{rank + 1}" for rank in selected}
+        present = {str(row.get("name", "")).strip() for row in rows if _truthy(row.get("enabled", True))}
+        group = next((row for row in rows if _truthy(row.get("enabled", True)) and str(row.get("name", "")).strip() == name), {})
+        group_expr = str(group.get("thermal_mass_sq", "")).strip()
+        if group_expr == "same_as_zeroT":
+            group_expr = str(group.get("zeroT_mass_sq", "")).strip()
+        group_fallback = group_expr == "parwani_replacement_only" or (size == 1 and _valid_daisy_mass_expression(group_expr))
+        if (required or present & labels) and labels - present and (present & labels or not group_fallback):
+            issues.append(_error(
+                f"masses.boson_matrices[{matrix_index}]", "incomplete_matrix_thermal_rows",
+                "Per-eigenvalue thermal rows must cover every retained rank; missing: " + ", ".join(sorted(labels - present)),
+                "Supply the full reviewed thermal matrix or complete reviewed eigenvalue rows. Do not silently reuse zero-temperature masses for missing ranks.",
+            ))
+
+
 def _source_thermal_matrices_cover_bosons(contract: dict[str, Any]) -> bool:
     matrices = [
         _dict(row)
@@ -2444,7 +2508,7 @@ def _validate_source_basis_fidelity(contract: dict[str, Any], issues: list[Valid
             "masses.boson_matrices",
             "source_basis_requires_matrix_or_eigenvalues",
             "Thermal gauge-boson source evidence appears to describe a basis/mixing structure, but no vector/gauge mass matrix or source-given final eigenvalue declaration is present.",
-            "Use a `kind = vector`/`kind = gauge` Boson Mass Matrix for the reviewed basis structure, or explicitly document that the Direct Boson rows are source-given final thermal eigenvalues.",
+            "Use a `kind = vector`/`kind = gauge` Boson Mass Matrix for the reviewed basis structure. For a reviewed subset, retain the full matrix and specify eigenvalue_indices, selection status and reason. Direct rows instead require source-given final thermal eigenvalues; do not relabel derived branches as source-given.",
         )
     )
 
@@ -2602,11 +2666,35 @@ def _validate_goldstone_species(rows: list[Any], allowed_names: set[str], issues
             _validate_expression(replacement, allowed_names, f"implementation.goldstone.species[{index}].replacement_expr", issues)
 
 
-def _validate_daisy_particles(rows: list[Any], allowed_names: set[str], issues: list[ValidationIssue]) -> None:
+def _validate_daisy_particles(
+    rows: list[Any],
+    allowed_names: set[str],
+    issues: list[ValidationIssue],
+    *,
+    implementation: str,
+) -> None:
     _validate_named_rows(rows, "implementation.daisy.particles", issues)
     for index, row in enumerate(rows):
         if not isinstance(row, dict):
             continue
+        owner = str(row.get("implementation_owner", "")).strip()
+        owner_key = f"implementation.daisy.particles[{index}].implementation_owner"
+        # Omitted owners retain the legacy scheme-owned routing in both targets.
+        if owner and owner not in THERMAL_MASS_IMPLEMENTATIONS:
+            issues.append(
+                _error(owner_key, "invalid_mode", f"Value must be one of {sorted(THERMAL_MASS_IMPLEMENTATIONS)}, or omitted to use the Daisy implementation.")
+            )
+        elif owner and not _unresolved_contract_choice(implementation):
+            same_noop = owner in {"none", "not_applicable"} and implementation in {"none", "not_applicable"}
+            if owner != implementation and not same_noop:
+                issues.append(
+                    _error(
+                        owner_key,
+                        "contract_conflict",
+                        f"Daisy particle owner {owner!r} conflicts with implementation {implementation!r}.",
+                        "Use the reviewed Daisy implementation as owner; per-particle implementation overrides are not supported by both backends.",
+                    )
+                )
         for column in ("kind", "longitudinal_only"):
             if _placeholder(row.get(column)):
                 issues.append(
@@ -3114,6 +3202,7 @@ def _render_cosmotransitions_source(
     boson_matrices_for_mass = _cosmotransitions_boson_matrices_for_mass(
         boson_matrices,
         resummation_scheme,
+        implementation_daisy,
     )
     matrix_entry_exprs = _matrix_entry_expressions(boson_matrices_for_mass)
     bosons_for_mass = _cosmotransitions_bosons_for_mass(bosons, implementation_daisy, model_card)
@@ -3219,7 +3308,16 @@ def _render_cosmotransitions_source(
     calc_tc_result = "super().calcTcTrans(*args, **kwargs)"
     find_transitions_result = "super().findAllTransitions(*args, **kwargs)"
     if str(implementation_phase_filter.get("mode", "")).strip() == "symmetry_orbits":
-        get_phases_result = f"self._record_symmetry_phase_history({get_phases_result})"
+        from .contract_symmetry import prove_contract_sign_symmetries
+        from .phase_orbits import sign_flip_closure
+
+        field_order = [str(row['name']) for row in fields]
+        groups = [[field_order.index(name.strip()) for name in row['field'].split(',')]
+                  for row in implementation_phase_filter['rules']]
+        symmetry_proof = prove_contract_sign_symmetries(contract, sign_flip_closure(groups, len(fields)))
+        phase_filter_method += f"\n    _proven_symmetry_transforms = {symmetry_proof['proven_transforms']!r}\n"
+        phase_filter_method += f"    symmetry_proof = {symmetry_proof!r}\n"
+        get_phases_result = "self.trace_symmetry_phases(self, *args, **kwargs)"
         calc_tc_result = "self._symmetry_calc_tc(*args, **kwargs)"
         find_transitions_result = "self._symmetry_find_all_transitions(*args, **kwargs)"
     metadata = {
@@ -3302,6 +3400,12 @@ BOSON_NAMES = {boson_names!r}
 FERMION_NAMES = {([str(row.get("name", "")) for row in fermions] + _matrix_eigen_names(fermion_matrices))!r}
 
 
+{inspect.getsource(observe_ct_nucleation)}
+
+
+{inspect.getsource(snapshot_ct_phase_history)}
+
+
 def _ptagent_finite_input(name, value):
     try:
         number = float(value)
@@ -3314,9 +3418,11 @@ def _ptagent_finite_input(name, value):
 
 def _ptagent_jsonable(value):
     if isinstance(value, np.ndarray):
-        return value.tolist()
+        return _ptagent_jsonable(value.tolist())
     if isinstance(value, np.generic):
-        return value.item()
+        return _ptagent_jsonable(value.item())
+    if isinstance(value, float) and not np.isfinite(value):
+        raise ValueError("The native solver returned a nonfinite transition quantity")
     if isinstance(value, dict):
         return {{str(key): _ptagent_jsonable(item) for key, item in value.items()}}
     if isinstance(value, (list, tuple)):
@@ -3325,9 +3431,33 @@ def _ptagent_jsonable(value):
 
 
 def _ptagent_transition_payload(trans):
-    payload = _ptagent_jsonable(dict(trans))
+    payload = _ptagent_jsonable({{key: value for key, value in trans.items() if key != "instanton"}})
+    for key in ("Tcrit", "Tnuc", "action"):
+        if key in payload and payload[key] < 0:
+            raise ValueError(f"The native solver returned negative {{key}}")
     if "Tcrit" in payload and "Tc" not in payload:
         payload["Tc"] = payload["Tcrit"]
+    if "Tnuc" in payload:
+        if payload.get("trantype") == 2:
+            payload["second_order_temperature"] = payload["Tnuc"]
+            payload.pop("Tn", None)
+        else:
+            payload["Tn"] = payload["Tnuc"]
+        if payload.get("crit_trans"):
+            payload["Tc"] = payload["crit_trans"].get("Tcrit")
+    for key in ("Tc", "Tn", "second_order_temperature"):
+        if payload.get(key) is not None:
+            value = _ptagent_finite_input(key, payload[key])
+            if value < 0:
+                raise ValueError(f"The native solver returned negative {{key}}")
+            payload[key] = value
+    instanton = trans.get("instanton")
+    if instanton is not None:
+        residual = _ptagent_jsonable(float(instanton.fRatio))
+        if residual < 0:
+            raise ValueError("Native tunnelling force residual must be nonnegative")
+        payload["tunnelling_fRatio"] = residual
+        payload["tunnelling_fRatio_note"] = "Diagnostic only; native convergence depends on the iteration and solver settings."
     return payload
 
 
@@ -3357,7 +3487,7 @@ def _ptagent_run_tc(model, *, print_tc=True):
         model.PTAGENT_TC_STATUS = f"error: {{type(exc).__name__}}: {{exc}}"
         if print_tc:
             print("PTAGENT_TC_STATUS", model.PTAGENT_TC_STATUS)
-        return []
+        raise
     if TcTrans is None:
         TcTrans = []
     model.PTAGENT_TC_TRANS = TcTrans
@@ -3368,7 +3498,9 @@ def _ptagent_run_tc(model, *, print_tc=True):
     return TcTrans
 
 
-def run_transitions(**parameter_overrides):
+def run_transitions(*, stage="critical", **parameter_overrides):
+    if stage not in {{"critical", "nucleation"}}:
+        raise ValueError("stage must be critical or nucleation")
     unknown = sorted(set(parameter_overrides) - set(DEFAULT_INPUT_VALUES))
     if unknown:
         raise TypeError("Unknown public input override(s): " + ", ".join(unknown))
@@ -3376,14 +3508,36 @@ def run_transitions(**parameter_overrides):
     for key, value in parameter_overrides.items():
         parameters[key] = _ptagent_finite_input(key, value)
     model = build_model(**parameters, run_tc=False, print_tc=False)
-    TcTrans = model.calcTcTrans()
-    if TcTrans is None:
-        TcTrans = []
-    return {{
+    diagnostics = {{}}
+
+    def run_stage():
+        transitions = model.calcTcTrans() if stage == "critical" else model.findAllTransitions()
+        return [_ptagent_transition_payload(trans) for trans in (transitions or [])]
+
+    try:
+        transitions = (observe_ct_nucleation(run_stage, model, diagnostics, _ptagent_transition_payload)
+                       if stage == "nucleation" else run_stage())
+    except Exception as exc:
+        # Keep already traced phases available to the runner without retrying.
+        exc.ptagent_phase_history = snapshot_ct_phase_history(model)
+        raise
+    result = {{
+        "stage": stage,
         "parameters": parameters,
         "numerical_settings": dict(NUMERICAL_SETTINGS),
-        "transitions": [_ptagent_transition_payload(trans) for trans in TcTrans],
+        "transitions": transitions,
+        **snapshot_ct_phase_history(model),
     }}
+    # An enclosing runtime observer supplies its own completed record after this
+    # call returns. Direct standalone calls receive the same evidence here.
+    if diagnostics:
+        result["nucleation_diagnostics"] = diagnostics
+        complete = diagnostics["history_complete"]
+        result["status"] = "success" if complete else "partial" if transitions else "error"
+        if not complete:
+            result["summary"] = "Nucleation history incomplete; inspect native channel diagnostics."
+            result["warnings"] = ["Missing Tn is not a physical no-transition result."]
+    return result
 
 
 class GeneratedPotential(generic_potential.generic_potential):
@@ -3731,6 +3885,7 @@ def _matrix_entry_expressions(matrices: list[dict[str, Any]]) -> list[str]:
     for matrix in matrices:
         for row in _list(matrix.get("matrix")):
             expressions.extend(str(expr) for expr in _list(row))
+        expressions.extend(str(expr) for expr in _list(matrix.get("_thermal_eigenvalue_expressions")))
     return expressions
 
 
@@ -3782,14 +3937,41 @@ def _cosmotransitions_bosons_for_mass(
 def _cosmotransitions_boson_matrices_for_mass(
     matrices: list[dict[str, Any]],
     resummation_scheme: str,
+    implementation_daisy: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     if str(resummation_scheme).strip().lower() != "parwani":
         return matrices
     result: list[dict[str, Any]] = []
+    thermal_rows = {
+        str(row.get("name", "")).strip(): row
+        for row in _list(_dict(implementation_daisy).get("particles"))
+        if _truthy(row.get("enabled", True))
+    }
     for raw in matrices:
         matrix = dict(raw)
         thermal = _list(matrix.get("thermal_matrix"))
-        if str(matrix.get("thermal_matrix_mode", "none")) == "none" or not thermal:
+        if str(matrix.get("thermal_matrix_mode", "none")).strip() == "none" or not thermal:
+            labels = [f"{matrix.get('name', '')}_eig{rank + 1}" for rank in selected_eigenvalue_indices(matrix)]
+            if any(label in thermal_rows for label in labels):
+                if not all(label in thermal_rows for label in labels):
+                    raise CompileBlocked("Per-eigenvalue thermal rows must cover all retained ranks: " + ", ".join(labels))
+                expressions = []
+                for label in labels:
+                    row = thermal_rows[label]
+                    expr = str(row.get("thermal_mass_sq", "")).strip()
+                    if expr == "same_as_zeroT":
+                        expr = str(row.get("zeroT_mass_sq", "")).strip()
+                    if not _valid_daisy_mass_expression(expr):
+                        raise CompileBlocked(f"Thermal eigenvalue {label} needs a reviewed mass expression.")
+                    expressions.append(expr)
+                matrix["_thermal_eigenvalue_expressions"] = expressions
+            elif len(_list(matrix.get("basis"))) == 1:
+                row = thermal_rows.get(str(matrix.get("name", "")), {})
+                expr = str(row.get("thermal_mass_sq", "")).strip()
+                if expr == "same_as_zeroT":
+                    expr = str(row.get("zeroT_mass_sq", "")).strip()
+                if _valid_daisy_mass_expression(expr):
+                    matrix["_thermal_eigenvalue_expressions"] = [expr]
             result.append(matrix)
             continue
         kind = str(matrix.get("kind", "scalar")).strip().lower()
@@ -3846,6 +4028,12 @@ def _render_boson_mass_body(bosons: list[dict[str, Any]], matrices: list[dict[st
     for index, matrix in enumerate(matrices):
         if index:
             _append_blank(lines)
+        thermal_expressions = _list(matrix.get("_thermal_eigenvalue_expressions"))
+        if thermal_expressions:
+            setup, variables = _render_expression_variables(thermal_expressions, f"m2T_matrix{index}_eig")
+            lines.extend(setup)
+            lines.append(f"        mass_parts.append(self._stack_species([{', '.join(variables)}], base))")
+            continue
         basis = _list(matrix.get("basis"))
         entries = _list(matrix.get("matrix"))
         size = len(basis)
@@ -3854,7 +4042,7 @@ def _render_boson_mass_body(bosons: list[dict[str, Any]], matrices: list[dict[st
         for row_index, row in enumerate(entries):
             for col_index, expr in enumerate(_list(row)):
                 lines.extend(_render_compiler_assignment(str(expr), f"{var}[..., {row_index}, {col_index}]"))
-        lines.append(f"        mass_parts.append(np.linalg.eigvalsh({var}))")
+        lines.append(f"        mass_parts.append(np.linalg.eigvalsh({var}){eigenvalue_slice(matrix)})")
     if direct_vars or matrices:
         _append_blank(lines)
         lines.append("        massSq = np.concatenate(mass_parts, axis=-1)")
@@ -3886,7 +4074,7 @@ def _render_fermion_mass_body(
         for row_index, row in enumerate(entries):
             for col_index, expr in enumerate(_list(row)):
                 lines.extend(_render_compiler_assignment(str(expr), f"{var}[..., {row_index}, {col_index}]"))
-        lines.append(f"        mass_parts.append(np.linalg.eigvalsh({var}))")
+        lines.append(f"        mass_parts.append(np.linalg.eigvalsh({var}){eigenvalue_slice(matrix)})")
     if mass_vars or matrices:
         lines.append("        massSq = np.concatenate(mass_parts, axis=-1)")
     else:
@@ -4105,7 +4293,7 @@ def _matrix_eigen_names(matrices: list[dict[str, Any]]) -> list[str]:
     names: list[str] = []
     for matrix in matrices:
         base = _program_symbol(str(matrix.get("name", "matrix")))
-        for index in range(len(_list(matrix.get("basis")))):
+        for index in selected_eigenvalue_indices(matrix):
             names.append(f"{base}_eig{index + 1}")
     return names
 
@@ -4114,7 +4302,7 @@ def _matrix_repeated_values(matrices: list[dict[str, Any]], key: str, default: s
     values: list[str] = []
     for matrix in matrices:
         value = str(matrix.get(key, default))
-        values.extend(value for _ in range(len(_list(matrix.get("basis")))))
+        values.extend(value for _ in selected_eigenvalue_indices(matrix))
     return values
 
 
@@ -4498,8 +4686,8 @@ def _render_source_matrix_daisy_method(
         dof = _polarization_dof(matrix, dof_key, fraction=1.0 / 3.0) if dof_key.startswith("longitudinal") else str(matrix.get(dof_key, "1"))
         lines.extend(
             [
-                f"    eig0_{name} = np.linalg.eigvalsh({zero_var})",
-                f"    eigT_{name} = np.linalg.eigvalsh({thermal_var})",
+                f"    eig0_{name} = np.linalg.eigvalsh({zero_var}){eigenvalue_slice(matrix)}",
+                f"    eigT_{name} = np.linalg.eigvalsh({thermal_var}){eigenvalue_slice(matrix)}",
                 f"    total = total + ({dof}) * np.sum(np.maximum(eigT_{name}, 0.0)**1.5 - np.maximum(eig0_{name}, 0.0)**1.5, axis=-1)",
             ]
         )
@@ -5429,6 +5617,27 @@ def _validate_boson_matrices(
         if len(matrix) != len(basis) or any(not isinstance(line, list) or len(line) != len(basis) for line in matrix):
             issues.append(_error(f"{field_key}[{index}].matrix", "invalid_matrix_shape", "Mass matrix must be square with one row/column per basis entry."))
             continue
+        try:
+            selected = selected_eigenvalue_indices(row)
+        except ValueError as exc:
+            issues.append(_error(f"{field_key}[{index}].eigenvalue_indices", "invalid_eigenvalue_selection", str(exc)))
+        else:
+            if selected != list(range(len(basis))):
+                _require_review_status(
+                    row, status_column="eigenvalue_selection_status",
+                    field_key=f"{field_key}[{index}].eigenvalue_selection_status",
+                    issues=issues, subject="Eigenvalue rank selection",
+                )
+                if str(row.get("eigenvalue_selection_status", "")).strip() == "source_imported":
+                    issues.append(_error(
+                        f"{field_key}[{index}].eigenvalue_selection_status", "selection_review_required",
+                        "Imported matrix entries do not approve a species selection; review the subset and mark it agent_reviewed before final contract approval.",
+                    ))
+                if _placeholder(row.get("eigenvalue_selection_reason")):
+                    issues.append(_error(
+                        f"{field_key}[{index}].eigenvalue_selection_reason", "missing_selection_reason",
+                        "Review which ordered eigenvalues are retained and why the same ranks apply at zero and finite temperature. Ranks do not identify particles across level crossings.",
+                    ))
         for row_index, line in enumerate(matrix):
             for col_index, expr in enumerate(line):
                 _require_expression(expr, allowed_names, f"{field_key}[{index}].matrix[{row_index}][{col_index}]", issues)

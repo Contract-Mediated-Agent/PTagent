@@ -10,7 +10,8 @@ import json
 import os
 from pathlib import Path
 import re
-import subprocess
+
+from ptagent.wolfram_runtime import WolframRuntime, WolframRuntimeError, get_wolfram_runtime, marker_json, execution_error
 
 from .contract import ThreeDeftBlocked
 from .extraction import _comment_free_source, _source_statements
@@ -37,7 +38,7 @@ def source_load_policy(text: str) -> tuple[bool, str]:
     return policy[1] == "True", needs[1]
 
 
-def _discover_package_files(executable: str, load_groupmath: bool) -> dict:
+def _discover_package_files(executable: str, load_groupmath: bool, *, runtime: WolframRuntime | None = None) -> dict:
     group = 'FindFile["GroupMath`GroupMath`"]' if load_groupmath else '""'
     group_loader = 'FindFile["GroupMath`"]' if load_groupmath else '""'
     code = '''Print["PTAGENT_LOADER_PATHS=" <> ExportString[<|
@@ -46,18 +47,17 @@ def _discover_package_files(executable: str, load_groupmath: bool) -> dict:
       "groupmath" -> @GROUP@,
       "system_matrix_protected" -> (NameQ["System`BlockDiagonalMatrix"] &&
         MemberQ[Attributes[System`BlockDiagonalMatrix], Protected])|>, "RawJSON"]];'''.replace("@GROUP@", group).replace("@LOADER@", group_loader)
-    try:
-        result = subprocess.run([executable, "-code", code], capture_output=True, text=True, timeout=15, check=False)
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise ThreeDeftBlocked(f"Legacy DRalgo package-path probe failed: {exc}") from exc
+    runtime = runtime or get_wolfram_runtime(executable)
+    result = runtime.run(code=code, stage="Legacy DRalgo package-path probe", probe=True)
+    if result["returncode"]:
+        raise execution_error(result, "Legacy DRalgo package-path probe")
     prefix = "PTAGENT_LOADER_PATHS="
-    payload = result.stdout.partition(prefix)[2]
     try:
-        paths, _ = json.JSONDecoder().raw_decode(payload.strip())
+        paths = marker_json(result["stdout"], prefix)
     except (ValueError, TypeError) as exc:
-        details = (result.stdout + "\n" + result.stderr).strip()[-600:]
+        details = (result["stdout"] + "\n" + result["stderr"]).strip()[-600:]
         raise ThreeDeftBlocked("Legacy DRalgo package-path probe did not return usable paths; check the local Wolfram runtime.\n" + details) from exc
-    if result.returncode or not isinstance(paths, dict):
+    if not isinstance(paths, dict):
         raise ThreeDeftBlocked("Legacy DRalgo package-path probe failed; no compatibility changes were made.")
     return paths
 
@@ -66,7 +66,10 @@ def _read_package(path: object) -> tuple[Path, str]:
     if not isinstance(path, str) or not Path(path).is_file():
         raise ThreeDeftBlocked(f"Legacy DRalgo compatibility requires an existing, readable package file: {path!r}.")
     file = Path(path).resolve()
-    return file, _comment_free_source(file.read_text(encoding="utf-8"))
+    try:
+        return file, _comment_free_source(file.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise WolframRuntimeError("inaccessible", f"Discovered Wolfram package file is inaccessible: {file}: {exc}") from exc
 
 
 def verify_legacy_packages(paths: dict, load_groupmath: bool) -> list[Path]:
@@ -95,7 +98,7 @@ def verify_legacy_packages(paths: dict, load_groupmath: bool) -> list[Path]:
     return files
 
 
-def compatibility_prelude(source: Path | None, executable: str) -> str:
+def compatibility_prelude(source: Path | None, executable: str, *, runtime: WolframRuntime | None = None) -> str:
     mode = os.environ.get(COMPAT_ENV, "").strip()
     if not mode:
         return ""
@@ -112,7 +115,7 @@ def compatibility_prelude(source: Path | None, executable: str) -> str:
     if not source.is_file():
         raise ThreeDeftBlocked(f"Compatibility source does not exist: {source}")
     policy, requested_context = source_load_policy(source.read_text(encoding="utf-8"))
-    paths = _discover_package_files(executable, policy)
+    paths = _discover_package_files(executable, policy, runtime=runtime)
     files = verify_legacy_packages(paths, policy)
     return render_compatibility_prelude(source, files, policy, requested_context)
 

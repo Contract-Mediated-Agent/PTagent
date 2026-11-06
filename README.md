@@ -39,11 +39,17 @@ The [bundled xSM example](assets/examples/xsm_test.m) illustrates the translatio
 
 ## Requirements
 
-PTagent requires **Python 3.11+**. Python dependencies are listed in [`requirements.txt`](requirements.txt) and can be installed with:
+PTagent requires **Python 3.11+**. Python dependencies are listed in [`requirements.txt`](requirements.txt). Use a virtual environment, for example on Linux/macOS:
 
 ```bash
-python3 -m pip install -r requirements.txt
+python3 -m venv .venv
+.venv/bin/python -m pip install --no-user -r requirements.txt
 ```
+
+On Windows, use `.venv\Scripts\python.exe` instead. Run the skill scripts with
+that same interpreter. `--no-user` prevents an inherited pip user-install
+setting from conflicting with the virtual environment; no global pip setting
+or system Python override is needed.
 
 Additional software depends on the workflow. SARAH and Wolfram/Mathematica are needed to export a SARAH model, while existing Vevacious++ exports can be imported without SARAH. The DRalgo route requires Wolfram/Mathematica and DRalgo; PhaseTracer is needed to build and run PhaseTracer-style outputs. PTagent checks the environment and reports missing dependencies.
 

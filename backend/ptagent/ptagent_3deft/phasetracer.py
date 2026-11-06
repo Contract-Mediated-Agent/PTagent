@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from ..phasetracer_build import dependency_cmake
+
 import ast
 import json
 import math
@@ -131,6 +133,7 @@ def compile_phasetracer_template(
     header_path.write_text(render["header"], encoding="utf-8")
     run_model_path.write_text(render["run_model"], encoding="utf-8")
     (target / "source_probe.cpp").write_text(render["source_probe"], encoding="utf-8")
+    (target / "fixed_probe.cpp").write_text(render["fixed_probe"], encoding="utf-8")
     cmake_path.write_text(render["cmake"], encoding="utf-8")
     metadata_path.write_text(json.dumps(render["metadata"], ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
 
@@ -145,8 +148,14 @@ def compile_phasetracer_template(
     )
 
 
-def _render_cpp_project(contract: dict[str, Any], *, atol: float = DEFAULT_ATOL, rtol: float = DEFAULT_RTOL) -> dict[str, Any]:
-    ensure_compile_approval(contract)
+def _render_cpp_project(
+    contract: dict[str, Any], *, atol: float = DEFAULT_ATOL,
+    rtol: float = DEFAULT_RTOL, reference_review_only: bool = False,
+) -> dict[str, Any]:
+    # Review reuses the compiler's parameter/field evaluation and returns before
+    # assembling any project. It cannot grant approval or write generated code.
+    if not reference_review_only:
+        ensure_compile_approval(contract)
     validate_tolerances(atol, rtol)
     artifact_name = _model_artifact_name(contract)
     class_name = _cpp_class_name(artifact_name)
@@ -235,17 +244,23 @@ def _render_cpp_project(contract: dict[str, Any], *, atol: float = DEFAULT_ATOL,
     if runtime_rg:
         target_scale = _eval_expr(_clean_expr(running_scale_expression), eval_env)
         reference_rg_target_scale = target_scale
-        eval_env.update(
-            _run_rg_python(
-                running_inputs,
-                beta_functions,
-                target_scale,
-                input_scale=input_scale,
-                ode_steps=ode_steps,
-                beta_variable=beta_variable,
-                beta_factor=beta_factor,
+        try:
+            eval_env.update(
+                _run_rg_python(
+                    running_inputs,
+                    beta_functions,
+                    target_scale,
+                    input_scale=input_scale,
+                    ode_steps=ode_steps,
+                    beta_variable=beta_variable,
+                    beta_factor=beta_factor,
+                )
             )
-        )
+        except (OverflowError, ValueError, ZeroDivisionError) as exc:
+            raise ThreeDeftBlocked(
+                f"4D RG applicability failure: input scale {input_scale} GeV, requested reference "
+                f"scale {target_scale} GeV. {exc} No extrapolated reference value is available."
+            ) from exc
     for spec, value in zip(fields, reference_fields):
         eval_env[spec["name"]] = _field_reference_value(spec, value, eval_env["T"])
     eval_env.update(_eval_scale_aliases(three_d_scale_expressions, eval_env))
@@ -357,6 +372,7 @@ def _render_cpp_project(contract: dict[str, Any], *, atol: float = DEFAULT_ATOL,
                         reason="4D RG target scale is not finite.",
                     )
                 candidate_target_scale = target_scale
+                _running_spline_config(interface, input_scale=input_scale, target_scale=target_scale, ode_steps=ode_steps)
                 candidate_env.update(
                     _run_rg_python(
                         running_inputs,
@@ -383,7 +399,7 @@ def _render_cpp_project(contract: dict[str, Any], *, atol: float = DEFAULT_ATOL,
                         ode_steps=three_d_us_ode_steps,
                     )
                 )
-        except (OverflowError, TypeError, ValueError, ZeroDivisionError) as exc:
+        except (OverflowError, TypeError, ValueError, ZeroDivisionError, ThreeDeftBlocked) as exc:
             return invalid_reference_result(
                 candidate_env=candidate_env,
                 candidate_fields=candidate_fields,
@@ -491,27 +507,74 @@ def _render_cpp_project(contract: dict[str, Any], *, atol: float = DEFAULT_ATOL,
         return result
 
     reference_result = record_reference_attempt(reference_fields, eval_env["T"])
-    reference_point_auto_selected = False
-    if expected_numeric is None and not reference_result["valid"]:
-        for candidate_temperature in _reference_candidate_temperatures(eval_env["T"]):
-            for candidate_fields in _reference_candidate_vectors(len(fields), reference_fields):
-                candidate_result = record_reference_attempt(candidate_fields, candidate_temperature)
-                if candidate_result["valid"]:
-                    reference_fields = candidate_fields
-                    reference_result = candidate_result
-                    reference_point_auto_selected = True
-                    break
-            if reference_point_auto_selected:
-                break
+    reference_suggestions = []
+    suggestion_evaluation_limit = 24
     reference_warning = ""
     if expected_numeric is None and not reference_result["valid"]:
+        # Candidate diagnostics never replace the reviewed reference or its result.
+        reference_suggestions = [
+            {"fields": candidate_fields, "temperature": candidate_temperature,
+             "coordinates": "phase_tracer", "status": "unconfirmed",
+             "numerically_evaluated": False, "requires_review": True}
+            for candidate_temperature in _reference_candidate_temperatures(eval_env["T"])
+            for candidate_fields in _reference_candidate_vectors(len(fields), reference_fields)
+            if candidate_temperature != eval_env["T"] or candidate_fields != reference_fields
+        ]
+        for suggestion in reference_suggestions[:suggestion_evaluation_limit]:
+            diagnostic = evaluate_reference(suggestion["fields"], suggestion["temperature"])
+            suggestion.update({
+                "numerically_evaluated": True,
+                "evaluation_layer": "python_rg_matching_and_3dus_not_native_cpp_or_source_dralgo",
+                "evaluation_status": "finite_consistent" if diagnostic["valid"] else "invalid",
+                "valid": bool(diagnostic["valid"]),
+                "reason": diagnostic["reason"],
+                "invalid_terms": diagnostic["invalid_terms"],
+                "value_python": _metadata_number(diagnostic["reference"]),
+                "ordered_term_values_python": diagnostic["term_values"],
+            })
         reference_warning = (
-            "No finite real PhaseTracer reference point was found after "
-            f"{len(reference_attempts)} candidate(s). The C++ project was still generated, "
-            "but reference metadata values are diagnostic only. "
-            f"Last failure: {reference_result.get('reason', 'unknown')} "
+            "The reviewed PhaseTracer reference point is not finite, real, or internally consistent; "
+            "its fields and temperature were preserved without replacement. The C++ project was "
+            "generated unverified. Relative diagnostic suggestions in metadata remain unconfirmed; "
+            f"at most {suggestion_evaluation_limit} receive a separate Python finite-value check, "
+            "not independent native validation or approval. Changing the reference requires explicit "
+            "review and new contract approval. "
+            f"Failure: {reference_result.get('reason', 'unknown')} "
             f"Invalid potential pieces: {', '.join(reference_result.get('invalid_terms', [])) or 'not isolated'}."
         )
+    reference_review = {
+        "physical_spec_hash": physical_spec_hash(contract),
+        "reference_fields": reference_fields,
+        "reference_temperature": reference_result["temperature"],
+        "coordinates": "phase_tracer",
+        "fields_3d": {
+            spec["name"]: _metadata_number(reference_result["env"][spec["name"]])
+            for spec in fields if spec["name"] in reference_result["env"]
+        },
+        "reference_point_valid": bool(reference_result["valid"]),
+        "reason": reference_result["reason"],
+        "reference_value_python": _metadata_number(reference_result["reference"]),
+        "reference_expected_v": expected_numeric,
+        "ordered_term_values_python": reference_result["term_values"],
+        "invalid_terms": reference_result["invalid_terms"],
+        "domain_diagnostics": _reference_domain_diagnostics(
+            v3d_terms or [("total", v3d_expression)], reference_result["env"]
+        ) if not reference_result["valid"] else [],
+        "reference_point_auto_selected": False,
+        "reference_suggestions": reference_suggestions,
+        "suggestion_evaluation_limit": suggestion_evaluation_limit,
+        "suggestion_evaluation_count": sum(row["numerically_evaluated"] for row in reference_suggestions),
+        "evaluation_layer": "python_rg_matching_and_3dus_not_native_cpp_or_source_dralgo",
+    }
+    expected_check = None
+    if expected_numeric is not None and reference_result["valid"]:
+        expected_check = finite_comparison(reference_result["reference"], expected_numeric, atol=atol, rtol=rtol)
+    reference_review["expected_comparison"] = expected_check
+    reference_review["ok"] = bool(reference_result["valid"] and (expected_check is None or expected_check["ok"]))
+    if expected_check is not None and not expected_check["ok"]:
+        reference_review["reason"] = "The reference is finite but disagrees with the supplied reference_expected_v."
+    if reference_review_only:
+        return reference_review
     if expected_numeric is not None and not reference_result["valid"]:
         raise ThreeDeftBlocked(
             "The reviewed PhaseTracer reference point is not finite or has inconsistent V3D/prefactor values, "
@@ -555,6 +618,13 @@ def _render_cpp_project(contract: dict[str, Any], *, atol: float = DEFAULT_ATOL,
 
     input_struct = _render_input_struct(inputs)
     private_members = "  InputParameters input_;"
+    if runtime_rg:
+        private_members += """
+  struct RunningCache {
+    std::mutex mutex;
+    std::map<double, RunningParameters> values;
+  };
+  std::shared_ptr<RunningCache> running_cache_ = std::make_shared<RunningCache>();"""
     input_initializers = _render_input_initializers(inputs)
 
     field_unpack = "\n".join(
@@ -593,7 +663,7 @@ def _render_cpp_project(contract: dict[str, Any], *, atol: float = DEFAULT_ATOL,
     v3d_field_alias_lines = _render_field_aliases(fields, v3d_used_names)
     v3d_coefficient_alias_lines = _render_coefficient_aliases(coefficients, v3d_used_names)
     v3d_running_used_names = v3d_used_names | _scale_dependency_names(three_d_scale_expressions, v3d_used_names)
-    v3d_running_alias_block = _render_running_alias_block(inputs, v3d_running_used_names, running_inputs=running_inputs)
+    v3d_running_alias_block = _render_running_alias_block(inputs, v3d_running_used_names, running_inputs=running_inputs, frozen_running=True)
     v3d_scale_alias_block = _render_scale_alias_block(three_d_scale_expressions, v3d_used_names, inputs)
     v3d_void_lines = _render_void_lines(
         ("fields", not (v3d_used_names & field_names)),
@@ -601,7 +671,7 @@ def _render_cpp_project(contract: dict[str, Any], *, atol: float = DEFAULT_ATOL,
         ("T", "T" not in v3d_running_used_names and not v3d_scale_alias_block and not v3d_running_alias_block),
     )
     prefactor_running_used_names = prefactor_used_names | _scale_dependency_names(three_d_scale_expressions, prefactor_used_names)
-    prefactor_running_alias_block = _render_running_alias_block(inputs, prefactor_running_used_names, running_inputs=running_inputs)
+    prefactor_running_alias_block = _render_running_alias_block(inputs, prefactor_running_used_names, running_inputs=running_inputs, frozen_running=True)
     prefactor_scale_alias_block = _render_scale_alias_block(three_d_scale_expressions, prefactor_used_names, inputs)
     prefactor_void_lines = _render_void_lines(
         ("T", "T" not in prefactor_running_used_names and not prefactor_scale_alias_block and not prefactor_running_alias_block)
@@ -628,7 +698,6 @@ def _render_cpp_project(contract: dict[str, Any], *, atol: float = DEFAULT_ATOL,
         for line in (
             f"    set_field_scale({_cpp_float(field_scale)});" if field_scale is not None else "",
             f"    set_temperature_scale({_cpp_float(temperature_scale)});" if temperature_scale is not None else "",
-            "    initialise_phase_tracer_rg();" if runtime_rg else "",
         )
         if line
     )
@@ -646,7 +715,8 @@ def _render_cpp_project(contract: dict[str, Any], *, atol: float = DEFAULT_ATOL,
     for order, expression in v3d_terms:
         block = _render_v3d_order_block(order, expression, allowed_names=potential_allowed_names, field_names=field_names)
         order_methods.append(f"""
-  double evaluate_v3d_{order}(const ThreeDFields& fields, const ThreeDParameters& params, double T) const {{
+  double evaluate_v3d_{order}(const ThreeDFields& fields, const ThreeDParameters& params, double T, const RunningParameters* frozen_running = nullptr) const {{
+    (void)frozen_running;
     check_temperature(T);
     checked_3d_fields(fields);
     checked_3d_parameters(params);
@@ -664,9 +734,14 @@ def _render_cpp_project(contract: dict[str, Any], *, atol: float = DEFAULT_ATOL,
 #include <cstddef>
 #include <cmath>
 #include <limits>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
+{('#include <boost/numeric/odeint.hpp>' if runtime_rg else '')}
 
 #include <eigen3/Eigen/Core>
 #include "effectivepotential/potential.hpp"
@@ -734,7 +809,8 @@ class {class_name} final : public EffectivePotential::Potential {{
   }}
 
   // Total reviewed V3D in canonical 3D fields.
-  double evaluate_v3d(const ThreeDFields& fields, const ThreeDParameters& params, double T) const {{
+  double evaluate_v3d(const ThreeDFields& fields, const ThreeDParameters& params, double T, const RunningParameters* frozen_running = nullptr) const {{
+    (void)frozen_running;
     check_temperature(T);
     checked_3d_fields(fields);
     checked_3d_parameters(params);
@@ -747,7 +823,8 @@ class {class_name} final : public EffectivePotential::Potential {{
     return require_finite({v3d_block.result_name}, "V3D");
   }}
 
-  double potential_prefactor(double T) const {{
+  double potential_prefactor(double T, const RunningParameters* frozen_running = nullptr) const {{
+    (void)frozen_running;
     check_temperature(T);
 {prefactor_void_lines}
 {prefactor_running_alias_block}
@@ -833,6 +910,7 @@ class {class_name} final : public EffectivePotential::Potential {{
     reference_temperature = _cpp_float(eval_env["T"])
     direct_field_initializers = ", ".join(_cpp_float(value) for value in fixed_three_d_field_values)
     direct_parameter_initializers = ", ".join(_cpp_float(value) for value in fixed_three_d_parameter_values)
+    direct_running_initializers = ", ".join(_cpp_float(eval_env[name]) for name in running_inputs)
     direct_field_print = "".join(
         f' << " {spec["name"]}=" << fields.{spec["name"]}'
         for spec in fields
@@ -867,15 +945,17 @@ int main(int argc, char** argv) {{
     std::cout << "Validation.status generated_unverified\\n";
     return 3;
   }}
+  try {{
   ptagent_3deft::{class_name}::InputParameters input{{}};
 {input_initializers}
   ptagent_3deft::{class_name} model(input);
 
   ptagent_3deft::{class_name}::ThreeDFields fields{{{direct_field_initializers}}};
   ptagent_3deft::{class_name}::ThreeDParameters params{{{direct_parameter_initializers}}};
+  const ptagent_3deft::{class_name}::RunningParameters frozen_running{{{direct_running_initializers}}};
   const double T = {reference_temperature};
-  const double direct_v3d = model.evaluate_v3d(fields, params, T);
-  const double direct_prefactor = model.potential_prefactor(T);
+  const double direct_v3d = model.evaluate_v3d(fields, params, T, &frozen_running);
+  const double direct_prefactor = model.potential_prefactor(T, &frozen_running);
   const double direct_value = direct_prefactor * direct_v3d;
   const double expected_v3d = {expected_v3d};
   const double expected_prefactor = {expected_prefactor};
@@ -883,7 +963,6 @@ int main(int argc, char** argv) {{
 
   Eigen::VectorXd phi({len(fields)});
 {reference_field_assignments}
-  const double full_path_value = model.V(phi, T);
   std::cout << std::setprecision(17);
   std::cout << "Reference.mode fixed_3d_parameters_direct_v3d\\n";
   std::cout << "Reference.T " << T << "\\n";
@@ -902,6 +981,7 @@ int main(int argc, char** argv) {{
     std::cout << " " << phi[i];
   }}
   std::cout << "\\n";
+  const double full_path_value = model.V(phi, T);
   std::cout << "Reference.FullPathVDiagnostic " << full_path_value << "\\n";
   std::cout << "Reference.FullPathExpectedV " << expected_value << "\\n";
   std::cout << "Reference.FullPathDiffV " << (full_path_value - expected_value) << "\\n";
@@ -913,6 +993,11 @@ int main(int argc, char** argv) {{
     && close(direct_value, expected_value) && close(full_path_value, expected_value);
   std::cout << "Validation.status " << (passed ? "passed" : "failed") << "\\n";
   return passed ? EXIT_SUCCESS : EXIT_FAILURE;
+  }} catch (const std::exception& error) {{
+    std::cerr << error.what() << "\\n";
+    std::cout << "Validation.status failed\\n";
+    return EXIT_FAILURE;
+  }}
 }}
 """
     if expected_numeric is not None and not finite_comparison(reference_value, expected_numeric, atol=atol, rtol=rtol)["ok"]:
@@ -932,9 +1017,7 @@ if(NOT PHASETRACER_ROOT)
   message(FATAL_ERROR "Set -DPHASETRACER_ROOT=/path/to/PhaseTracer")
 endif()
 
-set(PHASETRACER_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-set(PHASETRACER_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-add_subdirectory(${{PHASETRACER_ROOT}} ${{CMAKE_BINARY_DIR}}/PhaseTracer EXCLUDE_FROM_ALL)
+{dependency_cmake()}
 
 add_executable(run_model run_model.cpp)
 target_include_directories(run_model PRIVATE
@@ -953,6 +1036,15 @@ target_include_directories(source_probe PRIVATE
   ${{PHASETRACER_ROOT}}/include
 )
 target_link_libraries(source_probe PRIVATE phasetracer effectivepotential)
+
+add_executable(fixed_probe fixed_probe.cpp)
+target_include_directories(fixed_probe PRIVATE
+  ${{CMAKE_CURRENT_SOURCE_DIR}}
+  ${{PHASETRACER_ROOT}}/EffectivePotential/include
+  ${{PHASETRACER_ROOT}}/EffectivePotential/include/effectivepotential
+  ${{PHASETRACER_ROOT}}/include
+)
+target_link_libraries(fixed_probe PRIVATE phasetracer effectivepotential)
 """
     probe_lines = []
     for spec in fields:
@@ -995,6 +1087,79 @@ int main(int argc, char** argv) {{
     std::cerr << error.what() << "\\n";
     return EXIT_FAILURE;
   }}
+}}
+"""
+    fixed_field_read = "".join(f" >> fields.{field['name']}" for field in fields)
+    fixed_parameter_read = "".join(f" >> params.{coeff['name']}" for coeff in coefficients)
+    fixed_running_read = "".join(f" >> running.{name}" for name in running_inputs)
+    fixed_order_print = "\n".join(
+        f'    emit("orders.{order}", model.evaluate_v3d_{order}(fields, params, T, &running));'
+        for order, _ in v3d_terms
+    )
+    fixed_probe = f"""#include "{header_filename}"
+#include <cstdlib>
+#include <iomanip>
+#include <iostream>
+#include <sstream>
+#include <string>
+
+using Model = ptagent_3deft::{class_name};
+
+bool probe(const Model& model, std::istream& row, bool supplied_parameters) {{
+  try {{
+    double T;
+    Model::ThreeDFields fields{{}};
+    Model::ThreeDParameters params{{{direct_parameter_initializers}}};
+    Model::RunningParameters running{{{direct_running_initializers}}};
+    if (!(row >> T{fixed_field_read})) throw std::invalid_argument("Expected T and one canonical 3D value per field.");
+    if (supplied_parameters && !(row{fixed_parameter_read}{fixed_running_read}))
+      throw std::invalid_argument("Expected all frozen 3D coefficients and running inputs in metadata order.");
+    std::string extra;
+    if (row >> extra) throw std::invalid_argument("Unexpected extra point values.");
+    const auto emit = [](const char* label, double value) {{
+      if (!std::isfinite(value)) throw std::domain_error(std::string(label) + " must be finite.");
+      std::cout << label << " " << value << "\\n";
+    }};
+    const double v3d = model.evaluate_v3d(fields, params, T, &running);
+    const double prefactor = model.potential_prefactor(T, &running);
+{fixed_order_print}
+    emit("V3D", v3d);
+    emit("prefactor", prefactor);
+    emit("V", prefactor * v3d);
+    std::cout << "status evaluated\\n";
+    return true;
+  }} catch (const std::exception& error) {{
+    std::cerr << error.what() << "\\n";
+    std::cout << "status failed\\n";
+    return false;
+  }}
+}}
+
+int main(int argc, char** argv) {{
+  Model::InputParameters input{{}};
+{input_initializers}
+  Model model(input);
+  std::cout << std::setprecision(17);
+  if (argc == 2 && (std::string(argv[1]) == "--stdin" || std::string(argv[1]) == "--stdin-parameters")) {{
+    bool passed = true;
+    std::size_t count = 0;
+    std::string line;
+    while (std::getline(std::cin, line)) {{
+      if (line.find_first_not_of(" \\t\\r") == std::string::npos) continue;
+      std::istringstream row(line);
+      std::cout << "point " << count++ << "\\n";
+      passed = probe(model, row, std::string(argv[1]) == "--stdin-parameters") && passed;
+    }}
+    return passed && count > 0 ? EXIT_SUCCESS : EXIT_FAILURE;
+  }}
+  if (argc != {len(fields) + 2}) {{
+    std::cerr << "Usage: fixed_probe T FIELD_3D... | --stdin | --stdin-parameters; see metadata.fixed_probe.\\n";
+    return EXIT_FAILURE;
+  }}
+  std::ostringstream line;
+  for (int i = 1; i < argc; ++i) line << argv[i] << " ";
+  std::istringstream row(line.str());
+  return probe(model, row, false) ? EXIT_SUCCESS : EXIT_FAILURE;
 }}
 """
     metadata = {
@@ -1041,7 +1206,12 @@ int main(int argc, char** argv) {{
         "coefficient_order_sums": contract.get("three_d_coefficient_order_sums", []),
         "parameter_evaluator": contract.get("three_d_parameter_evaluator", []),
         "runtime_rg_running": runtime_rg,
-        "phase_tracer_native_rg": runtime_rg,
+        "phase_tracer_native_rg": False,
+        "rg_integration_backend": "boost_odeint_rk4" if runtime_rg else "none",
+        "rg_range_policy": "demand_driven_exact_target_cached_no_extrapolation" if runtime_rg else "none",
+        "rg_initialization": "lazy" if runtime_rg else "none",
+        "rg_configured_scale_bounds": {"minimum": rg_spline["min_scale"], "maximum": rg_spline["max_scale"]} if rg_spline else None,
+        "rg_legacy_spline_options": "Bounds constrain requests; step is a maximum RK4 scale step. No spline extrapolation or eager range integration." if runtime_rg else None,
         "rg_initial_scale": input_scale,
         "rg_target_scale_expression": running_scale_expression,
         "rg_spline_min_scale": rg_spline["min_scale"] if rg_spline else None,
@@ -1099,6 +1269,18 @@ int main(int argc, char** argv) {{
                 "4D RG, 4D-to-3D matching, and 3DUS-running path."
             ),
         },
+        "fixed_probe": {
+            "comparison_layer": "fixed_3d_expression_check_not_source_dralgo",
+            "coordinates": "canonical_3d",
+            "default_coefficients": "fixed_3d_reference.parameters_3d",
+            "default_running_inputs": "fixed_3d_reference.input_values",
+            "stdin_columns": ["T", *[field["name"] for field in fields]],
+            "stdin_parameters_columns": ["T", *[field["name"] for field in fields],
+                                         *[coeff["name"] for coeff in coefficients], *running_inputs],
+            "usage": "fixed_probe T FIELD_3D...; --stdin accepts one point per line; --stdin-parameters also reads all frozen coefficients and running inputs.",
+            "runtime_rg": False,
+            "success_meaning": "Finite evaluation only; numerical agreement requires a separate reference comparison.",
+        },
         "full_pipeline_reference_value_python": _metadata_number(reference_value),
         "full_pipeline_reference_is_diagnostic": False,
         "full_pipeline_reference_layer": "python_runtime_rg_matching_and_3dus_not_independent_dralgo",
@@ -1110,8 +1292,14 @@ int main(int argc, char** argv) {{
         "reference_candidate_attempt_count": len(reference_attempts),
         "reference_candidate_attempts": reference_attempts,
         "reference_invalid_terms": list(reference_result.get("invalid_terms", [])),
+        "reference_domain_diagnostics": reference_review["domain_diagnostics"],
         "warnings": warnings,
-        "reference_point_auto_selected": reference_point_auto_selected,
+        "reference_point_auto_selected": False,
+        "reference_selection_policy": "preserve_reviewed_reference_no_automatic_replacement",
+        "reference_suggestions": reference_suggestions,
+        "reference_suggestion_evaluation_limit": suggestion_evaluation_limit,
+        "reference_suggestion_evaluation_count": sum(item["numerically_evaluated"] for item in reference_suggestions),
+        "reference_suggestion_basis": "Dimensionless half/double rescalings of the reviewed temperature and field vector, globally and one coordinate at a time. Zero coordinates are preserved; no new field amplitude is inferred.",
         "reference_fields": reference_fields,
         "reference_temperature": eval_env["T"],
     }
@@ -1120,6 +1308,7 @@ int main(int argc, char** argv) {{
         "header": header,
         "run_model": run_model,
         "source_probe": source_probe,
+        "fixed_probe": fixed_probe,
         "cmake": cmake,
         "metadata": metadata,
     }
@@ -1434,11 +1623,16 @@ def _three_d_scale_alias_expressions(contract: dict[str, Any]) -> dict[str, str]
         result.setdefault("xi4", "1")
     if "xi_4" not in input_names:
         result.setdefault("xi_4", "xi4")
-    xi4_expression = "xi4" if "xi4" in input_names else "1"
+    rg_matching = contract.get("rg_matching", {})
+    hard_scale = _clean_expr(_running_scale_expression(
+        rg_matching.get("four_d_to_three_d_matching_scale", rg_matching.get("running_scale_choice", "T"))
+    ))
+    # DRalgo PrintConstants[]; the reviewed hard scale already contains any xi4 factor.
+    lb_expression = f"2*log(({hard_scale})/T) - 2*log(4*pi) + 2*EulerGamma"
     if "Lb" not in input_names:
-        result.setdefault("Lb", f"2*log({xi4_expression})")
+        result.setdefault("Lb", lb_expression)
     if "Lf" not in input_names:
-        result.setdefault("Lf", f"2*log({xi4_expression}) + 4*log(2)")
+        result.setdefault("Lf", f"({lb_expression}) + 4*log(2)")
     return result
 
 
@@ -2076,13 +2270,17 @@ def _render_running_alias_block(
     used_names: set[str],
     *,
     running_inputs: dict[str, dict[str, Any]] | None = None,
+    frozen_running: bool = False,
 ) -> str:
     active_running_inputs = inputs if running_inputs is None else running_inputs
     running_aliases = _render_running_aliases(active_running_inputs, used_names)
     fixed_aliases = _render_fixed_input_aliases(inputs, active_running_inputs, used_names)
     lines: list[str] = []
     if running_aliases:
-        lines.append(f"    const RunningParameters running = get_running_parameters(T);\n{running_aliases}")
+        running_value = "get_running_parameters(T)"
+        if frozen_running:
+            running_value = f"frozen_running ? checked_running_parameters(*frozen_running) : {running_value}"
+        lines.append(f"    const RunningParameters running = {running_value};\n{running_aliases}")
     if fixed_aliases:
         lines.append(fixed_aliases)
     return "\n".join(lines)
@@ -2147,7 +2345,7 @@ def _render_running_body(
             scale_alias_block,
             f"    const double target_scale = {scale_cpp};",
             '    require_positive_scale(target_scale, "RG target scale");',
-            "    return running_from_phase_tracer_splines(target_scale);",
+            "    return running_at_scale(target_scale);",
         ]
     ).lstrip("\n")
 
@@ -2225,49 +2423,101 @@ def _running_spline_config(
     input_scale: float | None,
     target_scale: float | None,
     ode_steps: int,
-) -> dict[str, float]:
+) -> dict[str, float | None]:
+    """Interpret legacy spline options as demand-driven integration limits."""
     if input_scale is None or target_scale is None:
-        raise ThreeDeftBlocked("PhaseTracer-native RG setup needs numeric input and target scales.")
+        raise ThreeDeftBlocked("4D RG setup needs numeric input and target scales.")
     _require_positive_scale(input_scale, "4D input_scale")
     _require_positive_scale(target_scale, "4D target_scale")
-    default_min = min(input_scale, target_scale, 1.0)
-    default_max = max(input_scale, target_scale, 5000.0)
     min_scale = _interface_number_any(interface, "rg_spline_min_scale", "rg_min_scale")
     max_scale = _interface_number_any(interface, "rg_spline_max_scale", "rg_max_scale")
-    min_scale = default_min if min_scale is None else min_scale
-    max_scale = default_max if max_scale is None else max_scale
-    _require_positive_scale(min_scale, "RG spline minimum scale")
-    _require_positive_scale(max_scale, "RG spline maximum scale")
-    if min_scale >= max_scale:
-        max_scale = min_scale * 1.01
-        _require_positive_scale(max_scale, "RG spline maximum scale")
-    default_step = min(1.0, max(1e-5, (max_scale - min_scale) / max(float(ode_steps), 1.0)))
+    for value, label in ((min_scale, "minimum"), (max_scale, "maximum")):
+        if value is not None:
+            _require_positive_scale(value, f"RG applicability {label} scale")
+    if min_scale is not None and max_scale is not None and min_scale >= max_scale:
+        raise ThreeDeftBlocked("RG applicability minimum scale must be below maximum scale.")
+    for scale in (input_scale, target_scale):
+        if (min_scale is not None and scale < min_scale) or (max_scale is not None and scale > max_scale):
+            raise ThreeDeftBlocked(f"RG input/reference scale {scale} is outside the configured applicability range.")
     step = _interface_number_any(interface, "rg_spline_step", "rg_step")
-    step = default_step if step is None else step
-    _require_positive_scale(step, "RG spline step")
-    return {"input_scale": input_scale, "min_scale": min_scale, "max_scale": max_scale, "step": step}
+    step = 1.0 if step is None else step
+    _require_positive_scale(step, "4D RG maximum scale step")
+    return {"input_scale": input_scale, "min_scale": min_scale, "max_scale": max_scale, "step": step, "ode_steps": ode_steps}
 
 
-def _render_phase_tracer_rg_helpers(inputs: dict[str, dict[str, Any]], *, rg_spline: dict[str, float] | None) -> str:
+def _render_phase_tracer_rg_helpers(inputs: dict[str, dict[str, Any]], *, rg_spline: dict[str, float | None] | None) -> str:
     if not inputs or rg_spline is None:
         return ""
     vector_values = ", ".join(f"input_.{name}" for name in inputs)
-    spline_values = ", ".join(f"alglib::spline1dcalc(RGEs[{index}], scale)" for index, _name in enumerate(inputs))
-    return f"""  void initialise_phase_tracer_rg() {{
-    const std::vector<double> x0 = initial_running_vector();
-    solveBetas(x0, {_cpp_float(rg_spline['input_scale'])}, {_cpp_float(rg_spline['min_scale'])}, {_cpp_float(rg_spline['max_scale'])}, {_cpp_float(rg_spline['step'])});
-  }}
-
-  std::vector<double> initial_running_vector() const {{
+    state_values = ", ".join(f"state.at({index})" for index, _name in enumerate(inputs))
+    derivative_values = ", ".join(f"beta.{name} / mu" for name in inputs)
+    bounds = []
+    for key, op in (("min_scale", "<"), ("max_scale", ">")):
+        if rg_spline[key] is not None:
+            bounds.append(f"scale {op} {_cpp_float(rg_spline[key])}")
+    range_check = ""
+    if bounds:
+        range_check = f'''    if ({" || ".join(bounds)}) {{
+      throw std::domain_error("4D RG applicability failure: requested scale " + std::to_string(scale) +
+        " GeV is outside the configured RG range; extrapolation is disabled.");
+    }}'''
+    return f"""  std::vector<double> initial_running_vector() const {{
     return std::vector<double>{{{vector_values}}};
   }}
 
-  RunningParameters running_from_phase_tracer_splines(double scale) const {{
-    require_positive_scale(scale, "RG spline scale");
-    if (RGEs.size() != {len(inputs)}) {{
-      throw std::runtime_error("PhaseTracer RG splines were not initialized.");
+  // Integrate only the requested interval; failed requests never poison the cache.
+  RunningParameters running_at_scale(double scale) const {{
+    require_positive_scale(scale, "4D RG requested scale");
+{range_check}
+    {{
+      const std::lock_guard<std::mutex> lock(running_cache_->mutex);
+      const auto cached = running_cache_->values.find(scale);
+      if (cached != running_cache_->values.end()) return cached->second;
     }}
-    return checked_running_parameters(RunningParameters{{{spline_values}}});
+    const double input_scale = {_cpp_float(rg_spline['input_scale'])};
+    std::vector<double> state = initial_running_vector();
+    if (scale == input_scale) return checked_running_parameters(RunningParameters{{{state_values}}});
+    const double distance = std::abs(scale - input_scale);
+    const double step_limit = std::min({_cpp_float(rg_spline['step'])},
+      std::max(std::numeric_limits<double>::denorm_min(), distance / {_cpp_float(rg_spline['ode_steps'])}));
+    const double step_count = std::ceil(distance / step_limit);
+    if (!std::isfinite(step_count) || step_count >= static_cast<double>(std::numeric_limits<std::size_t>::max())) {{
+      throw std::domain_error("4D RG applicability failure: requested interval cannot be represented by the RG grid.");
+    }}
+    const std::size_t steps = static_cast<std::size_t>(step_count);
+    boost::numeric::odeint::runge_kutta4<std::vector<double>> stepper;
+    double last_scale = input_scale;
+    double evaluation_scale = input_scale;
+    const auto rhs = [this, &evaluation_scale](const std::vector<double>& state, std::vector<double>& derivative, double mu) {{
+      evaluation_scale = mu;
+      const auto beta = beta_functions(RunningParameters{{{state_values}}}, mu);
+      derivative = std::vector<double>{{{derivative_values}}};
+      for (double value : derivative) require_finite(value, "4D RG derivative");
+    }};
+    try {{
+      for (std::size_t i = 0; i < steps; ++i) {{
+        const double next_scale = i + 1 == steps ? scale :
+          input_scale + (scale - input_scale) * (static_cast<double>(i + 1) / steps);
+        if (next_scale == last_scale) continue;
+        stepper.do_step(rhs, state, last_scale, next_scale - last_scale);
+        checked_running_parameters(RunningParameters{{{state_values}}});
+        last_scale = next_scale;
+      }}
+    }} catch (const std::exception& error) {{
+      std::ostringstream message;
+      message.precision(17);
+      message << "4D RG applicability failure: input scale " << input_scale
+        << " GeV, requested scale " << scale << " GeV, last finite step " << last_scale
+        << " GeV, failing evaluation near " << evaluation_scale << " GeV: " << error.what()
+        << " No extrapolated value was returned; this is a numerical validity limit, not a measured pole scale.";
+      throw std::domain_error(message.str());
+    }}
+    const auto result = checked_running_parameters(RunningParameters{{{state_values}}});
+    {{
+      const std::lock_guard<std::mutex> lock(running_cache_->mutex);
+      running_cache_->values.emplace(scale, result);
+    }}
+    return result;
   }}
 """
 
@@ -2835,6 +3085,55 @@ def _eval_expr_or_nan(expression: str, env: dict[str, float]) -> float:
         return math.nan
 
 
+def _reference_domain_diagnostics(
+    terms: list[tuple[str, str]], env: dict[str, float], *, limit: int = 16,
+) -> list[dict[str, Any]]:
+    """Identify actual invalid real operations, without altering their operands."""
+    diagnostics: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for order, expression in terms:
+        for node in ast.walk(ast.parse(expression, mode="eval")):
+            operation = ""
+            operands: list[ast.AST] = []
+            if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Pow, ast.Div)):
+                operation = "pow" if isinstance(node.op, ast.Pow) else "divide"
+                operands = [node.left, node.right]
+            elif isinstance(node, ast.Call):
+                name = node.func.id if isinstance(node.func, ast.Name) else getattr(node.func, "attr", "")
+                if name in {"sqrt", "log", "pow"}:
+                    operation, operands = name, node.args
+            if not operation:
+                continue
+            values = [_eval_expr_or_nan(ast.unparse(arg), env) for arg in operands]
+            if not all(math.isfinite(value) for value in values):
+                continue  # Diagnose the inner operation instead of its consequences.
+            reason = ""
+            if operation == "sqrt" and len(values) == 1 and values[0] < 0:
+                reason = "negative square-root argument"
+            elif operation == "log" and len(values) == 1 and values[0] <= 0:
+                reason = "nonpositive logarithm argument"
+            elif operation == "pow" and len(values) == 2:
+                if values[0] < 0 and not values[1].is_integer():
+                    reason = "negative base with noninteger exponent"
+                elif values[0] == 0 and values[1] < 0:
+                    reason = "zero base with negative exponent"
+            elif operation == "divide" and len(values) == 2 and values[1] == 0:
+                reason = "zero denominator"
+            if reason:
+                source = ast.unparse(node)
+                key = (order, source)
+                if key not in seen:
+                    seen.add(key)
+                    diagnostics.append({
+                        "term": f"V3D_{order}", "operation": operation,
+                        "expression": source[:600], "expression_truncated": len(source) > 600,
+                        "operand_values": values, "reason": reason,
+                    })
+                if len(diagnostics) >= limit:
+                    return diagnostics
+    return diagnostics
+
+
 def _metadata_number(value: float) -> float | None:
     return value if math.isfinite(value) else None
 
@@ -3031,10 +3330,10 @@ def _numbers(value: Any) -> list[float]:
 
 
 def _reference_candidate_temperatures(original: float) -> list[float]:
-    candidates = [original, 100.0, 150.0, 50.0, 200.0, 10.0, 300.0]
     result: list[float] = []
-    for value in candidates:
-        if value > 0.0 and all(not _close_enough(value, existing) for existing in result):
+    for factor in (1.0, 0.5, 2.0):
+        value = original * factor
+        if math.isfinite(value) and value > 0.0 and value not in result:
             result.append(value)
     return result
 
@@ -3047,16 +3346,16 @@ def _reference_candidate_vectors(field_count: int, original: list[float]) -> lis
             return
         if not all(math.isfinite(value) for value in values):
             return
-        if not any(all(_close_enough(left, right) for left, right in zip(values, existing)) for existing in candidates):
+        if values not in candidates:
             candidates.append(values)
 
     add(list(original))
-    for magnitude in (1.0, 10.0, 50.0, 100.0, 150.0, 200.0):
-        add([magnitude] * field_count)
-    if field_count == 2:
-        for left in (10.0, 50.0, 100.0, 200.0):
-            for right in (10.0, 50.0, 100.0, 200.0):
-                add([left, right])
+    for factor in (0.5, 2.0):
+        add([factor * value for value in original])
+        for index in range(field_count):
+            values = list(original)
+            values[index] *= factor
+            add(values)
     return candidates
 
 

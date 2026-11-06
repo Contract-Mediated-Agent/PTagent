@@ -49,7 +49,8 @@ def analyze_sign_flip_symmetries(
     The expression is parsed but never evaluated. A candidate is returned only
     when every supported AST branch has a definite even parity under the same
     field reflection. Unknown constructs produce false negatives, not guessed
-    symmetries.
+    symmetries. Invariant compositions preserve the expression's existing
+    domain and branch convention; they do not establish global real-valuedness.
     """
 
     fields = tuple(dict.fromkeys(str(name).strip() for name in field_names if str(name).strip()))
@@ -90,7 +91,9 @@ def analyze_sign_flip_symmetries(
     if candidates:
         reason = (
             "The tree-level expression is invariant under the listed independent sign-flip generators "
-            "by a conservative AST parity check. Loop, thermal, counterterm, gauge-fixing, and source "
+            "by a conservative AST parity check on the same defined domain and with the same "
+            "branch convention. This does not establish global real-valuedness. "
+            "Loop, thermal, counterterm, gauge-fixing, and source "
             "conventions still require review."
         )
         status = "candidates_found"
@@ -225,7 +228,9 @@ def _node_parity(
         if isinstance(node.op, ast.Pow):
             exponent = _literal_integer(node.right)
             if exponent is None:
-                return 0 if not _contains_flipped_field(node, flipped, assignments) else None
+                # Identical operands preserve the same power and its domain,
+                # without changing branches or replacing the base with abs(base).
+                return 0 if left == 0 and right == 0 else None
             return None if left is None else (left * exponent) % 2
         return None
     if isinstance(node, ast.IfExp):
@@ -234,6 +239,8 @@ def _node_parity(
         other = _node_parity(node.orelse, flipped, assignments, resolving)
         return body if test == 0 and body is not None and body == other else None
     if isinstance(node, ast.Call):
+        if _contains_flipped_field(node.func, flipped, assignments):
+            return None
         parities = [
             _node_parity(argument, flipped, assignments, resolving)
             for argument in node.args

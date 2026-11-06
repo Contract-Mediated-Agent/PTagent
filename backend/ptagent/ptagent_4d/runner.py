@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import inspect
 import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any
 
 from .config import Settings
+from .ct_diagnostics import observe_ct_nucleation
 from .schemas import PhaseHistoryResult
 
 
@@ -37,10 +39,14 @@ p = {str(model_path)!r}
 spec = importlib.util.spec_from_file_location('generated_model', p)
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
+signature = inspect.signature(m.build_model)
+controls = {{'run_tc': False, 'print_tc': False}}
 try:
-    model = m.build_model(run_tc=False, print_tc=False)
+    signature.bind(**controls)
 except TypeError:
-    model = m.build_model()
+    signature.bind()
+    controls = {{}}
+model = m.build_model(**controls)
 
 def assert_finite(name, value):
     arr = np.asarray(value, dtype=float)
@@ -372,6 +378,16 @@ def should_run_finite_vtot_check():
         return False, 'missing public input provenance: ' + repr(sorted(untraced))
     return True, 'all defaults are reviewed benchmark/source/user/standard/range-midpoint values'
 
+try:
+    diagnostic_scale_sq = float(model.renormScaleSq)
+except (AttributeError, TypeError, ValueError, OverflowError) as exc:
+    raise ValueError('Import-check diagnostics require a finite positive model.renormScaleSq') from exc
+if not np.isfinite(diagnostic_scale_sq) or diagnostic_scale_sq <= 0:
+    raise ValueError('Import-check diagnostics require a finite positive model.renormScaleSq')
+diagnostic_scale = float(np.sqrt(diagnostic_scale_sq))
+print('INFO: import-check diagnostic scale Q=sqrt(model.renormScaleSq)=' + repr(diagnostic_scale)
+      + '; diagnostic coordinates only, model settings unchanged')
+
 mins = model.approxZeroTMin()
 if not isinstance(mins, (list, tuple)) or len(mins) == 0:
     raise TypeError('approxZeroTMin() must return a non-empty list/tuple of one-dimensional field arrays')
@@ -380,7 +396,7 @@ if x.shape != (model.Ndim,):
     raise ValueError(f'approxZeroTMin()[0] must have shape (Ndim,), got {{x.shape}} with Ndim={{model.Ndim}}')
 assert_finite('V0(x)', model.V0(x))
 xb = np.stack([x, x + 0.0], axis=0)
-Tb = np.asarray([1.0, 2.0], dtype=float)
+Tb = diagnostic_scale * np.asarray([0.01, 0.02], dtype=float)
 assert_finite('V0(xb)', model.V0(xb))
 for forbid_label, forbid_X in (('x', x), ('xb', xb)):
     forbid_value = model.forbidPhaseCrit(forbid_X)
@@ -410,14 +426,14 @@ if np.asarray(fermions_batch[0]).shape[:-1] != np.shape(xb[..., 0]):
 
 run_vtot_check, vtot_check_reason = should_run_finite_vtot_check()
 if run_vtot_check:
-    for test_T in (0.0, 1.0, 100.0):
+    for test_T in (0.0, 0.01*diagnostic_scale, diagnostic_scale):
         assert_finite(f'Vtot(x, T={{test_T}})', model.Vtot(x, test_T, include_radiation=False))
     for helper_name in ('Vdaisy', 'Vring', 'V1T_from_X'):
         helper = getattr(model, helper_name, None)
         if helper is not None:
-            assert_finite(helper_name + '(x, T=100)', helper(x, 100.0))
-    x_probe = x + np.linspace(0.5, 1.5, model.Ndim)
-    assert_finite('Vtot(x_probe, T=100)', model.Vtot(x_probe, 100.0, include_radiation=False))
+            assert_finite(helper_name + '(x, T=Q)', helper(x, diagnostic_scale))
+    x_probe = x + diagnostic_scale * np.linspace(0.01, 0.02, model.Ndim)
+    assert_finite('Vtot(x_probe, T=Q)', model.Vtot(x_probe, diagnostic_scale, include_radiation=False))
     assert_finite('Vtot(xb, Tb)', model.Vtot(xb, Tb, include_radiation=False))
     print('INFO: finite Vtot BP check passed: ' + vtot_check_reason)
 else:
@@ -425,6 +441,8 @@ else:
 print(m.MODEL_METADATA.get('model_name', 'ok'))
 """
     result = subprocess.run([str(settings.runtime_python), "-c", code], capture_output=True, text=True, timeout=30)
+    if result.returncode != 0:
+        return False, "\n".join(part.strip() for part in (result.stdout, result.stderr) if part.strip())
     return result.returncode == 0, (result.stdout or result.stderr).strip()
 
 
@@ -433,19 +451,34 @@ def run_phase_history(
     settings: Settings,
     *,
     parameters: dict[str, Any] | None = None,
+    stage: str = "critical",
 ) -> PhaseHistoryResult:
+    if stage not in ("critical", "nucleation"):
+        return PhaseHistoryResult(
+            status="error", model_path=str(model_path), inputs=parameters or {}, stage=stage,
+            summary="Runtime stage must be critical or nucleation.",
+        )
+    if parameters and "stage" in parameters:
+        return PhaseHistoryResult(
+            status="error", model_path=str(model_path), inputs=parameters, stage=stage,
+            summary="stage is a runtime control, not a model parameter; use --stage or the stage keyword argument.",
+        )
     ok, message = check_runtime(settings)
     if not ok:
-        return PhaseHistoryResult(status="runtime_unavailable", model_path=str(model_path), summary=message)
+        return PhaseHistoryResult(status="runtime_unavailable", model_path=str(model_path), summary=message, stage=stage)
 
-    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as handle:
-        json.dump(parameters or {}, handle)
-        params_path = Path(handle.name)
-    try:
+    with tempfile.TemporaryDirectory(prefix="ptagent-runtime-") as directory:
+        params_path = Path(directory) / "parameters.json"
+        result_path = Path(directory) / "result.json"
+        params_path.write_text(json.dumps(parameters or {}), encoding="utf-8")
+        # Solver progress (including native stdout writes) is not the JSON protocol.
         code = f"""
-import importlib.util, json
+import importlib.util, inspect, json, traceback
+{inspect.getsource(observe_ct_nucleation)}
 p = {str(model_path)!r}
 params_path = {str(params_path)!r}
+result_path = {str(result_path)!r}
+stage = {stage!r}
 spec = importlib.util.spec_from_file_location('generated_model', p)
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
@@ -453,71 +486,197 @@ with open(params_path, 'r', encoding='utf-8') as handle:
     params = json.load(handle)
 numerical = getattr(m, 'NUMERICAL_SETTINGS', {{}})
 if numerical and not numerical.get('Tmax_approved', False):
-    print(json.dumps({{'status': 'waiting_for_Tmax_approval', 'parameters': params,
-                      'summary': m.TMAX_APPROVAL_MESSAGE, 'numerical_settings': numerical}}))
-    raise SystemExit(0)
-if isinstance(params, dict) and params:
-    try:
-        result = m.run_transitions(**params)
-    except TypeError:
-        result = m.run_transitions(params)
+    result = {{'status': 'waiting_for_Tmax_approval', 'parameters': params,
+               'summary': m.TMAX_APPROVAL_MESSAGE, 'numerical_settings': numerical}}
 else:
-    result = m.run_transitions()
-print(json.dumps(result, ensure_ascii=False))
-"""
-        result = subprocess.run(
-            [str(settings.runtime_python), "-c", code],
-            capture_output=True,
-            text=True,
-            timeout=180,
-        )
-    finally:
-        try:
-            params_path.unlink()
-        except OSError:
-            pass
-
-    if result.returncode != 0:
-        return PhaseHistoryResult(
-            status="error",
-            model_path=str(model_path),
-            inputs=parameters or {},
-            summary=(result.stderr or result.stdout).strip(),
-        )
+    signature = inspect.signature(m.run_transitions)
+    stage_parameter = signature.parameters.get('stage')
+    supports_stage = stage_parameter is not None and stage_parameter.kind in (
+        inspect.Parameter.KEYWORD_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+    if stage == 'nucleation' and not supports_stage:
+        raise RuntimeError('Generated model does not expose an explicit stage control; '
+                           'regenerate it with nucleation support. No critical-stage fallback was run.')
+    controls = {{'stage': stage}} if supports_stage else {{}}
+    arguments = ()
+    keywords = {{**params, **controls}}
     try:
-        payload = json.loads(result.stdout)
-    except json.JSONDecodeError as exc:
+        signature.bind(**keywords)
+    except TypeError:
+        signature.bind(params, **controls)
+        arguments, keywords = (params,), controls
+    diagnostics = {{}}
+    try:
+        operation = lambda: m.run_transitions(*arguments, **keywords)
+        result = (observe_ct_nucleation(operation, diagnostics=diagnostics,
+                                       serialize_transition=getattr(m, '_ptagent_transition_payload', None))
+                  if stage == 'nucleation' else operation())
+    except Exception as exc:
+        traceback.print_exc()
+        result = {{'status': 'error', 'stage': stage, 'parameters': params,
+                   'summary': type(exc).__name__ + ': ' + str(exc), 'transitions': []}}
+        # Keep validated earlier transitions usable; rejected/raw native values
+        # remain separately available in the diagnostic record.
+        result['transitions'] = diagnostics.get('validated_transitions', [])
+        result.update(getattr(exc, 'ptagent_phase_history', {{}}))
+    if isinstance(result, dict) and diagnostics:
+        if diagnostics.get('status') != 'unavailable' or 'nucleation_diagnostics' not in result:
+            result['nucleation_diagnostics'] = diagnostics
+with open(result_path, 'w', encoding='utf-8') as handle:
+    json.dump(result, handle, ensure_ascii=False, allow_nan=False)
+"""
+        try:
+            result = subprocess.run(
+                [str(settings.runtime_python), "-u", "-c", code],
+                capture_output=True,
+                text=True,
+                timeout=180,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            summary = (
+                f"Runtime TimeoutExpired after {exc.timeout} seconds."
+                if isinstance(exc, subprocess.TimeoutExpired)
+                else f"Runtime {type(exc).__name__}: {exc}"
+            )
+            return PhaseHistoryResult(
+                status="error",
+                model_path=str(model_path),
+                inputs=parameters or {},
+                summary=summary,
+                stage=stage,
+                solver_stdout=_runtime_log_text(getattr(exc, "stdout", None)),
+                solver_stderr=_runtime_log_text(getattr(exc, "stderr", None)),
+            )
+        logs = {"solver_stdout": result.stdout, "solver_stderr": result.stderr, "stage": stage}
+        if result.returncode != 0:
+            return PhaseHistoryResult(
+                status="error",
+                model_path=str(model_path),
+                inputs=parameters or {},
+                summary=f"Runtime exited with code {result.returncode}: " + (result.stderr or result.stdout).strip(),
+                **logs,
+            )
+        try:
+            payload = json.loads(result_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            return PhaseHistoryResult(
+                status="error",
+                model_path=str(model_path),
+                inputs=parameters or {},
+                summary=f"Could not read runtime JSON result: {type(exc).__name__}: {exc}",
+                **logs,
+            )
+
+    if not isinstance(payload, dict):
         return PhaseHistoryResult(
             status="error",
             model_path=str(model_path),
             inputs=parameters or {},
-            summary=f"Could not parse runtime JSON: {exc}: {result.stdout[:400]}",
+            summary="Invalid runtime JSON result: expected an object.",
+            **logs,
         )
     if payload.get("status") == "waiting_for_Tmax_approval":
         return PhaseHistoryResult(
             status="waiting_for_Tmax_approval",
             model_path=str(model_path),
             inputs=parameters or {},
-            summary=payload["summary"],
+            summary=payload.get("summary", "Runtime requires Tmax approval."),
+            **logs,
         )
-    transitions = payload.get("transitions", [])
-    tc_list = [item.get("Tc") for item in transitions]
-    tn_list = [item.get("Tn") for item in transitions]
+    if payload.get("stage", stage) != stage:
+        return PhaseHistoryResult(
+            status="error", model_path=str(model_path), inputs=parameters or {},
+            summary=f"Runtime returned stage {payload['stage']!r} for requested stage {stage!r}.",
+            **logs,
+        )
+    phases = payload.get("phases")
+    phase_diagnostics = payload.get("phase_diagnostics")
+    if phases is not None and (not isinstance(phases, list)
+                               or not all(isinstance(item, dict) for item in phases)):
+        return PhaseHistoryResult(
+            status="error", model_path=str(model_path), inputs=parameters or {},
+            summary="Invalid runtime JSON result: phases must be a list of objects or null.", **logs,
+        )
+    if phase_diagnostics is not None and not isinstance(phase_diagnostics, dict):
+        return PhaseHistoryResult(
+            status="error", model_path=str(model_path), inputs=parameters or {},
+            summary="Invalid runtime JSON result: phase_diagnostics must be an object or null.", **logs,
+        )
+    reported_error = payload.get("status", "success") not in ("success", "partial")
+    transitions = payload.get("transitions", [] if reported_error else None)
+    if not isinstance(transitions, list) or not all(isinstance(item, dict) for item in transitions):
+        return PhaseHistoryResult(
+            status="error",
+            model_path=str(model_path),
+            inputs=parameters or {},
+            summary="Invalid runtime JSON result: transitions must be a list of objects.",
+            **logs,
+        )
+    for item in transitions:
+        if item.get("trantype") == 2:
+            if "Tnuc" in item:
+                item.setdefault("second_order_temperature", item["Tnuc"])
+            item.pop("Tn", None)
+    nucleation_transitions = [item for item in transitions if item.get("trantype") != 2]
+    tc_list = [_critical_temperature(item) for item in transitions]
+    tn_list = [item.get("Tn", item.get("Tnuc")) for item in nucleation_transitions]
     action_over_t = [
-        _action_over_t(item.get("action"), item.get("Tn"))
-        for item in transitions
+        _action_over_t(item.get("action"), temperature)
+        for item, temperature in zip(nucleation_transitions, tn_list)
     ]
+    count = len(nucleation_transitions) if stage == "nucleation" else len(transitions)
+    summary = f"Found {count} {stage} transition(s)."
+    second_order_count = len(transitions) - len(nucleation_transitions)
+    if stage == "nucleation" and second_order_count:
+        summary += f" Preserved {second_order_count} second-order transition(s)."
+    status = "error" if reported_error else payload.get("status", "success")
+    warnings = list(payload.get("warnings", []))
+    diagnostics = payload.get("nucleation_diagnostics", {})
+    if not isinstance(diagnostics, dict):
+        return PhaseHistoryResult(
+            status="error", model_path=str(model_path), inputs=parameters or {},
+            summary="Invalid runtime JSON result: nucleation_diagnostics must be an object.", **logs,
+        )
+    if diagnostics and diagnostics.get("status") in ("failed", "partial", "unavailable"):
+        status = "partial" if transitions else "error"
+        summary = "Nucleation history incomplete; native numerical/coverage diagnostics are retained."
+        if not nucleation_transitions:
+            summary += " Tn is numerically unavailable, not a physical no-transition result."
+        warnings.append("The native cooling history is incomplete; unresolved channels were not skipped or retuned.")
+        if diagnostics.get("status") == "unavailable" or diagnostics.get("observation_errors"):
+            warnings.append("Native CT diagnostic coverage is unavailable or unsupported; no complete history is certified.")
+    if reported_error:
+        summary += " Runtime reported " + repr(payload.get("status")) + ": " + str(payload.get("summary") or payload.get("error") or "unspecified failure")
+    labels = (_classify_path(transitions) if stage == "nucleation" else
+              ["critical_transitions" if transitions else "no_critical_transitions"])
+    if stage == "nucleation" and status != "success":
+        labels = ["partial_nucleation_history" if transitions else "nucleation_numerically_unavailable"]
     return PhaseHistoryResult(
-        status="success",
+        status=status,
         model_path=str(model_path),
         inputs=payload.get("parameters", parameters or {}),
         transitions=transitions,
         Tc_list=tc_list,
         Tn_list=tn_list,
         action_over_T=action_over_t,
-        path_labels=_classify_path(transitions),
-        summary=f"Found {len(transitions)} nucleation transition(s).",
+        path_labels=labels,
+        summary=summary,
+        warnings=warnings,
+        nucleation_diagnostics=diagnostics,
+        symmetry_diagnostics=payload.get("symmetry_diagnostics", []),
+        phases=phases,
+        phase_diagnostics=phase_diagnostics,
+        **logs,
     )
+
+
+def _runtime_log_text(value: str | bytes | None) -> str:
+    return value.decode("utf-8", errors="replace") if isinstance(value, bytes) else (value or "")
+
+
+def _critical_temperature(transition: dict[str, Any]) -> Any:
+    associated = transition.get("crit_trans")
+    associated_tc = associated.get("Tcrit") if isinstance(associated, dict) else None
+    return transition.get("Tc", transition.get("Tcrit", associated_tc))
 
 
 def _action_over_t(action: object, temperature: object) -> float | None:
@@ -530,6 +689,7 @@ def _action_over_t(action: object, temperature: object) -> float | None:
 
 
 def _classify_path(transitions: list[dict[str, Any]]) -> list[str]:
+    transitions = [item for item in transitions if item.get("trantype") != 2]
     labels: list[str] = []
     if not transitions:
         return ["no_nucleation_history"]

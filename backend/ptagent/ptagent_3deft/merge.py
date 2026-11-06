@@ -9,7 +9,7 @@ from typing import Any
 
 from .contract import ThreeDeftBlocked, parse_contract, validate_contract_template
 from .layout import contract_dir_for_template
-from .mathematica_expr import repair_reserved_identifier
+from .mathematica_expr import canonical_source_symbol, is_reserved_identifier, repair_reserved_identifier
 
 
 MERGED_CONTRACT_NAME = "three_deft_contract_merged.md"
@@ -52,6 +52,11 @@ def merge_dralgo_output_into_contract(
     markdown, normalization_updates = _normalize_three_d_field_normalizations(markdown, contract)
     updates.extend(normalization_updates)
     if normalization_updates:
+        contract = parse_contract(markdown)
+
+    markdown, alias_updates = _propagate_captured_field_aliases(markdown, contract, output)
+    updates.extend(alias_updates)
+    if alias_updates:
         contract = parse_contract(markdown)
 
     scalar_rows = _scalar_index_rows(output, contract)
@@ -162,6 +167,90 @@ def merge_dralgo_output_into_contract(
         ready_for_compile=report.ready_for_compile,
         blocking_issue_count=len(report.issues),
     )
+
+
+def _propagate_captured_field_aliases(
+    markdown: str, contract: dict[str, Any], output: dict[str, Any],
+) -> tuple[str, list[str]]:
+    fields = contract.get("three_d_fields", [])
+    raw_fields = {canonical_source_symbol(str(row.get("dralgo_background_symbol", ""))) for row in fields}
+    aliases: dict[str, str] = {}
+
+    def collect(value: Any) -> None:
+        if isinstance(value, list):
+            for item in value:
+                collect(item)
+        elif isinstance(value, dict):
+            for raw, target in value.get("symbol_map", {}).items():
+                raw = canonical_source_symbol(raw)
+                if raw not in raw_fields:
+                    continue
+                if (not isinstance(target, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", target)
+                        or is_reserved_identifier(target)):
+                    raise ThreeDeftBlocked(f"Field symbol alias conflict: invalid target {target!r}.")
+                if raw in aliases and aliases[raw] != target:
+                    raise ThreeDeftBlocked(f"Field symbol alias conflict for {raw!r}: {aliases[raw]!r} versus {target!r}.")
+                aliases[raw] = target
+            for key, item in value.items():
+                if key not in {"symbol_map", "cform_symbol_map", "cform_post_map"}:
+                    collect(item)
+
+    collect(output.get("effective_potential_phase_tracer"))
+    if not aliases:
+        return markdown, []
+    renamed: dict[str, str] = {}
+    rewritten = []
+    occupied = {str(row.get("name", "")) for table in ("input_parameters", "three_d_coefficients")
+                for row in contract.get(table, [])}
+    for row in fields:
+        item = dict(row)
+        raw = canonical_source_symbol(str(row.get("dralgo_background_symbol", "")))
+        old = str(row.get("name", ""))
+        name = aliases.get(raw, old)
+        if name in occupied:
+            raise ThreeDeftBlocked(f"Field symbol alias collision at {name!r}.")
+        occupied.add(name)
+        if name != old:
+            if old in renamed and renamed[old] != name:
+                raise ThreeDeftBlocked(f"Field symbol alias ambiguous for {old!r}.")
+            renamed[old] = name
+            item["name"] = name
+            item["evidence"] = _append_note(item.get("evidence"), f"Captured source symbol {raw} maps to {name}; previous metadata name {old}.")
+        rewritten.append(item)
+    audit = []
+    audit_changed = False
+    for row in contract.get("symbol_audit", []):
+        item = dict(row)
+        raw = canonical_source_symbol(str(row.get("raw_symbol", "")))
+        if str(row.get("physics_role", "")).casefold() == "field" and raw in aliases:
+            for key in ("suggested_symbol", "compiler_symbol"):
+                if item.get(key) != aliases[raw]:
+                    item[key] = aliases[raw]
+                    audit_changed = True
+        audit.append(item)
+    if not renamed and not audit_changed:
+        return markdown, []
+    markdown = _replace_table_rows(markdown, "3D Fields", _render_rows(rewritten,
+        ("name", "dralgo_background_symbol", "source_scalar_indices", "normalization", "phase_tracer_slot", "evidence")))
+    if audit_changed:
+        markdown = _replace_table_rows(markdown, "Mathematica Symbol Audit", _render_rows(audit,
+            ("raw_symbol", "suggested_symbol", "compiler_symbol", "physics_role", "cform_temp_symbol", "source", "status", "notes")))
+    interface_rows = []
+    interface_changed = False
+    for row in contract.get("phasetracer_interface", []):
+        item = dict(row)
+        if row.get("key") in {"symmetry_rules", "symmetry_rule", "symmetry_fields", "symmetry_field_groups", "z2_reflection_fields"}:
+            # Replace complete identifiers without changing grouping or repeated rows.
+            rules = re.sub(r"\b[A-Za-z_][A-Za-z0-9_]*\b", lambda match: renamed.get(match[0], match[0]), str(row.get("value", "")))
+            if rules != row.get("value"):
+                item["value"] = rules
+                item["notes"] = _append_note(row.get("notes"), "Field names aligned with captured source symbol aliases; reflection policy unchanged.")
+                interface_changed = True
+        interface_rows.append(item)
+    if interface_changed:
+        markdown = _replace_table_rows(markdown, "PhaseTracer Potential Interface", _render_rows(interface_rows,
+            ("key", "value", "status", "notes")))
+    return markdown, ["field_aliases:captured_source_symbols"]
 
 
 def _normalize_input_parameter_identifiers(markdown: str, contract: dict[str, Any]) -> tuple[str, list[str]]:

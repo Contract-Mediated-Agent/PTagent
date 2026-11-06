@@ -10,6 +10,7 @@ from .config import (
     ConfigurationError,
     DEFAULT_RUNTIME_PYTHON,
     default_user_config_path,
+    executable_path,
     get_settings,
     load_user_config,
     require_configured_runtime_python,
@@ -179,6 +180,7 @@ def build_parser() -> argparse.ArgumentParser:
     run = sub.add_parser("run", help="Run phase-history analysis for a generated model.")
     run.add_argument("--model", required=True, help="Generated model Python file.")
     run.add_argument("--parameters", default="", help="Optional JSON object or JSON file with parameter overrides.")
+    run.add_argument("--stage", choices=["critical", "nucleation"], default="critical", help="Calculation stage, separate from physical model parameters. Default: critical.")
 
     return parser
 
@@ -438,6 +440,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Resolved contract: {resolved_path}")
         print(f"Generated model path: {result.model_path}")
         print(f"Status: {result.import_check_status}")
+        if result.execution_report_path:
+            print(f"Execution report: {result.execution_report_path}")
+            print("Transition results: " + json.dumps(result.execution_results, allow_nan=False))
         print("How to call this model:")
         for line in result.usage_instructions:
             print(f"  {line}")
@@ -483,7 +488,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "run":
         _runtime_python(settings)
         parameters = _load_parameters(args.parameters)
-        result = agent.run_phase_history(args.model, parameters=parameters)
+        result = agent.run_phase_history(args.model, parameters=parameters, stage=args.stage)
         print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
         return 0 if result.status == "success" else 3
 
@@ -517,7 +522,7 @@ def _run_init(args: argparse.Namespace) -> int:
     if not ok:
         raise SystemExit(f"Configured runtime Python failed validation: {message}")
     if phasetracer_root:
-        ok, message = validate_phasetracer_root(phasetracer_root)
+        ok, message = validate_phasetracer_root(phasetracer_root, require_runtime=False)
         if not ok:
             raise SystemExit(f"Configured PhaseTracer source root failed validation: {message}")
     path = write_user_config(
@@ -529,7 +534,7 @@ def _run_init(args: argparse.Namespace) -> int:
     )
     print(f"Config path: {path}")
     print(f"Artifact root: {Path(artifact_root).expanduser().resolve()}")
-    print(f"Runtime Python: {Path(runtime_python).expanduser().resolve()}")
+    print(f"Runtime Python: {executable_path(runtime_python)}")
     if phasetracer_root:
         print(f"PhaseTracer root: {phasetracer_root}")
     else:

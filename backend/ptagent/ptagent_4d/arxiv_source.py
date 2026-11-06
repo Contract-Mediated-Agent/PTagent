@@ -16,7 +16,7 @@ from typing import Callable
 
 from .config import Settings
 from .schemas import SourceSpan
-from .source_reader import SourceDocument, read_source
+from .source_reader import SourceDocument, SourceReadError, read_source
 
 
 ARXIV_ID_RE = re.compile(
@@ -39,6 +39,7 @@ class ArxivMetadata:
     updated: str = ""
     abs_url: str = ""
     pdf_url: str = ""
+    metadata_error: str = ""
 
     @property
     def paper_id(self) -> str:
@@ -92,34 +93,51 @@ def read_arxiv_source(
         }
     )
 
+    diagnostics["primary_reading_layer"] = "pdf_fallback"
     if prepared.bundled_tex_path and prepared.bundled_tex_path.exists():
         _emit_progress(progress, "Reading arXiv TeX source with the local TeX parser", 0.52)
-        tex_text = prepared.bundled_tex_path.read_text(encoding="utf-8", errors="replace")
-        spans.extend(_tex_context_spans(prepared.metadata.paper_id, tex_text, settings.source_span_limit * 3))
-        paper_markdown_parts.append(_tex_material_markdown(prepared, tex_text))
-        diagnostics["primary_reading_layer"] = "tex_source"
-        diagnostics["formula_parser"] = "codex_tex_parser"
-        diagnostics["tex_formula_path"] = str(prepared.bundled_tex_path.resolve())
-    else:
-        diagnostics["primary_reading_layer"] = "pdf_fallback"
+        try:
+            tex_text = prepared.bundled_tex_path.read_text(encoding="utf-8", errors="replace")
+            tex_spans = _tex_context_spans(prepared.metadata.paper_id, tex_text, settings.source_span_limit * 3)
+            if tex_spans:
+                tex_markdown = _tex_material_markdown(prepared, tex_text)
+                spans.extend(tex_spans)
+                paper_markdown_parts.append(tex_markdown)
+                diagnostics["primary_reading_layer"] = "tex_source"
+                diagnostics["formula_parser"] = "codex_tex_parser"
+                diagnostics["tex_formula_path"] = str(prepared.bundled_tex_path.resolve())
+            else:
+                diagnostics["tex_read_error"] = "The expanded TeX source produced no readable text spans."
+        except Exception as exc:
+            diagnostics["tex_read_error"] = f"{type(exc).__name__}: {exc}"
 
     if prepared.pdf_path.exists():
         _emit_progress(progress, "Reading PDF fallback layer and preserving page-number evidence", 0.58)
-        pdf_doc = read_source(prepared.pdf_path, settings)
-        spans.extend(_retag_spans(pdf_doc.spans, old_id=prepared.pdf_path.stem, new_id=prepared.metadata.paper_id))
-        if pdf_doc.paper_markdown:
-            paper_markdown_parts.append(
-                pdf_doc.paper_markdown.replace(
-                    f"# Paper Markdown: {prepared.pdf_path.stem}",
-                    f"# PDF Reading Layer: {prepared.metadata.paper_id}",
-                    1,
+        try:
+            pdf_doc = read_source(prepared.pdf_path, settings)
+        except SourceReadError as exc:
+            diagnostics.update({f"pdf_{key}": value for key, value in exc.diagnostics.items()})
+        except Exception as exc:
+            diagnostics["pdf_read_error"] = f"{type(exc).__name__}: {exc}"
+        else:
+            spans.extend(_retag_spans(pdf_doc.spans, old_id=prepared.pdf_path.stem, new_id=prepared.metadata.paper_id))
+            if pdf_doc.paper_markdown:
+                paper_markdown_parts.append(
+                    pdf_doc.paper_markdown.replace(
+                        f"# Paper Markdown: {prepared.pdf_path.stem}",
+                        f"# PDF Reading Layer: {prepared.metadata.paper_id}",
+                        1,
+                    )
                 )
-            )
-        diagnostics.update({f"pdf_{key}": value for key, value in pdf_doc.diagnostics.items()})
+            diagnostics.update({f"pdf_{key}": value for key, value in pdf_doc.diagnostics.items()})
 
     if not spans:
-        raise ValueError(f"No readable TeX or PDF content was prepared for arXiv {arxiv_id}.")
+        error = SourceReadError(f"arXiv {arxiv_id}", diagnostics, manifest_path=prepared.manifest_path)
+        _write_arxiv_manifest(prepared, error.diagnostics)
+        raise error
 
+    diagnostics["reading_status"] = "readable"
+    _write_arxiv_manifest(prepared, diagnostics)
     _emit_progress(progress, "arXiv source reading complete", 0.62)
     return SourceDocument(
         paper_id=prepared.metadata.paper_id,
@@ -256,10 +274,16 @@ def prepare_arxiv_source(
     for path in (paper_root, input_dir, source_dir, tex_root):
         path.mkdir(parents=True, exist_ok=True)
 
-    diagnostics: dict[str, str] = {}
-
     pdf_url = metadata.pdf_url or f"https://arxiv.org/pdf/{metadata.canonical_id}"
     source_url = f"https://arxiv.org/e-print/{metadata.canonical_id}"
+    diagnostics = {
+        "metadata_url": "https://export.arxiv.org/api/query?" + urllib.parse.urlencode({"id_list": metadata.base_id}),
+        "metadata_status": "fallback_unverified" if metadata.metadata_error else "resolved",
+        "pdf_url": pdf_url,
+        "source_url": source_url,
+    }
+    if metadata.metadata_error:
+        diagnostics["metadata_error"] = metadata.metadata_error
     try:
         pdf_cached = pdf_path.exists() and pdf_path.stat().st_size > 0 and not refresh
         _download_file(
@@ -273,6 +297,7 @@ def prepare_arxiv_source(
         )
         diagnostics["pdf_status"] = "cached" if pdf_cached else "downloaded"
     except Exception as exc:
+        diagnostics["pdf_status"] = "failed"
         diagnostics["pdf_error"] = f"{type(exc).__name__}: {exc}"
 
     try:
@@ -288,6 +313,7 @@ def prepare_arxiv_source(
         )
         diagnostics["source_status"] = "cached" if source_cached else "downloaded"
     except Exception as exc:
+        diagnostics["source_status"] = "failed"
         diagnostics["source_error"] = f"{type(exc).__name__}: {exc}"
 
     main_tex_path: Path | None = None
@@ -320,14 +346,18 @@ def prepare_arxiv_source(
         manifest_path=manifest_path,
         diagnostics=diagnostics,
     )
+    _write_arxiv_manifest(prepared, diagnostics)
+    _emit_progress(progress, "arXiv source/PDF preparation complete", 0.50)
+    return prepared
+
+
+def _write_arxiv_manifest(prepared: ArxivPreparedSource, diagnostics: dict[str, str]) -> None:
     manifest = asdict(prepared)
     for key in ("paper_root", "pdf_path", "source_archive_path", "tex_root", "main_tex_path", "bundled_tex_path", "manifest_path"):
         value = manifest.get(key)
         manifest[key] = str(value) if value else ""
-    manifest["metadata"] = asdict(metadata)
-    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
-    _emit_progress(progress, "arXiv source/PDF preparation complete", 0.50)
-    return prepared
+    manifest["diagnostics"] = diagnostics
+    prepared.manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def resolve_latest_arxiv_metadata(arxiv_id: str) -> ArxivMetadata:
@@ -338,7 +368,7 @@ def resolve_latest_arxiv_metadata(arxiv_id: str) -> ArxivMetadata:
         with urllib.request.urlopen(_request(url), timeout=30) as response:
             payload = response.read()
         return _metadata_from_api_payload(requested, base_id, payload)
-    except Exception:
+    except Exception as exc:
         # Direct arXiv PDF/e-print URLs without a version redirect to the latest
         # available version, but the exact version is unknown until metadata works.
         canonical = base_id
@@ -349,6 +379,7 @@ def resolve_latest_arxiv_metadata(arxiv_id: str) -> ArxivMetadata:
             latest_version="latest",
             abs_url=f"https://arxiv.org/abs/{canonical}",
             pdf_url=f"https://arxiv.org/pdf/{canonical}",
+            metadata_error=f"{type(exc).__name__}: {exc}",
         )
 
 

@@ -19,6 +19,8 @@ DEFAULT_RULES = (
     "Source and explicit user choices take precedence over these proposals. "
     "Bind numerical parameters and the renormalization scale only from source, SLHA or explicit inputs; "
     "missing values remain blockers, not benchmark guesses. "
+    "If Q is unresolved, propose the Euclidean norm of the complete finite nonzero source "
+    "reference vacuum, in its field basis and contract units, as a convention pending explicit acceptance. "
     "Propose Arnold-Espinosa resummation, retaining the complete source spectrum without special "
     "Goldstone/photon removal; missing thermal data blocks this proposal rather than switching schemes. "
     "Keep an imported extra polynomial as a proposed separate correction when nonzero, otherwise propose none. "
@@ -37,6 +39,37 @@ FILTER_GUIDANCE = (
     "boundary (or ten numerical field steps if known); do not assume an electroweak scale. "
     "Present the concrete representative-region rule for review, not a recommendation to disable filtering."
 )
+
+
+def renormalization_scale_recommendation(model, explicit: dict) -> dict:
+    """Keep source selections; a vacuum-based fallback is advice, never a binding."""
+    from .safe_expression import evaluate_safe_expression
+
+    scale_sq = model.renormalization_scale_sq
+    if scale_sq is not None:
+        origin = "explicit_input" if {"Q", "renormScaleSq"} & explicit.keys() else "source_selection"
+        return {"status": "resolved", "Q": math.sqrt(scale_sq), "renormScaleSq": scale_sq,
+                "applied": True, "origin": origin, "source_scale_policy": model.scale_policy,
+                "basis": "Preserve the explicit scale override." if origin == "explicit_input" else
+                         "Preserve the source scale selection evaluated from the parameter map/SLHA."}
+    unresolved = {"status": "unresolved", "Q": None, "renormScaleSq": None, "applied": False,
+                  "origin": "unresolved", "source_scale_policy": model.scale_policy,
+                  "basis": "No source-selected scale or complete finite nonzero reference vacuum is resolved. Supply an explicit positive Q; do not infer a benchmark from the model name."}
+    try:
+        vacuum = {field: evaluate_safe_expression(model.dsb_minimum[field], model.parameter_values)
+                  for field in sorted(model.fields)}
+        if not vacuum or not all(math.isfinite(value) for value in vacuum.values()):
+            return unresolved
+        q = math.hypot(*vacuum.values())
+        scale_sq = q * q
+        if q <= 0 or not math.isfinite(scale_sq) or scale_sq <= 0:
+            return unresolved
+    except (ValueError, TypeError, KeyError, ArithmeticError):
+        return unresolved
+    return {"status": "pending_review", "Q": q, "renormScaleSq": scale_sq, "applied": False,
+            "origin": "reference_vacuum_convention", "source_scale_policy": model.scale_policy,
+            "reference_vacuum": vacuum,
+            "basis": "Propose Q = sqrt(sum_i v_i^2) from the complete source reference vacuum in the exported field basis and contract units. This is a deterministic scale convention, not a source-mandated value; review field normalization and scale dependence. Bind through explicit Q or renormScaleSq only after acceptance; an explicit override wins."}
 
 
 def phase_filter_suggestion(field: str, reference_scale: Any = None, field_step: Any = None) -> dict:

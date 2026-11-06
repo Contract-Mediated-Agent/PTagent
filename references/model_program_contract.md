@@ -139,8 +139,14 @@ previous artifacts.
     without extrapolation; unsupported spline layouts stay unresolved.
     Small interpolation discrepancies may be locally refined, with each point's
     movement bounded by the same reviewed field tolerance. The full potential
-    must also pass an offset-independent numerical symmetry check; insufficient
-    floating-point precision leaves the match unresolved. Do not replace a coupled generator
+    must also pass a full-potential symmetry check. The compiler records a
+    conservative static proof covering tree, loop, thermal and counterterm
+    contributions and the retained spectra. For a proven transform only the
+    numerical parity residual is bypassed; finiteness and trajectory checks
+    remain. Unproven transforms use the offset-independent numerical test;
+    insufficient precision leaves the match unresolved. Native tracing uses a
+    displacement target bounded by the reviewed matching tolerance, instead of
+    relaxing that tolerance after tracing. Do not replace a coupled generator
     with independent cuts. Grouped trajectories live in `symmetry_phase_history`;
     `symmetry_phase_groups` records every native member and its interval; matches
     with unequal domains remain separate `symmetry_phase_associations`, not
@@ -240,12 +246,31 @@ Goldstone and CT handling must be explicit. If CT conditions differentiate
 them, or adds a regulated replacement. Do not finite-difference full
 Goldstone-including `V_CW` and then add a replacement term again.
 
-Photon handling must also be explicit. If a neutral thermal mass matrix has a
-massless photon-like branch and a massive Z-like branch, the contract should
-state which branch contributes to V1T/Daisy and which branch is excluded.
+Photon handling must also be explicit. For mixed neutral modes, the contract
+should state which branch contributes to V1T/Daisy and which is excluded.
+A mode that is massless at zero temperature need not remain massless after
+longitudinal thermal corrections.
 When vector thermal masses distinguish longitudinal/transverse modes or give a
 neutral gauge-basis matrix, use reviewed mode groups or a reviewed matrix route
 instead of a single shared vector thermal mass.
+
+Every boson or fermion matrix supports `eigenvalue_indices = all` (the default)
+or comma-separated zero-based ascending ranks. Keep the complete source matrix,
+diagonalize it, and only then retain the reviewed ranks. A subset requires
+`eigenvalue_selection_status = agent_reviewed` and a nonempty
+`eigenvalue_selection_reason`. State the branch identification and its validity
+over the intended field/temperature domain. Ranks are not basis indices, and
+they do not track particle identities through crossings. The same selection is
+used for vacuum anchors, CW, thermal masses and Daisy terms; vector
+longitudinal/transverse multiplicities remain separate. Different temperature
+dependent selections or identity tracking are not supported by this rank policy.
+Enabled Daisy rows for discarded ranks are a contract conflict, not silently
+included or removed. Without a full thermal matrix, reviewed per-eigenvalue
+thermal rows must cover every retained rank; their order follows the same rank
+selection in both backends.
+Do not call a derived eigenbranch a source-given eigenvalue to bypass the matrix
+evidence check. Record omissions in `Excluded Species` and obtain final contract
+approval as usual.
 
 Generated CosmoTransitions code should keep standard public method names:
 `V0`, `V1`, `V1T_from_X`, `Vtot`, `boson_massSq`, and `fermion_massSq`. For

@@ -2,16 +2,17 @@ from __future__ import annotations
 
 import json
 import re
-import subprocess
 from pathlib import Path
 from typing import Any
+
+from ptagent.wolfram_runtime import WolframRuntime, WolframRuntimeError, get_wolfram_runtime, execution_error
 
 from .contract import ThreeDeftBlocked, ensure_ready, parse_contract, validate_contract_template
 from .environment import ensure_dralgo_ready
 from .layout import proof_dir_for_template
 from .mathematica_expr import convert_mathematica_inputform_expression, looks_like_mathematica_inputform, repair_reserved_identifier
 from .merge import merge_dralgo_output_into_contract
-from .scriptgen import generate_marked_dralgo_script
+from .scriptgen import generate_marked_dralgo_script, _required_path
 
 
 DRALGO_OUTPUT_NAME = "dralgo_3deft_output.json"
@@ -28,6 +29,7 @@ def run_dralgo_template(
     wolframscript_path: str | None = None,
     install_dralgo_if_missing: bool = False,
     install_source: str = "wolfram",
+    timeout_seconds: float | None = None,
 ) -> Path:
     """Run the reviewed DRalgo source and normalize its marked output."""
 
@@ -38,13 +40,21 @@ def run_dralgo_template(
     contract = parse_contract(markdown)
     runner = contract.get("runner", {})
 
-    executable_hint = wolframscript_path or runner.get("wolframscript_path") or "wolframscript"
-    executable = ensure_dralgo_ready(
-        str(executable_hint),
-        install_if_missing=install_dralgo_if_missing,
-        install_source=install_source,
-    )
-    normalized, capture_labels = _run_capture_stage(template_path, contract=contract, executable=executable)
+    contract_hint = runner.get("wolframscript_path")
+    contract_hint = None if contract_hint == "wolframscript" else contract_hint
+    executable_hint = wolframscript_path or contract_hint
+    try:
+        runtime = get_wolfram_runtime(executable_hint)
+        executable = ensure_dralgo_ready(
+            executable_hint, runtime=runtime,
+            source=_required_path(runner.get("dralgo_program_path"), base_dir=template_path.parent),
+            install_if_missing=install_dralgo_if_missing,
+            install_source=install_source,
+        )
+    except WolframRuntimeError as exc:
+        raise ThreeDeftBlocked(str(exc)) from exc
+    normalized, capture_labels = _run_capture_stage(template_path, contract=contract, executable=executable,
+                                                     runtime=runtime, timeout_seconds=timeout_seconds)
     proof_dir = proof_dir_for_template(template_path)
     if _should_auto_full_capture(normalized, capture_labels):
         probe_path = proof_dir / DRALGO_PROBE_OUTPUT_NAME
@@ -54,7 +64,8 @@ def run_dralgo_template(
         merge_dralgo_output_into_contract(template_path, probe_path, output_path=autostage_path)
         autostage_markdown = autostage_path.read_text(encoding="utf-8")
         autostage_contract = parse_contract(autostage_markdown)
-        full_normalized, full_capture_labels = _run_capture_stage(autostage_path, contract=autostage_contract, executable=executable)
+        full_normalized, full_capture_labels = _run_capture_stage(autostage_path, contract=autostage_contract, executable=executable,
+                                                                  runtime=runtime, timeout_seconds=timeout_seconds)
         if _has_full_capture_labels(full_capture_labels):
             full_normalized["auto_two_stage"] = {
                 "enabled": True,
@@ -85,25 +96,33 @@ def _run_capture_stage(
     *,
     contract: dict[str, Any],
     executable: str,
+    runtime: WolframRuntime | None = None,
+    timeout_seconds: float | None = None,
 ) -> tuple[dict[str, Any], tuple[str, ...]]:
-    script_result = generate_marked_dralgo_script(template_path)
+    runtime = runtime or get_wolfram_runtime(executable)
+    script_result = generate_marked_dralgo_script(template_path, runtime=runtime)
     program_path = script_result.output_path
-    completed = subprocess.run(
-        [str(executable), "-file", str(program_path)],
-        check=False,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    if completed.returncode != 0:
-        raise ThreeDeftBlocked(f"DRalgo wolframscript run failed with code {completed.returncode}: {completed.stderr[:600]}")
-    normalized = normalize_dralgo_output(completed.stdout, source_label=str(program_path), contract=contract)
-    wolfram_messages = _wolfram_messages(completed.stdout + "\n" + completed.stderr)
+    proof = proof_dir_for_template(template_path)
+    proof.mkdir(parents=True, exist_ok=True)
+    label = "dralgo_autostage" if template_path.name == AUTOSTAGE_CONTRACT_NAME else "dralgo_source"
+    try:
+        completed = runtime.run(file=program_path, timeout=timeout_seconds, stage="DRalgo source")
+    except WolframRuntimeError as exc:
+        completed = exc.result
+        raise ThreeDeftBlocked(str(exc)) from exc
+    finally:
+        if "completed" in locals():
+            (proof / f"{label}_stdout.txt").write_text(completed.get("stdout", ""), encoding="utf-8")
+            (proof / f"{label}_stderr.txt").write_text(completed.get("stderr", ""), encoding="utf-8")
+            (proof / f"{label}_runtime.json").write_text(
+                json.dumps({"runtime": runtime.describe(), "execution": completed}, indent=2), encoding="utf-8")
+    if completed["returncode"] != 0:
+        raise ThreeDeftBlocked(str(execution_error(completed, "DRalgo source")))
+    normalized = normalize_dralgo_output(completed["stdout"], source_label=str(program_path), contract=contract)
+    wolfram_messages = _wolfram_messages(completed["stdout"] + "\n" + completed["stderr"])
     captured = normalized.get("captured_outputs") or {}
     if script_result.capture_labels and not captured:
-        details = "\n".join(part for part in (completed.stdout[-1200:].strip(), completed.stderr[-1200:].strip()) if part)
+        details = "\n".join(part for part in (completed["stdout"][-1200:].strip(), completed["stderr"][-1200:].strip()) if part)
         raise ThreeDeftBlocked(
             "DRalgo run did not produce any PTAGENT capture markers."
             + (f"\nWolfram output tail:\n{details}" if details else "")
@@ -118,8 +137,9 @@ def _run_capture_stage(
             + ", ".join(unevaluated_labels)
         )
     normalized["wolframscript"] = {
-        "returncode": completed.returncode,
-        "stderr": completed.stderr,
+        "returncode": completed["returncode"],
+        "stderr": completed["stderr"],
+        "runtime": runtime.describe(),
         "messages": wolfram_messages,
     }
     if wolfram_messages:

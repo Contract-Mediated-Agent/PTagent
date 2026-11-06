@@ -89,7 +89,7 @@ def question_packet_to_dict(
         return {
             "field_key": packet.key,
             "field_keys": ["numerical_settings.Tmax", "numerical_settings.Tmax_approved", "numerical_settings.Tmax_approved_value"],
-            "question": f"For phase tracing, approve Tmax={numerical['Tmax']:g}, or supply a different confirmed upper temperature?",
+            "question": _temperature_range_question(numerical),
             "reason": "scan_approval_required",
             "blocks": "temperature_scan_only",
             "suggested_action": scan_approval_message(numerical),
@@ -182,7 +182,7 @@ def build_user_guidance_markdown(
     if numerical:
         lines.extend([
             "## Temperature Scan Status", "",
-            f"- Status: `{numerical['scan_status']}`; Tmax={numerical['Tmax']:g} in contract units.",
+            f"- Status: `{numerical['scan_status']}`; Tmax={_temperature_range_label(numerical)} in contract units.",
             f"- Basis: {numerical['Tmax_basis']}",
             f"- Impact: {numerical['Tmax_impact']}",
             "- This is not a compile or potential-smoke blocker. Include the scan-only question in the complete answer batch when phase tracing is requested; for potential-only work it can be deferred.",
@@ -347,6 +347,16 @@ def _render_issue_question(
     return lines
 
 
+def _temperature_range_label(numerical: dict) -> str:
+    return "unresolved" if numerical['Tmax'] is None else f"{numerical['Tmax']:g}"
+
+
+def _temperature_range_question(numerical: dict) -> str:
+    if numerical['Tmax'] is None:
+        return "What upper temperature and units should be used for phase tracing? No source-based range or dimensional model scale is available."
+    return f"For phase tracing, approve Tmax={numerical['Tmax']:g}, or supply a different confirmed upper temperature?"
+
+
 def _render_question_packet(
     number: int,
     packet: QuestionPacket,
@@ -359,11 +369,11 @@ def _render_question_packet(
         numerical = resolve_numerical_settings(contract)
         return [
             f"### Q{number}. Temperature range (phase tracing only)", "",
-            f"- Proposed Tmax: `{numerical['Tmax']:g}` in contract units.",
+            f"- Proposed Tmax: `{_temperature_range_label(numerical)}` in contract units.",
             f"- Basis recorded by the numerical-settings resolver: {numerical['Tmax_basis']}",
             f"- Possible impact: {numerical['Tmax_impact']}",
             "- Why this blocks scanning only: the upper search limit has not been explicitly confirmed; potential construction, compilation and ordinary smoke checks can proceed.",
-            f"- Ask the user: for phase tracing, approve Tmax={numerical['Tmax']:g}, or provide a different confirmed upper temperature? Answer this together with all other applicable questions, not in a later serial round.",
+            f"- Ask the user: {_temperature_range_question(numerical)} Answer this together with all other applicable questions, not in a later serial round.",
             "- Edit target: Section 11 `Numerical Settings`; record the confirmed `Tmax`, its `Tmax_basis`, `Tmax_approved=true`, and the same number in `Tmax_approved_value`, then regenerate.",
             "- `x_eps` remains 0.001 unless explicitly overridden in that section; it needs no separate approval.",
             "", "```text", f"Q{number}: ", "```", "",
@@ -740,11 +750,20 @@ def _question_target(field_key: str, contract: dict[str, Any]) -> dict[str, str]
         return _species_target(base, field_key, contract, table="Bosons")
     if field_key.startswith("masses.fermions"):
         return _species_target(base, field_key, contract, table="Fermions")
-    if field_key.startswith("masses.boson_matrices"):
+    if field_key.startswith(("masses.boson_matrices", "masses.fermion_matrices")):
+        table = "Fermion" if field_key.startswith("masses.fermion") else "Boson"
+        if ".eigenvalue_" in field_key:
+            return {
+                **base,
+                "title": "Reviewed eigenvalue subset",
+                "edit_target": f"Section 5 `{table} Mass Matrices`, eigenvalue selection metadata.",
+                "format": "`all` or comma-separated zero-based ascending mass ranks; set `eigenvalue_selection_status = agent_reviewed` and explain `eigenvalue_selection_reason`.",
+                "notes": "Keep the full source matrix. Ranks are not basis indices or particle identities through crossings; review the same selection at zero and finite temperature before final approval.",
+            }
         return {
             **base,
-            "title": "Boson mass matrix entry",
-            "edit_target": "Section 5 `Boson Mass Matrices`.",
+            "title": f"{table} mass matrix entry",
+            "edit_target": f"Section 5 `{table} Mass Matrices`.",
             "format": "Python expression for each matrix entry and a numeric `dof_per_eigenvalue`.",
             "notes": "This route is enabled by default. Use it for mixed field-dependent spectra; disable it only when the paper gives already-reviewed diagonal field-dependent eigenvalues.",
         }
@@ -948,7 +967,7 @@ def _recommendation_line(field_key: str, target: dict[str, str], memory: PaperMe
     if title.startswith("CosmoTransitions phase filtering"):
         return "keep this as a phase-tracing rule, not a potential term; use a tolerance-style threshold only when the user/source identifies the branch to discard."
     if title.startswith("PhaseTracer symmetry"):
-        return "prefer `z2_reflection` when the potential is invariant under field sign flips such as xSM-like `s -> -s`; otherwise use `none` rather than filtering phases."
+        return "propose `z2_reflection` using the detected sign-flip generators, after checking the complete potential; if symmetry evidence is inconclusive, request the missing evidence instead of inventing a generator or defaulting to disabled handling."
     return ""
 
 

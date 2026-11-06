@@ -86,6 +86,7 @@ Derived proof files include:
 - `three_deft_validation.json`
 - `three_deft_user_questions.md`
 - `three_deft_review_gate.md`
+- `three_deft_reference_check.json`
 - `dralgo_3deft_output.json`
 
 ## Commands
@@ -132,12 +133,51 @@ Merge normalized DRalgo output back into the reviewable contract:
 python <skill-dir>/scripts/ptagent_cli.py --ptagent-engine 3deft merge-output --template <run_dir>\three_deft_contract_template.md --dralgo-output <run_dir>\proof_materials\dralgo_3deft_output.json
 ```
 
-Record the user's exact merged-contract approval and compile:
+Check the proposed numerical reference before presenting the final merged
+contract and graph. This is a read-only Python check, not a native calculation:
+
+```powershell
+python <skill-dir>/scripts/ptagent_cli.py --ptagent-engine 3deft check-reference --template <run_dir>\three_deft_contract_merged.md
+```
+
+It returns nonzero for an invalid reference or incomplete contract and writes
+`proof_materials/three_deft_reference_check.json`. `resolve` checks construction
+and review state; it does not establish the reference's numerical domain.
+Inspect the exact negative root/log/power operands in `domain_diagnostics`,
+active-order values, and `suggested_reference_for_review`. The suggestion is a
+bounded, deterministic diagnostic search using dimensionless rescalings, not a
+new benchmark or a fitted physical result. Keep all input parameters, scales
+and active orders unchanged. Present any alternative in the consolidated review
+batch, apply it only after acceptance, and rerun the check before final approval.
+A passing check does not establish a vacuum, perturbative convergence, or valid
+evolution throughout field space. If no candidate works, report the limitation;
+never add `abs`, discard an imaginary part, or drop an order to manufacture a pass.
+
+Record the user's exact merged-contract approval and compile. `approve` repeats
+the reference preflight against the current specification and refuses an invalid
+point without changing the contract or granting approval:
 
 ```powershell
 python <skill-dir>/scripts/ptagent_cli.py --ptagent-engine 3deft approve --template <run_dir>\three_deft_contract_merged.md --gate phasetracer_compile --user-approval "<exact user sentence>"
 python <skill-dir>/scripts/ptagent_cli.py --ptagent-engine 3deft compile --template <run_dir>\three_deft_contract_merged.md
 ```
+
+`approve --output <run_dir>\reviewed-copy.md` writes an approved copy while
+leaving the input contract unchanged. Any basename is supported by `approve`
+and `compile`; approval is established by the complete contract, explicit
+review/approval record, matching physical-specification hash, and numerical
+reference preflight, never by a filename. The copy must remain in the same
+directory as the input so relative source paths retain their meaning. Pass the
+copy itself to subsequent commands. For a custom basename, resolved review
+artifacts and the default generated project are placed beside the copy (the
+standard merged filename retains the task's `proof_materials`/`DRalgo_model`
+layout); use `compile --output-dir` for an explicit project destination.
+Edits to the approved specification invalidate its approval hash regardless
+of filename. Incomplete, refused, conditional, future, or stale approvals still
+block compilation. Unrelated negative statements, such as a disclaimer about
+who personally confirmed a delegated test, remain verbatim in the record and
+do not themselves negate explicit approval. This syntax check does not establish
+the speaker's identity or authority; agents must still obtain real authorization.
 
 Optionally configure/build/run the generated PhaseTracer project:
 
@@ -239,6 +279,47 @@ Stop before PhaseTracer compile when:
 
 There is no separate user approval gate for wrapper generation or Mathematica run. Source preflight and validation blockers control those steps.
 
+## Bounded Wolfram Execution
+
+The gate, package discovery, compatibility wrapper, source run and Mathematica
+comparison share a process-local runtime configuration. Inspect `wolfram.runtime`
+in the environment-gate JSON (or `Wolfram runtime:` from `3deft env-check`): it
+records the launcher, selected kernel, mode, temporary directory, version,
+limits and startup attempts. A failed WolframScript startup may try direct
+`-script` execution of the exact kernel named by that launcher. Only the harmless
+startup probe has this fallback; a package or model evaluation is never retried
+on a different transport or kernel after failure.
+
+Successful read-only probes are reused within that Python process. Separate CLI
+commands revalidate; there is no persistent verified-runtime or package cache.
+To reuse a reported `mode=kernel` selection in later task commands, set
+`PTAGENT_WOLFRAM_KERNEL` to that receipt's `kernel` in the command environment.
+`WOLFRAMSCRIPT_KERNELPATH` is also accepted. An inaccessible configured kernel
+blocks execution rather than silently selecting another installation.
+`--wolframscript` on `run` or `generate-dralgo` selects the launcher consistently,
+including compatibility discovery. None of these options modifies Wolfram's
+persistent configuration, activates it, or installs a dependency.
+
+Process-local limits and temporary files:
+
+- `PTAGENT_WOLFRAM_PROBE_TIMEOUT`: positive finite seconds for each startup or
+  package-path probe; default 15. A startup fallback has its own bounded probe.
+- DRalgo initialization has a separate bounded 45-second default.
+- `PTAGENT_WOLFRAM_TIMEOUT`: positive finite seconds per source capture stage;
+  default 600. `3deft run --timeout-seconds N` overrides it for that run. An
+  automatic scalar-map/full-capture sequence can execute two bounded stages.
+- `PTAGENT_WOLFRAM_TMPDIR`: an existing task-local writable directory. Otherwise
+  the inherited temporary directory is used. Relative paths are bound once,
+  before child working-directory changes; the parent environment is not changed.
+
+Timeout, inaccessible runtime, package not found on the selected search path,
+and package initialization failure are distinct diagnostics. A timeout alone
+does not establish missing packages, a license problem, or a permission problem.
+Source stdout/stderr and execution receipts are retained under `proof_materials/`
+as `dralgo_source_*`, and `dralgo_autostage_*` when a second stage is needed,
+including on timeout. Owned POSIX process groups are stopped on completion,
+timeout or interruption; model runs never wait indefinitely for inherited pipes.
+
 ## Opt-In Legacy Package Compatibility
 
 An older installed DRalgo may declare ``DRalgo` `` although its source requests
@@ -288,7 +369,7 @@ Focus on:
 - `RepScalar` entries, component counts, VEV/background roles, and raw source labels;
 - `RepFermion1Gen`/`RepFermion` entries. For SM extensions, Standard Model one-generation fermion content is a review hint only; custom fermions require explicit review;
 - scalar invariants and gradient helpers such as `CreateInvariant`, `GradMass`, `GradQuartic`, `GradCubic`, and tadpole helpers;
-- Yukawa invariants and the mapping between numeric coupling, invariant label, and operator, for example `yt -> YukawaTop -> yt*(H qL uR)` when that operator is actually present;
+- Yukawa invariants and the mapping between numeric coupling, invariant label, and operator, using only the symbols and interactions found in the current source; do not infer a particle label or coupling from another example;
 - `AllocateTensors[...]` and `ImportModelDRalgo[...]` argument order and any explicit `Mode`;
 - `PerformDRhard[]`, the single active `PerformDRsoft[...]`, and ordered print calls;
 - VEV/background definitions used before `CalculatePotentialUS[]` and `PrintEffectivePotential[...]`.
@@ -297,12 +378,35 @@ Orders are source-driven. Copy explicit ordered print calls present in the revie
 
 ## RG And Scales
 
+Generated models integrate only from the reviewed input scale to the scale
+requested by the current evaluation, using Boost Odeint RK4 and a cache of
+successful exact-target states. Construction does not evolve a fixed global
+range. Explicit RG bounds remain applicability limits; no spline extrapolation
+or benchmark-specific cutoff is permitted. Report nonfinite running with the
+input/requested scale and last finite step; it is not a measured Landau pole.
+
+The generated `fixed_probe` evaluates canonical 3D fields with frozen
+coefficients and running inputs independently of RG initialization. Its metadata
+records column order and batch usage. This checks expression translation, not
+independent source-native DRalgo matching. Preserve failures at invalid field
+points and distinguish them from successful evaluations. `check-model` still
+checks the full runtime path as well as the fixed reference; it does not by
+itself execute a phase history or establish Tc/Tn.
+
 The user-facing scale question should stay simple:
 
 - hard matching scale `mu4`;
 - hard scale factor `xi4`, default `1`;
 - `mu_3_scale`;
 - `mu_3_us_scale`.
+
+Preserve source-specified and already reviewed scales. Otherwise propose the
+hard thermal scale and soft scale `T` for review, and ask for an ultrasoft
+expression such as `factor*T`. Determine that dimensionless factor from the
+actual source coupling convention or an explicit reviewed numerical input.
+List the source gauge groups/couplings without selecting a gauge sector or
+assuming that a symbol denotes a coupling rather than its square. No universal
+gauge-group or named-coupling ultrasoft prescription is implied.
 
 Implementation details such as ODE step count, internal beta-variable names, and solver choices should not be exposed as ordinary user questions.
 
@@ -315,9 +419,25 @@ DRalgo beta-function conventions:
 
 For 3DUS running, use the analytic logarithmic update when the RHS has no explicit running-scale or self-state dependence. If the RHS depends on the running scale or state, generate numeric evolution in `log(mu_3_us)`.
 
-`xi4` controls `mu4`, `Lb`, and `Lf`; it is not a running coupling and must not receive a beta function.
+`xi4` is a scale factor, not a running coupling, and must not receive a beta
+function. Use it only as specified in the reviewed hard-scale expression,
+without multiplying it a second time. Derive `Lb` from the actual matching
+scale as `2*log(mu4/T) - 2*log(4*pi) + 2*EulerGamma`, and `Lf = Lb + 4*log(2)`.
+The shortcut `Lb = 2*log(xi4)` applies only to the default hard-scale policy.
+Preserve explicit reviewed log inputs instead of overwriting them.
 
 ## Mathematica To C++ Conversion
+
+Unicode Greek characters and their known Wolfram escaped spellings share one
+source identity during conversion and symbol-audit validation. ASCII lookalikes
+are not aliases: `phi`, `\[Phi]`, and `\[CurlyPhi]` are distinct source symbols.
+Explicit field mappings remain authoritative. When captured potential output
+contains a source-symbol-to-compiler-name map, `merge-output` aligns the matching
+3D field names, audit identifiers, and symmetry field groups with that map while
+retaining source spelling, field slots, and reflection grouping. Conflicting
+maps or collisions with other field/input/coefficient names block the merge;
+missing source evidence never licenses a guessed rename. A merge resets compile
+approval and the resulting contract requires fresh review.
 
 Use the stable two-map route:
 
@@ -376,11 +496,17 @@ evaluates the reviewed `V3D_LO`, `V3D_NLO`, `V3D_NNLO`, total `V3D`, prefactor,
 and `V = prefactor*V3D`, and writes a JSON report. Do not ask the user to
 transcribe these numbers by hand.
 
-The ordinary compile-time reference point is diagnostic only when
-`reference_expected_v=not_applicable`. If all candidate reference points produce
-non-finite or non-real values, keep generating the C++ project and report a
-clear warning in stdout and metadata. Treat it as a hard blocker only when the
-user supplied a numeric `reference_expected_v` that must be checked.
+The ordinary reference point is diagnostic only when
+`reference_expected_v=not_applicable`. Preserve that reviewed point even if it
+produces a nonfinite or non-real value. The compiler may report bounded,
+scale-relative alternative diagnostic points, with their evaluation results,
+but must not substitute one automatically. Alternatives remain unconfirmed and
+require an edited contract and renewed approval before use. Keep generating
+the C++ project with an explicit warning and `generated_unverified` status when
+no valid approved reference is available in a legacy approved contract. New
+approvals require a passing `check-reference` preflight; an old approval does
+not turn a failed point into a valid one. A numeric `reference_expected_v`
+supplied by the user is a required check, not a value to replace or fit.
 
 Generation, build/run success, and numerical verification are distinct states.
 `check-model` records `generated_unverified`, `passed`, or `failed`, using finite
@@ -388,6 +514,15 @@ reference values and `abs(actual-expected) <= atol + rtol*max(abs(actual),abs(ex
 Keep raw values, differences and tolerances in the report. No valid reference
 point means `generated_unverified`, never numerical success; do not proceed to
 production phase scans on an unverified or failed model.
+
+Each `check-model` attempt keeps full configure/build/run stdout and stderr in
+`logs/model-check-*/`, including successful stages and partial timeout output.
+The per-attempt `report.json` and current `model_check.json` identify stage
+commands, exit codes, elapsed seconds and log paths. `execution_status` describes
+process execution separately from numerical validation `status`. Stages skipped
+by `--configure-only` or `--no-run` are not reported as executed. Read the saved
+logs instead of rebuilding or rerunning just to retrieve diagnostics; later
+attempts do not overwrite earlier attempt records.
 
 The fixed-expression comparison is `fixed_3d_expression_check`; it does not
 independently validate the source DRalgo RG/matching chain. A

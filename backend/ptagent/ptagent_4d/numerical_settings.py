@@ -39,7 +39,7 @@ def _present(value: Any) -> bool:
     return value is not None and str(value).strip() not in {"", "auto", "ASK_USER", "TBD"}
 
 
-def _recommend_tmax(contract: dict[str, Any], raw: dict[str, Any]) -> tuple[float, str]:
+def _recommend_tmax(contract: dict[str, Any], raw: dict[str, Any]) -> tuple[float | None, str]:
     if _present(raw.get("source_temperature_max")):
         value = _positive_number(raw["source_temperature_max"], "source_temperature_max")
         return value, "Upper endpoint of the source temperature range supplied in numerical_settings.source_temperature_max."
@@ -75,10 +75,10 @@ def _recommend_tmax(contract: dict[str, Any], raw: dict[str, Any]) -> tuple[floa
     if scales:
         scale, origin = max(scales)
         return _positive_number(4.0 * scale, "Tmax"), f"Exploratory range of four times {origin} ({scale:g}), evaluated at the contract benchmark."
-    return 1000.0, (
+    return None, (
         "No reliable temperature range or dimensional model scale was available. "
-        "1000 is only an initial electroweak-scale exploration suggestion if contract units are GeV; "
-        "replace it for other scales or units before approving."
+        "Tmax remains unresolved; supply a source temperature range, a dimensional model scale "
+        "for a reviewable proposal, or an explicit user-confirmed search limit in contract units."
     )
 
 
@@ -110,8 +110,10 @@ def resolve_numerical_settings(contract: dict[str, Any]) -> dict[str, Any]:
 
 
 def scan_approval_message(settings: dict[str, Any]) -> str:
+    tmax = settings["Tmax"]
+    display_tmax = "unresolved" if tmax is None else f"{tmax:g}"
     return (
-        f"Tmax={settings['Tmax']:g}. Basis: {settings['Tmax_basis']} "
+        f"Tmax={display_tmax}. Basis: {settings['Tmax_basis']} "
         f"Impact: {settings['Tmax_impact']} "
         "Automatic temperature scans are blocked until the user confirms this range. "
         "In contract section '11. Numerical Settings', set Tmax to the confirmed value, "

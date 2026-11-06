@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .arxiv_source import is_arxiv_source_archive, read_arxiv_archive_source, read_arxiv_source
-from .artifact_layout import GLOBAL_INPUT_DIRNAME
+from .artifact_layout import GLOBAL_INPUT_DIRNAME, proof_materials_dir
 from .backends import COMPARE_BACKENDS_SENTINEL, SUPPORTED_COMPILE_BACKENDS, normalize_compile_backend
 from .compiler import CompileBlocked, CompileResult
 from .config import (
@@ -25,10 +25,10 @@ from .model_preflight import (
     preflight_model_selection,
     write_model_preflight_artifacts,
 )
-from .reporting import create_run_id, persist_review_artifacts, persist_runtime_artifacts, prepare_run_dir
+from .reporting import create_run_id, persist_review_artifacts, persist_runtime_artifacts, prepare_run_dir, write_json
 from .runner import run_phase_history
 from .schemas import AgentRun, ModelIR, PaperMemory, PhaseHistoryResult, ValidationReport
-from .source_reader import SourceDocument, read_source
+from .source_reader import SourceDocument, SourceReadError, read_source
 from .template_contract import (
     build_contract_template,
     compile_contract_template,
@@ -76,12 +76,20 @@ class PhaseTransitionAgent:
             run_dir.mkdir(parents=True, exist_ok=True)
         run_settings = _settings_with_run_input(self.settings, run_dir)
         _emit_progress(progress, "Reading uploaded source file", 0.10)
-        if is_arxiv_source_archive(original_source_path):
-            _emit_progress(progress, "Reading uploaded arXiv source archive", 0.12)
-            document = read_arxiv_archive_source(original_source_path, run_settings, progress=progress)
-        else:
-            document = read_source(original_source_path, run_settings)
-            document = _copy_document_input(document, original_source_path, run_dir)
+        try:
+            if is_arxiv_source_archive(original_source_path):
+                _emit_progress(progress, "Reading uploaded arXiv source archive", 0.12)
+                document = read_arxiv_archive_source(original_source_path, run_settings, progress=progress)
+            else:
+                document = read_source(original_source_path, run_settings)
+                document = _copy_document_input(document, original_source_path, run_dir)
+        except SourceReadError as exc:
+            _persist_source_failure(run_dir, exc)
+            raise
+        except (OSError, ValueError) as exc:
+            error = SourceReadError(original_source_path, {"source_error": f"{type(exc).__name__}: {exc}"})
+            _persist_source_failure(run_dir, error)
+            raise error from exc
         return self._extract_document(
             document,
             source_path=original_source_path,
@@ -101,7 +109,11 @@ class PhaseTransitionAgent:
     ) -> ExtractionBundle:
         run_dir = prepare_run_dir(self.settings, create_run_id(arxiv_id))
         run_settings = _settings_with_run_input(self.settings, run_dir)
-        document = read_arxiv_source(arxiv_id, run_settings, refresh=refresh, progress=progress)
+        try:
+            document = read_arxiv_source(arxiv_id, run_settings, refresh=refresh, progress=progress)
+        except SourceReadError as exc:
+            _persist_source_failure(run_dir, exc)
+            raise
         return self._extract_document(
             document,
             source_path=document.path,
@@ -340,8 +352,9 @@ class PhaseTransitionAgent:
         model_path: str | Path,
         *,
         parameters: dict[str, Any] | None = None,
+        stage: str = "critical",
     ) -> PhaseHistoryResult:
-        return run_phase_history(Path(model_path), self.settings, parameters=parameters)
+        return run_phase_history(Path(model_path), self.settings, parameters=parameters, stage=stage)
 
     def persist_runtime(
         self,
@@ -355,6 +368,26 @@ class PhaseTransitionAgent:
             model_path=model_path,
             phase_history=phase_history,
         )
+
+
+def _persist_source_failure(run_dir: Path, error: SourceReadError) -> None:
+    proof_dir = proof_materials_dir(run_dir)
+    proof_dir.mkdir(parents=True, exist_ok=True)
+    receipt = {
+        "stage": "source_acquisition",
+        "status": "blocked",
+        "source": error.source,
+        "manifest_path": str(error.manifest_path.resolve()) if error.manifest_path else "",
+        "diagnostics": error.diagnostics,
+        "error": str(error),
+        "scientific_execution": "not_started_by_this_attempt",
+    }
+    receipt_path = proof_dir / "source_failure.json"
+    attempt = 1
+    while receipt_path.exists():
+        attempt += 1
+        receipt_path = proof_dir / f"source_failure-{attempt}.json"
+    write_json(receipt_path, receipt)
 
 
 def _read_contract_template_if_present(source_path: Path) -> str:

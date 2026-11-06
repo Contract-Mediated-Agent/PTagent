@@ -12,6 +12,7 @@ from typing import Any
 from .contract import ThreeDeftBlocked, parse_contract, physical_spec_hash
 from ..runtime_metadata import collect_software_versions
 from .environment import find_wolframscript
+from ptagent.wolfram_runtime import WolframRuntimeError, get_wolfram_runtime
 from .mathematica_expr import looks_like_mathematica_inputform
 from .phasetracer import _clean_expr, _field_symbol_map, _normalize_known_coefficient_references
 from .model_check import finite_comparison, json_safe_numbers, validate_tolerances
@@ -90,11 +91,12 @@ def compare_mathematica_fixed_v3d(
     if not executable:
         return _not_run_result(report_target, script_target, "fixed_3d_expression_check", "wolframscript was not found", atol, rtol)
     try:
-        completed = subprocess.run(
-            [executable, "-script" if "kernel" in Path(executable).name.casefold() else "-file", str(script_target)], check=False, text=True,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout_seconds,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
+        runtime = get_wolfram_runtime(executable)
+        execution = runtime.run(file=script_target, timeout=timeout_seconds, stage="Fixed-expression comparison")
+        completed = subprocess.CompletedProcess(execution["command"], execution["returncode"], execution["stdout"], execution["stderr"])
+    except (OSError, WolframRuntimeError) as exc:
+        if isinstance(exc, WolframRuntimeError):
+            report_target.with_suffix(".runtime.json").write_text(json.dumps(exc.result, indent=2), encoding="utf-8")
         return _not_run_result(report_target, script_target, "fixed_3d_expression_check", str(exc), atol, rtol)
     if completed.returncode != 0:
         details = "\n".join(part for part in (completed.stdout.strip(), completed.stderr.strip()) if part)
@@ -115,6 +117,8 @@ def compare_mathematica_fixed_v3d(
         script_path=script_target,
         executable=executable,
     )
+    report["wolfram_runtime"] = runtime.describe()
+    report["wolfram_execution"] = execution
     report_target.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
     return MathematicaComparisonResult(
         report_path=report_target,
@@ -219,13 +223,14 @@ Print["<<<PTAGENT_MATHEMATICA_COMPARE_JSON>>>"];
 Print[ExportString[<|"results" -> results, "wolfram_version" -> $Version|>, "RawJSON"]];
 Print["<<<PTAGENT_MATHEMATICA_COMPARE_JSON_END>>>"];
 ''', encoding="utf-8")
-        command = [exe, "-script" if "kernel" in Path(exe).name.casefold() else "-file", str(script)]
-        report["commands"].append(command)
-        completed = subprocess.run(command, capture_output=True, text=True, timeout=timeout_seconds, check=False)
-        report["source_process"] = {"returncode": completed.returncode, "stdout": completed.stdout, "stderr": completed.stderr}
-        if completed.returncode:
-            raise ThreeDeftBlocked(f"Source driver did not complete (exit {completed.returncode}).")
-        payload = _extract_mathematica_json(completed.stdout)
+        runtime = get_wolfram_runtime(exe)
+        completed = runtime.run(file=script, timeout=timeout_seconds, stage="Source-native comparison")
+        report["commands"].append(completed["command"])
+        report["source_process"] = completed
+        report["wolfram_runtime"] = runtime.describe()
+        if completed["returncode"]:
+            raise ThreeDeftBlocked(f"Source driver did not complete (exit {completed['returncode']}).")
+        payload = _extract_mathematica_json(completed["stdout"])
         report["software_versions"] = collect_software_versions(wolframscript=exe, wolfram_version=payload.get("wolfram_version"))
         report["source_payload"] = payload
         source_executed = True
@@ -249,7 +254,9 @@ Print["<<<PTAGENT_MATHEMATICA_COMPARE_JSON_END>>>"];
             report["comparisons"].append(row)
         report["ok"] = all(row["ok"] for row in report["comparisons"])
         report["status"] = "passed" if report["ok"] else "failed"
-    except (ThreeDeftBlocked, OSError, ValueError, TypeError, KeyError, subprocess.TimeoutExpired) as exc:
+    except (ThreeDeftBlocked, OSError, ValueError, TypeError, KeyError, subprocess.TimeoutExpired, WolframRuntimeError) as exc:
+        if isinstance(exc, WolframRuntimeError):
+            report["source_process"] = exc.result
         report["reason"] = f"{type(exc).__name__}: {exc}"
         report["status"] = "failed" if source_executed else "not_run"
     target.parent.mkdir(parents=True, exist_ok=True)

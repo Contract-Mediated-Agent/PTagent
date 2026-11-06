@@ -8,7 +8,8 @@ from typing import Any
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Prepare a local PTagent contract template and evidence packet."
+        description="Prepare a local PTagent contract template and evidence packet.",
+        epilog="For an arXiv ID/URL, use scripts/ptagent_cli.py extract --arxiv <ID-or-URL> --model <model> instead.",
     )
     parser.add_argument("--input", required=True, help="Attached/local PDF, TeX, Markdown, or arXiv source archive.")
     parser.add_argument(
@@ -28,6 +29,13 @@ def main() -> int:
         help="Optional pre-contract model focus, e.g. XSM or 2HDM. If omitted and multiple models are detected, the script writes model_candidates.md and stops.",
     )
     args = parser.parse_args()
+    if args.input.lower().startswith(("https://", "http://", "arxiv:")):
+        parser.error("--input requires a local source file, not a URL or arXiv identifier. "
+                     "Use scripts/ptagent_cli.py extract --arxiv <ID-or-URL> --model <model>, "
+                     "or download the source and pass its local path.")
+    source_path = Path(args.input).expanduser().resolve()
+    if not source_path.is_file():
+        parser.error(f"Local source file does not exist: {source_path}")
 
     from _bootstrap import ensure_ptagent_backend
 
@@ -38,10 +46,6 @@ def main() -> int:
     from ptagent.ptagent_4d.extraction_material import render_potential_material_markdown
     from ptagent.ptagent_4d.template_contract import is_contract_template
     from ptagent.ptagent_4d.user_guidance import build_user_guidance_markdown
-
-    source_path = Path(args.input).expanduser().resolve()
-    if not source_path.exists():
-        raise FileNotFoundError(source_path)
 
     run_dir = Path(args.run_dir).expanduser().resolve() if args.run_dir else None
     if args.mode == "continue":

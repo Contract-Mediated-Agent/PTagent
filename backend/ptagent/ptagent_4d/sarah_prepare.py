@@ -12,7 +12,8 @@ from typing import Any
 
 from ptagent.runtime_metadata import collect_software_versions
 
-from .model_defaults import DEFAULTS_ID, DEFAULT_RULES, POLICY_DEFAULTS, phase_filter_suggestion, phase_handling_recommendation
+from .model_defaults import DEFAULTS_ID, DEFAULT_RULES, POLICY_DEFAULTS, phase_filter_suggestion, phase_handling_recommendation, renormalization_scale_recommendation
+from .numerical_settings import resolve_numerical_settings
 from ..symmetry_analysis import analyze_sign_flip_symmetries
 from .safe_expression import evaluate_safe_expression, parse_safe_expression
 from .sarah_contract import build_sarah_contract, _insert_model_card_rows, _replace_model_card_value, _replace_potential_compiler_expression
@@ -64,10 +65,12 @@ def _policies(model, choices: dict) -> dict:
         "phase_filter_field": model.fields[0], "phase_filter_threshold": None,
         "symmetry_generators": [],
     }
-    unknown = set(choices)-set(policy)
+    unknown = set(choices)-set(policy)-{"spectrum", "numerical_settings"}
     if unknown:
         raise SarahImportError("Unknown choices: " + ", ".join(sorted(unknown)))
-    policy.update(choices)
+    if "spectrum" in choices and choices["spectrum"] != "complete":
+        raise SarahImportError("Unsupported spectrum choice; only complete imported spectrum is supported.")
+    policy.update({k: v for k, v in choices.items() if k not in {"spectrum", "numerical_settings"}})
     field_rows = []
     for field in model.fields:
         try:
@@ -118,6 +121,47 @@ def _policies(model, choices: dict) -> dict:
     policy["proposed_filter_rows"] = proposed_filter_rows
     policy["symmetry_proposal"] = proposal
     return policy
+
+
+def _reviewed_numerical_settings(choices: dict) -> dict:
+    raw = choices.get("numerical_settings", {})
+    allowed = {"Tmax", "Tmax_basis", "Tmax_approved", "Tmax_approved_value",
+               "source_temperature_max", "model_scale", "x_eps"}
+    if not isinstance(raw, dict) or set(raw) - allowed:
+        raise SarahImportError("choices.numerical_settings must contain supported Section 11 keys only.")
+    if any(isinstance(value, (dict, list)) or any(c in str(value) for c in "|\n\r") for value in raw.values()):
+        raise SarahImportError("choices.numerical_settings values must be single-line table scalars.")
+    try:
+        resolve_numerical_settings({"numerical_settings": raw})
+    except ValueError as exc:
+        raise SarahImportError(str(exc)) from exc
+    return raw
+
+
+def _benchmark_binding_status(benchmark: dict, model, source_values: dict) -> None:
+    """Reconcile the source example against actual bindings, independently of Q."""
+    bound = {}
+    for name in benchmark.get("default_inputs", {}):
+        if name in source_values:
+            bound[name] = source_values[name]
+        elif name in model.parameter_values:
+            bound[name] = model.parameter_values[name]
+        else:
+            for entry in benchmark.get("input_blocks", []):
+                if entry["symbol"] != name:
+                    continue
+                for symbol, reference in model.block_references.items():
+                    if (reference["block"] == entry["block"] and list(reference["indices"]) == entry["indices"]
+                            and symbol in model.parameter_values):
+                        bound[name] = model.parameter_values[symbol]
+    if not bound:
+        return
+    defaults = benchmark["default_inputs"]
+    remaining = {key: value for key, value in defaults.items() if key not in bound}
+    applied = not remaining and bound == defaults
+    benchmark.update(bound_inputs=bound, remaining_default_inputs=remaining, applied=applied,
+                     status="partially_bound" if remaining else "bound" if applied else "overridden",
+                     message="Source example reconciled with actual bindings; preserve supplied values. Binding is not compilation approval. Remaining model inputs, Q and policies still require review.")
 
 
 def _numerical_checks(model, *, require_tree_stationary=False) -> dict:
@@ -290,9 +334,17 @@ def prepare_sarah(*, vin_path, parameter_map_path, run_dir, model_source=None, t
             model = import_sarah_model(vin_path=vin_path, parameter_map_path=parameter_map_path,
                 thermal_metadata_path=thermal_metadata_path,
                 parameters={k: v for k, v in effective.items() if k not in radiation_keys}, slha_path=slha_path)
+            if source_parameters and tree_proof["bindings"]:
+                tree_review.update(status="partially_bound" if model.unresolved_parameters else "bound",
+                                   applied=True, missing_source_inputs=tree_proof["missing_source_inputs"],
+                                   cyclic_relations=tree_proof["cyclic_relations"],
+                                   derived_targets=tree_proof["applied_relations"],
+                                   selected_branch=tree_proof["selected_branch"],
+                                   loop_policy=tree_loop_policy)
     elif tadpole_branch is not None or tree_loop_policy != "unresolved":
         raise SarahImportError("A tree prescription requires native tree-relation metadata.")
     policy = _policies(model, choices or {})
+    numerical_settings = _reviewed_numerical_settings(choices or {})
     proof = _numerical_checks(model, require_tree_stationary=tree_proof is not None)
     inventory = [{"sector": s.name, "kind": s.kind, "eigenvalues": len(s.basis), "dof_per_eigenvalue": s.dof_per_eigenvalue} for s in model.mass_sectors]
     radiation = {key: sum(len(s.basis)*s.dof_per_eigenvalue for s in model.mass_sectors if (s.kind == "fermion") == (key == "num_fermion_dof")) for key in sorted(radiation_keys)}
@@ -342,11 +394,16 @@ def prepare_sarah(*, vin_path, parameter_map_path, run_dir, model_source=None, t
     write_json(input_dir/"explicit_overrides.json", overrides)
     benchmark = read_spheno_benchmark(input_dir / "sarah_model" if model_source else None)
     benchmark["missing_inputs"] = model.benchmark_request["missing_inputs"]
-    if not model.unresolved_parameters:
+    _benchmark_binding_status(benchmark, model, tree_proof["source_values"] if tree_proof else {})
+    if not model.unresolved_parameters and benchmark["status"] not in {"bound", "overridden"}:
         benchmark.update(status="not_needed", message="Preserve the resolved benchmark. Do not replace it with SPheno example values; review any remaining scale or policy choices separately.")
     write_json(proof_dir/"spheno_benchmark.json", benchmark)
     manifest_path = proof_dir/"sarah_preparation.json"
-    contract_path.write_text(render_prepared_contract(model, policy, radiation, suggestion, manifest_path), encoding="utf-8")
+    text = render_prepared_contract(model, policy, radiation, suggestion, manifest_path)
+    if numerical_settings:
+        settings = {**parse_contract(text)["numerical_settings"], **numerical_settings}
+        text = _kv(text, "## 11. Numerical Settings", settings)
+    contract_path.write_text(text, encoding="utf-8")
     checks_path = proof_dir/"sarah_preparation_checks.json"
     write_json(checks_path, proof)
     versions = collect_software_versions()
@@ -357,6 +414,7 @@ def prepare_sarah(*, vin_path, parameter_map_path, run_dir, model_source=None, t
         "checks_sha256": file_hash(checks_path), "checks_file": str(checks_path), "passed": True,
         "bound_parameters": model.parameter_values, "policies": policy,
         "benchmark_recommendation": benchmark,
+        "renormalization_scale_recommendation": renormalization_scale_recommendation(model, explicit),
         "tree_review": tree_review,
         "tree_binding": {"proof": str(proof_dir / "tree_parameter_bindings.json"),
                          "proof_sha256": file_hash(proof_dir / "tree_parameter_bindings.json"),
@@ -373,6 +431,7 @@ def prepare_sarah(*, vin_path, parameter_map_path, run_dir, model_source=None, t
     }
     write_json(manifest_path, manifest)
     validation = refresh_review(contract_path)
+    delivery = json.loads((proof_dir/"review_delivery.json").read_text(encoding="utf-8"))
     request = {**model.benchmark_request, "recommendation": benchmark}
     if tree_review:
         request["tree_review"] = tree_review
@@ -386,7 +445,7 @@ def prepare_sarah(*, vin_path, parameter_map_path, run_dir, model_source=None, t
             "benchmark_request": request, "tree_review": tree_review,
             "contract_sha256": file_hash(contract_path), "approval_required": True,
             "construction_ready": not any(i.severity == "error" and i.code != "review_required" for i in validation.issues),
-            "graph": str(proof_dir/"contract_graph/contract_graph.png")}
+            "graph": delivery["files"].get("png", ""), "review_delivery": delivery}
 
 
 def preparation_errors(contract: dict) -> list[str]:
@@ -437,7 +496,16 @@ def refresh_review(template: Path):
     (proof_dir/"user_questions.md").write_text(render_questions(contract, manifest, questions), encoding="utf-8")
     spec = preparation_graph(template, contract)
     write_json(proof_dir/"contract_graph_spec.json", spec)
-    render_graph(template, spec, proof_dir/"contract_graph")
+    delivery = {"template_sha256": file_hash(template), "status": "rendering", "files": {}}
+    delivery_path = proof_dir/"review_delivery.json"
+    write_json(delivery_path, delivery)
+    try:
+        delivery["files"] = render_graph(template, spec, proof_dir/"contract_graph")
+        delivery["status"] = "ready"
+    except (ImportError, OSError, ValueError, RuntimeError) as exc:
+        delivery.update(status="graph_failed", error=f"{type(exc).__name__}: {exc}",
+                        next_step="Review the saved Markdown and question batch; repair/redraw the graph from this contract. Do not repeat export, binding or approval, and do not display a stale graph.")
+    write_json(delivery_path, delivery)
     return validation
 
 
@@ -467,4 +535,6 @@ def approve_sarah(template: Path, expected_sha256: str, user_approval_quote: str
     (template.parent/"proof_materials/sarah_approval.txt").write_text(user_approval_quote+"\n", encoding="utf-8")
     template.write_text(text, encoding="utf-8")
     refresh_review(template)
-    return {"approved": True, "template": str(template), "template_sha256": file_hash(template)}
+    delivery = json.loads((template.parent/"proof_materials/review_delivery.json").read_text(encoding="utf-8"))
+    return {"approved": True, "template": str(template), "template_sha256": file_hash(template),
+            "review_delivery": delivery}

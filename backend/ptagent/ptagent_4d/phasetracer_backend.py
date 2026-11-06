@@ -14,9 +14,11 @@ from typing import Any
 import numpy as np
 
 from ..runtime_metadata import collect_software_versions
+from ..phasetracer_build import dependency_cmake
 from .artifact_layout import generated_models_dir, model_artifact_slug
 from .compiler import CompileBlocked, CompileResult, compile_usage_instructions
 from .config import Settings
+from .matrix_selection import selected_eigenvalue_indices
 from .numerical_settings import (
     OS_MASS_CRITERION, OS_MASS_RELATIVE_CUTOFF, OS_MASS_SCALE_FLOOR,
     os_mass_scale, resolve_numerical_settings, scan_approval_message,
@@ -27,7 +29,7 @@ from .phasetracer_expr import (
     render_cpp_assignment_block,
     render_cpp_expression,
 )
-from .phasetracer_runner import run_phasetracer_smoke
+from .phasetracer_runner import phasetracer_stderr_warnings, run_phasetracer_smoke
 from .smoke_output import parse_detailed_smoke_output as _parse_detailed_smoke_output
 from .template_contract import reviewed_renormalization_scale_name, validate_contract_template
 
@@ -72,6 +74,13 @@ def compile_phasetracer_template(
     )
     for name, content in files.items():
         (project_dir / name).write_text(content, encoding="utf-8")
+    # Regeneration alone must not leave an earlier run's success current.
+    execution_report_path = project_dir / "phasetracer_run.json"
+    execution_report_path.write_text(json.dumps({
+        "schema": "ptagent.phasetracer.run.v1", "status": "not_run", "ok": False,
+        "contract_sha256": contract_sha256, "template_sha256": template_sha256,
+        "stages": [], "transition_results": {},
+    }, indent=2), encoding="utf-8")
 
     warnings: list[str] = []
     numerical = resolve_numerical_settings(contract)
@@ -79,6 +88,7 @@ def compile_phasetracer_template(
         warnings.append(scan_approval_message(numerical))
     warnings.extend(_maybe_clang_format_project(project_dir, enabled=clang_format))
     status = "generated"
+    execution_results = {}
     if run_smoke:
         result = run_phasetracer_smoke(
             project_dir,
@@ -88,18 +98,23 @@ def compile_phasetracer_template(
             run_transition_smoke=run_transition_smoke,
         )
         status = result.status
+        execution_report_path = result.report_path
+        execution_results = result.transition_results
         if not result.ok:
             raise CompileBlocked(f"Generated PhaseTracer project failed local smoke check: {result.status}\n{result.stderr or result.stdout}")
         numerical_status = compare_phasetracer_smoke_output(contract, result.stdout)
         status = f"{result.status}; {numerical_status}"
-        if result.stderr.strip():
-            warnings.append("PhaseTracer smoke emitted stderr output.")
+        warnings.extend(phasetracer_stderr_warnings(result))
+        if execution_results.get("nucleation_status") in {"partial", "unavailable"}:
+            warnings.append("Some nucleation temperatures are unavailable; this is not evidence of no physical transition. Inspect the retained native logs.")
     model_path = project_dir / _phasetracer_header_filename(contract)
     return CompileResult(
         model_path=model_path,
         import_check_status=status,
         warnings=warnings,
         usage_instructions=compile_usage_instructions(model_path, "phasetracer", phasetracer_root=phasetracer_root),
+        execution_report_path=execution_report_path,
+        execution_results=execution_results,
     )
 
 
@@ -1326,7 +1341,11 @@ def _render_mass_spec_pushes(specs: list[dict[str, Any]], *, indent: str) -> lis
                 lines.append(f"{indent}}}")
         lines.append(f"{indent}Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> {eigen_var}({matrix_var});")
         lines.append(f"{indent}if ({eigen_var}.info() != Eigen::Success) throw std::runtime_error(\"Eigenvalue decomposition failed for {name}\");")
-        lines.append(f"{indent}for (int i = 0; i < {eigen_var}.eigenvalues().size(); ++i) masses.push_back({eigen_var}.eigenvalues()[i]);")
+        selected = selected_eigenvalue_indices(matrix)
+        if selected == list(range(size)):
+            lines.append(f"{indent}for (int i = 0; i < {eigen_var}.eigenvalues().size(); ++i) masses.push_back({eigen_var}.eigenvalues()[i]);")
+        else:
+            lines.extend(f"{indent}masses.push_back({eigen_var}.eigenvalues()[{i}]);" for i in selected)
     return lines
 
 
@@ -1515,6 +1534,7 @@ def _render_model_runner(contract: dict[str, Any], *, header_filename: str | Non
         "#include <cmath>",
         "#include <iomanip>",
         "#include <iostream>",
+        "#include <optional>",
         "#include <stdexcept>",
         "#include <string>",
         "#include <vector>",
@@ -1533,12 +1553,14 @@ def _render_model_runner(contract: dict[str, Any], *, header_filename: str | Non
         "};",
         "",
         "struct TransitionOptions {",
-        "  bool relax_dxdt_check = true;",
+        "  // Unset options preserve the installed PhaseTracer's native checks and tolerances.",
+        "  std::optional<bool> relax_dxdt_check;",
         "  bool merge_phase_gaps = false;",
         "  bool print_phases = false;",
         "  bool has_seed = true;",
+        "  // Reproducibility convention, not a model-dependent search adjustment.",
         "  int seed = 0;",
-        "  double hessian_singular_rel_tol = 1.0e-5;",
+        "  std::optional<double> hessian_singular_rel_tol;",
         "};",
         "",
         "void print_vector(int index, const char* name, const std::vector<double>& values) {",
@@ -1551,6 +1573,19 @@ def _render_model_runner(contract: dict[str, Any], *, header_filename: str | Non
         '  std::cout << "PTAGENT_TRANSITION_VECTOR " << index << " " << name;',
         "  for (Eigen::Index i = 0; i < values.size(); ++i) std::cout << \" \" << values[i];",
         '  std::cout << "\\n";',
+        "}",
+        "",
+        "void print_nucleation_temperature(size_t index, const PhaseTracer::Transition& transition) {",
+        "  // Native TN is uninitialized until nucleation populates both vacuum vectors.",
+        f"  if (transition.true_vacuum_TN.size() == {len(_list(contract.get('fields')))}",
+        f"      && transition.false_vacuum_TN.size() == {len(_list(contract.get('fields')))}",
+        "      && transition.true_vacuum_TN.allFinite()",
+        "      && transition.false_vacuum_TN.allFinite()",
+        "      && std::isfinite(transition.TN) && transition.TN > 0.0) {",
+        '    std::cout << "PTAGENT_TN " << index << " TN " << transition.TN << "\\n";',
+        "  } else {",
+        '    std::cout << "PTAGENT_TN_STATUS " << index << " unavailable\\n";',
+        "  }",
         "}",
         "",
         "int run_potential_check() {",
@@ -1598,19 +1633,26 @@ def _render_model_runner(contract: dict[str, Any], *, header_filename: str | Non
         "    PTagentPhaseTracer::GeneratedPotential model;",
         "    std::cout << std::setprecision(17);",
         "    PhaseTracer::PhaseFinder phase_finder(model);",
-        f"    phase_finder.set_t_high({numerical['Tmax']!r});",
-        f'    std::cout << "PTAGENT_SCAN Tmax " << {numerical["Tmax"]!r} << " approved true\\n";',
+        *([
+            f"    phase_finder.set_t_high({numerical['Tmax']!r});",
+            f'    std::cout << "PTAGENT_SCAN Tmax " << {numerical["Tmax"]!r} << " approved true\\n";',
+        ] if numerical["Tmax_approved"] else []),
         "    if (options.has_seed) phase_finder.set_seed(options.seed);",
-        "    if (options.relax_dxdt_check) phase_finder.set_check_dx_min_dt(false);",
+        "    if (options.relax_dxdt_check.has_value()) {",
+        "      phase_finder.set_check_dx_min_dt(!*options.relax_dxdt_check);",
+        "    }",
         "    if (options.merge_phase_gaps) phase_finder.set_check_merge_phase_gaps(true);",
-        "    if (options.hessian_singular_rel_tol > 0.0) {",
-        "      phase_finder.set_hessian_singular_rel_tol(options.hessian_singular_rel_tol);",
+        "    if (options.hessian_singular_rel_tol.has_value()) {",
+        "      phase_finder.set_hessian_singular_rel_tol(*options.hessian_singular_rel_tol);",
         "    }",
         "    phase_finder.find_phases();",
         "    if (options.print_phases) std::cout << phase_finder;",
         "    PhaseTracer::ActionCalculator action_calculator(model);",
         "    PhaseTracer::TransitionFinder transition_finder(phase_finder, action_calculator);",
+        "    // Use native direct action evaluation, avoiding an additional polynomial-fit approximation.",
+        "    // Keep the native nucleation criterion and tolerances; this may cost more action evaluations.",
         "    transition_finder.set_fit_action_curve(false);",
+        '    std::cout << "PTAGENT_TN_METHOD direct_action\\n";',
         "    transition_finder.find_transitions();",
         "    const auto transitions = transition_finder.get_transitions();",
         '    std::cout << "PTAGENT_TRANSITION transitions " << transitions.size() << "\\n";',
@@ -1630,6 +1672,7 @@ def _render_model_runner(contract: dict[str, Any], *, header_filename: str | Non
         '                << "\\n";',
         '      print_transition_vector(index, "low_vev", transition.true_vacuum);',
         '      print_transition_vector(index, "high_vev", transition.false_vacuum);',
+        "      print_nucleation_temperature(index, transition);",
         "    }",
         "  } catch (const std::exception& exc) {",
         '    std::cout << "PTAGENT_TC_STATUS error " << exc.what() << "\\n";',
@@ -1673,7 +1716,20 @@ def _render_model_runner(contract: dict[str, Any], *, header_filename: str | Non
         '        std::cerr << "Missing value after --hessian-singular-rel-tol\\n";',
         "        return 2;",
         "      }",
-        "      transition_options.hessian_singular_rel_tol = std::stod(argv[i]);",
+        "      const std::string value = argv[i];",
+        "      size_t parsed = 0;",
+        "      double tolerance = 0.0;",
+        "      try {",
+        "        tolerance = std::stod(value, &parsed);",
+        "      } catch (const std::exception&) {",
+        '        std::cerr << "--hessian-singular-rel-tol requires a finite positive number\\n";',
+        "        return 2;",
+        "      }",
+        "      if (parsed != value.size() || !std::isfinite(tolerance) || tolerance <= 0.0) {",
+        '        std::cerr << "--hessian-singular-rel-tol requires a finite positive number\\n";',
+        "        return 2;",
+        "      }",
+        "      transition_options.hessian_singular_rel_tol = tolerance;",
         "    } else {",
         '      std::cerr << "Unknown argument: " << arg << "\\n";',
         "      return 2;",
@@ -1704,9 +1760,7 @@ def _render_cmake() -> str:
               message(FATAL_ERROR "Set -DPHASETRACER_ROOT=/path/to/PhaseTracer")
             endif()
 
-            set(PHASETRACER_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-            set(PHASETRACER_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-            add_subdirectory(${PHASETRACER_ROOT} ${CMAKE_BINARY_DIR}/PhaseTracer EXCLUDE_FROM_ALL)
+            @PTAGENT_DEPENDENCY_CMAKE@
 
             add_executable(run_model run_model.cpp)
             target_include_directories(run_model PRIVATE
@@ -1717,7 +1771,7 @@ def _render_cmake() -> str:
             )
             target_link_libraries(run_model PRIVATE phasetracer effectivepotential)
             """
-        ).strip()
+        ).strip().replace("@PTAGENT_DEPENDENCY_CMAKE@", dependency_cmake().strip())
         + "\n"
     )
 
@@ -2056,7 +2110,7 @@ def _evaluate_masses(contract: dict[str, Any], phi: list[float], kind: str) -> l
         for row in _list(matrix.get("matrix")):
             entries.append([_eval_compiler_block(str(expr), env) for expr in _list(row)])
         if entries:
-            values.extend(float(value) for value in np.linalg.eigvalsh(np.asarray(entries, dtype=float)))
+            values.extend(float(value) for value in np.linalg.eigvalsh(np.asarray(entries, dtype=float))[selected_eigenvalue_indices(matrix)])
     return values
 
 
@@ -2073,7 +2127,7 @@ def _evaluate_fermion_masses(contract: dict[str, Any], phi: list[float]) -> list
             for row in _list(matrix.get("matrix"))
         ]
         if entries:
-            values.extend(float(value) for value in np.linalg.eigvalsh(np.asarray(entries, dtype=float)))
+            values.extend(float(value) for value in np.linalg.eigvalsh(np.asarray(entries, dtype=float))[selected_eigenvalue_indices(matrix)])
     return values
 
 
@@ -2089,7 +2143,7 @@ def _evaluate_debye_masses(contract: dict[str, Any], phi: list[float], temperatu
         for row in _list(matrix.get("matrix")):
             entries.append([_eval_compiler_block(str(expr), env) for expr in _list(row)])
         if entries:
-            values.extend(float(value) for value in np.linalg.eigvalsh(np.asarray(entries, dtype=float)))
+            values.extend(float(value) for value in np.linalg.eigvalsh(np.asarray(entries, dtype=float))[selected_eigenvalue_indices(matrix)])
     return values
 
 
@@ -2209,9 +2263,8 @@ def _mass_labels(contract: dict[str, Any], kind: str) -> list[str]:
             labels.append(str(spec["name"]))
         else:
             matrix = _dict(spec["matrix"])
-            size = len(_list(matrix.get("basis")))
             base = str(spec["name"])
-            labels.extend(f"{base}_eig{index + 1}" for index in range(size))
+            labels.extend(f"{base}_eig{index + 1}" for index in selected_eigenvalue_indices(matrix))
     return labels
 
 
@@ -2221,7 +2274,7 @@ def _mass_dofs(contract: dict[str, Any], kind: str) -> list[float]:
         if spec["source"] == "direct":
             values.append(float(spec["dof"]))
         else:
-            values.extend([float(spec["dof"])] * len(_list(_dict(spec["matrix"]).get("basis"))))
+            values.extend([float(spec["dof"])] * len(selected_eigenvalue_indices(_dict(spec["matrix"]))))
     return values
 
 
@@ -2231,7 +2284,7 @@ def _mass_c_values(contract: dict[str, Any], kind: str) -> list[float]:
         if spec["source"] == "direct":
             values.append(float(spec["c"]))
         else:
-            values.extend([float(spec["c"])] * len(_list(_dict(spec["matrix"]).get("basis"))))
+            values.extend([float(spec["c"])] * len(selected_eigenvalue_indices(_dict(spec["matrix"]))))
     return values
 
 
@@ -2241,7 +2294,7 @@ def _fermion_dofs(contract: dict[str, Any]) -> list[float]:
         if spec["source"] == "direct":
             values.append(float(spec["dof"]))
         else:
-            values.extend([float(spec["dof"])] * len(_list(_dict(spec["matrix"]).get("basis"))))
+            values.extend([float(spec["dof"])] * len(selected_eigenvalue_indices(_dict(spec["matrix"]))))
     return values
 
 
@@ -2279,7 +2332,7 @@ def _aligned_thermal_mass_specs(contract: dict[str, Any], kind: str, *, required
             thermal_spec["matrix"] = thermal_matrix
             specs.append({"source": "matrix", "name": base, "matrix": thermal_spec})
             continue
-        eigen_labels = [f"{base}_eig{index + 1}" for index in range(size)]
+        eigen_labels = [f"{base}_eig{index + 1}" for index in selected_eigenvalue_indices(matrix)]
         if size and all(label in by_name for label in eigen_labels):
             for label in eigen_labels:
                 expr = _thermal_expr_from_daisy_row(by_name[label])
@@ -2532,11 +2585,28 @@ def _split_top_level_commas(text: str) -> list[str]:
 
 def _smoke_points(contract: dict[str, Any]) -> list[tuple[list[float], float]]:
     zero = _zero_t_vacuum_values(contract)
-    if not zero:
-        zero = [0.0]
-    positive = [value if abs(value) > 1e-12 else 1.0 for value in zero]
+    if not zero or not all(math.isfinite(value) for value in zero):
+        raise CompileBlocked("Smoke checks require a finite declared zero-temperature field point.")
+    field_scale = max(abs(value) for value in zero)
+    temperature_scale = field_scale
+    try:
+        scale_name = reviewed_renormalization_scale_name(contract)
+    except CompileBlocked:
+        # A missing or ambiguous Q is not a source for a diagnostic scale.
+        scale_name = ""
+    if scale_name:
+        scale_sq = _renorm_scale_sq(contract)
+        if not math.isfinite(scale_sq) or scale_sq <= 0.0:
+            raise CompileBlocked("Smoke checks require a finite positive reviewed renormalization scale squared.")
+        temperature_scale = math.sqrt(scale_sq)
+    if temperature_scale == 0.0:
+        # Potential-only compilation is still useful without a dimensional scale.
+        return [(zero, 0.0)]
+    field_scale = field_scale or temperature_scale
+    # Dimensionless diagnostic fractions, not phase-search bounds or predictions.
+    positive = [value if value != 0.0 else 0.01 * field_scale for value in zero]
     negative = [-value for value in positive]
-    return [(zero, 0.0), (positive, 0.0), (positive, 100.0), (negative, 25.0)]
+    return [(zero, 0.0), (positive, 0.0), (positive, temperature_scale), (negative, 0.25 * temperature_scale)]
 
 
 def _zero_t_vacuum_values(contract: dict[str, Any]) -> list[float]:
@@ -2578,6 +2648,16 @@ def _metadata(contract: dict[str, Any], *, template_sha256: str, contract_sha256
         "phasetracer_base": "EffectivePotential::OneLoopPotential",
         "daisy_method": _phasetracer_daisy_method(contract),
         "numerical_settings": resolve_numerical_settings(contract),
+        "smoke_points": [
+            {"index": index, "phi": phi, "T": temperature}
+            for index, (phi, temperature) in enumerate(_smoke_points(contract))
+        ],
+        "smoke_point_policy": (
+            "Diagnostics only, not phase-search limits: T=Q and Q/4 for an unambiguous reviewed "
+            "renormalization scale, otherwise the largest absolute declared vacuum field and its quarter. "
+            "Zero field components use 1% of that vacuum field scale, or Q if all fields vanish. "
+            "Without either scale, only the declared zero-temperature vacuum is checked."
+        ),
         "os_like_mass_criterion": dict(OS_MASS_CRITERION),
     }
 

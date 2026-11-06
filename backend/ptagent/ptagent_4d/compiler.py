@@ -10,6 +10,8 @@ class CompileResult:
     import_check_status: str
     warnings: list[str] = field(default_factory=list)
     usage_instructions: list[str] = field(default_factory=list)
+    execution_report_path: Path | None = None
+    execution_results: dict = field(default_factory=dict)
 
 
 class CompileBlocked(RuntimeError):

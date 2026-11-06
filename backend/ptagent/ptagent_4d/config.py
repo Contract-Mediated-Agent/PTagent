@@ -12,6 +12,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from .artifact_layout import GLOBAL_INPUT_DIRNAME
+from .phasetracer_discovery import discover_phasetracer, validate_local_phasetracer
 
 
 DEFAULT_RUNTIME_PYTHON = sys.executable
@@ -132,7 +133,7 @@ def write_user_config(
         "",
         "# Basic configuration. Required for CosmoTransitions compile/check commands.",
         f"artifact_root = {_toml_string(str(artifact_path))}",
-        f"runtime_python = {_toml_string(str(Path(runtime_python).expanduser().resolve()))}",
+        f"runtime_python = {_toml_string(str(executable_path(runtime_python)))}",
         "",
         "# Extended configuration. Leave empty until PhaseTracer or backend comparison is needed.",
         f"phasetracer_root = {_toml_string(str(phasetracer_root).strip())}",
@@ -156,28 +157,26 @@ def require_configured_runtime_python(settings: Settings) -> Path:
 
 
 def require_configured_phasetracer_root(settings: Settings, override: str | None = None) -> str:
-    root = str(override or "").strip()
-    if root:
-        ok, message = validate_phasetracer_root(root)
-        if not ok:
-            raise ConfigurationError(message)
-        return root
-    if not settings.phasetracer_root_configured or not str(settings.phasetracer_root).strip():
-        raise ConfigurationError(
-            "PhaseTracer source root is not configured. This is only required for "
-            "`--backend phasetracer` or `compare-backends`. Run "
-            "`python -m ptagent init --phasetracer-root <PhaseTracer-root>` first, "
-            "or pass `--phasetracer-root <PhaseTracer-root>` to this command."
-        )
-    root = str(settings.phasetracer_root).strip()
-    ok, message = validate_phasetracer_root(root)
-    if not ok:
-        raise ConfigurationError(message)
-    return root
+    """Select sources for generation or the requested project build, not a runtime."""
+    result = discover_phasetracer(
+        settings.project_root,
+        explicit_root=override or settings.phasetracer_root,
+        explicit_source="command_line" if override else "configuration",
+        validator=validate_phasetracer_root,
+        require_runtime=False,
+    )
+    if not result["available"]:
+        raise ConfigurationError(str(result["message"]))
+    return str(result["root"])
+
+
+def executable_path(value: str | Path) -> Path:
+    """Keep the invocation path: resolving a Python symlink discards its venv."""
+    return Path(os.path.abspath(os.path.expanduser(str(value))))
 
 
 def validate_runtime_python(python_path: str | Path) -> tuple[bool, str]:
-    path = Path(python_path).expanduser().resolve()
+    path = executable_path(python_path)
     if not path.exists():
         return False, f"Runtime Python does not exist: {path}"
     command = [
@@ -194,7 +193,7 @@ def validate_runtime_python(python_path: str | Path) -> tuple[bool, str]:
     return True, "ok"
 
 
-def validate_phasetracer_root(phasetracer_root: str) -> tuple[bool, str]:
+def validate_phasetracer_root(phasetracer_root: str, *, require_runtime: bool = True) -> tuple[bool, str]:
     raw = str(phasetracer_root or "").strip()
     if not raw:
         return False, "PhaseTracer source root is required."
@@ -204,9 +203,9 @@ def validate_phasetracer_root(phasetracer_root: str) -> tuple[bool, str]:
             return False, f"PhaseTracer source root is not a directory: {path}"
         if not (path / "CMakeLists.txt").exists():
             return False, f"PhaseTracer source root does not contain CMakeLists.txt: {path}"
-        return True, "ok"
+        return validate_local_phasetracer(path, require_runtime=require_runtime)
     if os.name == "nt" and _looks_like_wsl_path(raw):
-        return _validate_wsl_phasetracer_root(raw)
+        return _validate_wsl_phasetracer_root(raw, require_runtime=require_runtime)
     return False, f"PhaseTracer source root does not exist: {raw}"
 
 
@@ -215,38 +214,44 @@ def _looks_like_wsl_path(value: str) -> bool:
     return raw.startswith("/")
 
 
-def _validate_wsl_phasetracer_root(raw: str) -> tuple[bool, str]:
+def _validate_wsl_phasetracer_root(raw: str, *, require_runtime: bool = True) -> tuple[bool, str]:
     distros = _wsl_distros()
     if not distros:
         return False, f"PhaseTracer source root looks like a WSL/Linux path but no WSL distro was found: {raw}"
-    command = _wsl_phasetracer_test_command(raw)
+    command = _wsl_phasetracer_test_command(raw, require_runtime=require_runtime)
     failures: list[str] = []
     for distro in distros:
         try:
             result = subprocess.run(
                 ["wsl", "-d", distro, "--", "bash", "-lc", command],
+                input=Path(__file__).with_name("phasetracer_discovery.py").read_text(encoding="utf-8"),
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                timeout=20,
+                timeout=120,
                 check=False,
             )
         except Exception as exc:
             failures.append(f"{distro}: {type(exc).__name__}: {exc}")
             continue
-        if result.returncode == 0:
-            return True, f"ok (validated in WSL distro {distro})"
-        failures.append(f"{distro}: missing directory or CMakeLists.txt")
+        try:
+            probe = json.loads(result.stdout)
+            if not isinstance(probe, dict):
+                raise ValueError("Expected a compatibility record")
+        except (ValueError, TypeError):
+            failures.append(f"{distro}: compatibility probe did not return JSON: {(result.stderr or result.stdout)[-2000:]}")
+            continue
+        if result.returncode == 0 and probe.get("ok") is True:
+            return True, f"ok (validated in WSL distro {distro}): {probe.get('message', '')}"
+        failures.append(f"{distro}: {probe.get('message', result.stderr)}")
     preview = "; ".join(failures[:3])
     suffix = f" ({preview})" if preview else ""
-    return False, f"PhaseTracer source root was not found in WSL or lacks CMakeLists.txt: {raw}{suffix}"
+    return False, f"PhaseTracer API/library compatibility could not be verified in WSL: {raw}{suffix}"
 
 
-def _wsl_phasetracer_test_command(raw: str) -> str:
-    root = raw.rstrip("/") if raw != "/" else raw
-    cmake_lists = root.rstrip("/") + "/CMakeLists.txt"
-    return f"test -d {shlex.quote(root)} && test -f {shlex.quote(cmake_lists)}"
+def _wsl_phasetracer_test_command(raw: str, *, require_runtime: bool = True) -> str:
+    return f"python3 - {shlex.quote(raw)}" + ("" if require_runtime else " --source-only")
 
 
 def _wsl_distros() -> list[str]:
@@ -294,7 +299,7 @@ def _path_setting_with_source(*, key: str, env_name: str, config: dict[str, obje
         configured = bool(raw)
     default_path = default() if callable(default) else default
     path = Path(raw).expanduser() if raw else Path(default_path).expanduser()
-    return path.resolve(), configured
+    return executable_path(path), configured
 
 
 def _string_setting_with_source(*, key: str, env_name: str, config: dict[str, object], default: str = "") -> tuple[str, bool]:

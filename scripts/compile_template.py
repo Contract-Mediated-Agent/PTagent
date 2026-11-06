@@ -145,6 +145,8 @@ def main() -> int:
                 "validation": str(validation_path),
                 "model_path": str(result.model_path),
                 "import_check_status": result.import_check_status,
+                "execution_report": str(result.execution_report_path) if result.execution_report_path else None,
+                "execution_results": result.execution_results,
                 "warnings": result.warnings,
                 "usage_instructions": result.usage_instructions,
             },

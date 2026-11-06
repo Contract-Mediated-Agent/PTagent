@@ -7,6 +7,8 @@ import textwrap
 import numpy as np
 
 from .phase_orbit_sampling import orbit_comparison_temperatures
+from .ct_minima import trace_symmetry_phases
+from .ct_diagnostics import observe_ct_nucleation
 
 
 MAX_ORBIT_TRANSFORMS = 4096
@@ -55,9 +57,8 @@ class _SymmetryOrbitMethods:
             return result
         result.update(temperature_interval=[float(lo), float(hi)],
                       samples=len(samples), reason="field_mismatch")
-        # A fixed transform must work across the whole overlap. Local refinement
-        # resolves interpolation error, but cannot move a point by more than the
-        # reviewed field tolerance or change the recorded phase trajectories.
+        # A fixed transform must work across the whole overlap. Refinement
+        # cannot move either point beyond the reviewed field tolerance.
         for sign in signs:
             aa, bb, refined = a.copy(), b.copy(), 0
             with np.errstate(over="ignore", invalid="ignore"):
@@ -67,7 +68,7 @@ class _SymmetryOrbitMethods:
             max_distance = float(np.max(distance))
             if max_distance < result.get("max_raw_field_distance", float("inf")):
                 result.update(max_raw_field_distance=max_distance, nearest_transform=sign.tolist())
-            # Two displacements of at most tolerance can close at most 2*tolerance.
+            # Conservative candidate pruning; never an equivalence decision.
             if max_distance > 3*tolerance:
                 continue
             try:
@@ -99,7 +100,7 @@ class _SymmetryOrbitMethods:
                         break
                     aa[index], bb[index] = x, y
                     refined += 1
-                except (ValueError, RuntimeError, FloatingPointError):
+                except (ValueError, RuntimeError, FloatingPointError, np.linalg.LinAlgError):
                     valid = False
                     result["reason"] = "local_refinement_failed"
                     break
@@ -107,9 +108,16 @@ class _SymmetryOrbitMethods:
                 continue
             try:
                 # Check the complete potential, not just tree-level parity.
+                proven = sign.tolist() in getattr(self, '_proven_symmetry_transforms', [])
                 for points in (aa, bb):
                     original = np.asarray(self.Vtot(points, check_times, False), dtype=float)
                     reflected = np.asarray(self.Vtot(points*sign, check_times, False), dtype=float)
+                    if not np.all(np.isfinite(original)) or not np.all(np.isfinite(reflected)):
+                        valid = False
+                        result['reason'] = 'full_potential_nonfinite'
+                        break
+                    if proven:
+                        continue
                     anchor = np.asarray(self.Vtot(np.zeros_like(points), check_times, False), dtype=float)
                     with np.errstate(over="raise", invalid="raise"):
                         local_scale = np.maximum(np.abs(original-anchor), np.abs(reflected-anchor))
@@ -138,6 +146,16 @@ class _SymmetryOrbitMethods:
 
     def _symmetry_pair_table(self, phases):
         from itertools import combinations
+        for key, phase in phases.items():
+            times, points = np.asarray(phase.T, dtype=float), np.asarray(phase.X, dtype=float)
+            dimension = len(self._symmetry_transforms[0])
+            if (times.ndim != 1 or len(times) < 2 or points.shape != (len(times), dimension)
+                    or not np.all(np.isfinite(times)) or not np.all(np.isfinite(points))
+                    or not np.all(np.diff(times) > 0)):
+                raise ValueError(f'Invalid native trajectory for phase {key}; symmetry and transition results are unresolved')
+            values = np.asarray(self.Vtot(points, times, False), dtype=float)
+            if not np.all(np.isfinite(values)):
+                raise ValueError(f'Nonfinite full potential on phase {key}; symmetry and transition results are unresolved')
         matches = {}
         diagnostics = []
         for (key, phase), (other, candidate) in combinations(phases.items(), 2):
@@ -213,6 +231,10 @@ class _SymmetryOrbitMethods:
         return self.TcTrans
 
     def _symmetry_find_all_transitions(self, tunnelFromPhase_args=None):
+        return self.observe_ct_nucleation(
+            lambda: self._symmetry_transition_history(tunnelFromPhase_args), self)
+
+    def _symmetry_transition_history(self, tunnelFromPhase_args=None):
         from cosmoTransitions import transitionFinder
         if self.phases is None:
             self.getPhases()
@@ -237,10 +259,18 @@ class _SymmetryOrbitMethods:
 
             targets = {key: phase for key, phase in remaining.items()
                        if not matches.get((source.key, key), False) and not already_visited(key, phase)}
-            self.symmetry_tunnelling_channels.append({"source": source.key, "targets": list(targets),
-                                                      "excluded": [key for key in remaining if key not in targets]})
-            trans = (transitionFinder.tunnelFromPhase(targets, source, self.Vtot, self.gradV, ceiling,
-                                                      **(tunnelFromPhase_args or {})) if targets else None)
+            # A bounce needs coexisting phases. Keep nonoverlapping phases for
+            # subsequent steps and second-order links, not the native bracket
+            # finder (which otherwise extrapolates their trajectories).
+            tunnel_targets = {key: phase for key, phase in targets.items()
+                              if max(source.T[0], phase.T[0]) < min(source.T[-1], phase.T[-1], ceiling)}
+            self.symmetry_tunnelling_channels.append({
+                "source": source.key, "targets": list(tunnel_targets),
+                "excluded": [key for key in remaining if key not in targets],
+                "no_temperature_overlap": [key for key in targets if key not in tunnel_targets],
+            })
+            trans = (transitionFinder.tunnelFromPhase(tunnel_targets, source, self.Vtot, self.gradV, ceiling,
+                                                      **(tunnelFromPhase_args or {})) if tunnel_targets else None)
             if trans is None:
                 successor = next((phase for key, phase in targets.items() if key in source.low_trans), None)
                 if successor is None:
@@ -267,5 +297,6 @@ def render_symmetry_orbit_methods(groups: list[list[int]], dimension: int, toler
     transforms = sign_flip_closure(groups, dimension)
     methods = (f"_symmetry_transforms = {transforms!r}\n_symmetry_tolerance = {tolerance!r}\n\n"
                + textwrap.dedent(inspect.getsource(_SymmetryOrbitMethods).split("\n", 1)[1])
-               + "\n@staticmethod\n" + inspect.getsource(orbit_comparison_temperatures))
+               + ''.join("\n@staticmethod\n" + inspect.getsource(function) for function in (
+                   orbit_comparison_temperatures, trace_symmetry_phases, observe_ct_nucleation)))
     return textwrap.indent(methods, "    ")

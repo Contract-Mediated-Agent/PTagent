@@ -56,6 +56,33 @@ class SourceDocument:
     paper_markdown: str = ""
 
 
+class SourceReadError(ValueError):
+    """An unreadable source with inspectable acquisition/parser evidence."""
+
+    def __init__(
+        self, source: str | Path, diagnostics: dict[str, str], *, manifest_path: Path | None = None,
+    ) -> None:
+        self.source = str(source)
+        self.manifest_path = manifest_path
+        self.diagnostics = dict(diagnostics)
+        self.diagnostics["reading_status"] = "failed"
+        self.diagnostics["recovery_guidance"] = (
+            "Check the source identifier/version and reported URLs or local path. "
+            "For network errors, check DNS, proxy, and access in this execution environment; "
+            "this alone does not show the remote service is down. For HTTP 404, verify that "
+            "the requested paper/version exists. For parser errors or empty text, inspect the "
+            "file and parser dependencies, or supply readable local TeX, Markdown, PDF, or an "
+            "arXiv source archive. Preserve this failure evidence. Retry acquisition only when "
+            "permitted by the run protocol and record any retry separately. No scientific "
+            "execution was started by this extraction attempt; scientific coverage is "
+            "inconclusive, not evidence of physical absence or solver failure. Any later "
+            "scientific run or rerun must be recorded separately."
+        )
+        evidence = "\n".join(f"{key}: {value}" for key, value in self.diagnostics.items())
+        manifest = f"\nManifest evidence: {manifest_path.resolve()}" if manifest_path else ""
+        super().__init__(f"No readable source content for {self.source}.{manifest}\n{evidence}")
+
+
 @dataclass
 class _Page:
     page_number: int
@@ -78,6 +105,11 @@ def read_source(path: str | Path, settings: Settings) -> SourceDocument:
             f"Unsupported source suffix {suffix or '<none>'}; supported: {sorted(SUPPORTED_SOURCE_SUFFIXES)}"
         )
 
+    try:
+        source_path.stat()
+    except OSError as exc:
+        raise SourceReadError(source_path, {"source_error": f"{type(exc).__name__}: {exc}"}) from exc
+
     if suffix == ".pdf":
         pages, diagnostics = _read_pdf_pages(source_path)
         page_spans = _select_pdf_spans(source_path.stem, pages, settings.source_span_limit)
@@ -94,13 +126,20 @@ def read_source(path: str | Path, settings: Settings) -> SourceDocument:
             diagnostics.update(markdown_diagnostics)
         spans = _merge_pdf_spans(paper_markdown_spans, markdown_spans, page_spans)
     else:
-        text = source_path.read_text(encoding="utf-8", errors="replace")
+        try:
+            text = source_path.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            raise SourceReadError(source_path, {"source_error": f"{type(exc).__name__}: {exc}"}) from exc
         spans = _split_text_source(source_path.stem, text, suffix, settings.source_span_limit)
         diagnostics = {"parser": "text"}
         if suffix == ".tex":
             diagnostics["formula_parser"] = "codex_tex_parser"
             diagnostics["tex_formula_path"] = str(source_path.resolve())
         paper_markdown = text if suffix in {".md", ".markdown", ".tex"} else ""
+
+    if not spans:
+        diagnostics["content_error"] = "The source produced no readable text spans."
+        raise SourceReadError(source_path, diagnostics)
 
     return SourceDocument(
         paper_id=source_path.stem,
@@ -191,6 +230,7 @@ def _read_pdf_pages(path: Path) -> tuple[list[_Page], dict[str, str]]:
             diagnostics = {"parser": name}
             diagnostics.update({f"{key}_error": value for key, value in errors.items()})
             return pages, diagnostics
+        errors[name] = "Parser returned no readable text."
 
     return [], {"parser": "none", **{f"{key}_error": value for key, value in errors.items()}}
 
@@ -206,10 +246,12 @@ def _read_pdf_markdown_pages(path: Path) -> tuple[list[_MarkdownPage], dict[str,
         except Exception as exc:
             errors[f"pdf2md_{name}_error"] = f"{type(exc).__name__}: {exc}"
             continue
+        pages = [page for page in pages if page.markdown.strip()]
         if pages:
             diagnostics = {"pdf2md_parser": pages[0].parser}
             diagnostics.update(errors)
             return pages, diagnostics
+        errors[f"pdf2md_{name}_error"] = "Parser returned no readable text."
     return [], {"pdf2md_parser": "none", **errors}
 
 

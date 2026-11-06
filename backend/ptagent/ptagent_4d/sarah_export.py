@@ -3,11 +3,11 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
-import subprocess
 from pathlib import Path
 from typing import Any
 
 from ptagent.runtime_metadata import collect_software_versions
+from ptagent.wolfram_runtime import WolframRuntimeError, get_wolfram_runtime, execution_error
 
 from .sarah_discovery import SarahDiscoveryError, resolve_sarah_model
 
@@ -35,9 +35,11 @@ def export_sarah_model(
     sarah_main = root / "SARAH.m"
     model = discovery["model"]
     model_search_path = discovery["model_search_path"]
-    executable = shutil.which(wolframscript) if not Path(wolframscript).is_absolute() else wolframscript
-    if not executable or not Path(executable).exists():
-        raise SarahExportError("wolframscript is required only for export-sarah and was not found.")
+    try:
+        runtime = get_wolfram_runtime(None if wolframscript == "wolframscript" else wolframscript)
+    except WolframRuntimeError as exc:
+        raise SarahExportError(str(exc)) from exc
+    executable = runtime.executable
     output = Path(run_dir).expanduser().resolve()
     if (output / "contract_template.md").exists():
         raise SarahExportError("Export never overwrites an existing contract. Use a fresh task directory.")
@@ -69,28 +71,18 @@ def export_sarah_model(
         encoding="utf-8",
     )
     try:
-        completed = subprocess.run(
-            [str(executable), "-file", str(driver)],
-            cwd=str(input_dir),
-            capture_output=True,
-            text=True,
-            timeout=max(1, int(timeout_seconds)),
-            check=False,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise SarahExportError(
-            "wolframscript timed out before completing the SARAH export. On macOS, a restricted "
-            "agent sandbox can block the WSTP shared-memory transport even when the licensed "
-            "WolframKernel works normally. Verify the kernel directly, then rerun export-sarah "
-            "with permission to execute the existing local wolframscript outside the restricted sandbox."
-        ) from exc
-    (proof_dir / "sarah_export_stdout.txt").write_text(completed.stdout, encoding="utf-8")
-    (proof_dir / "sarah_export_stderr.txt").write_text(completed.stderr, encoding="utf-8")
-    if completed.returncode != 0:
-        raise SarahExportError(
-            "SARAH export failed. Review proof_materials/sarah_export_stderr.txt; "
-            "the existing SARAH installation was not modified."
-        )
+        completed = runtime.run(file=driver, cwd=input_dir, timeout=timeout_seconds, stage="SARAH export")
+    except WolframRuntimeError as exc:
+        completed = exc.result
+        raise SarahExportError(str(exc)) from exc
+    finally:
+        if "completed" in locals():
+            (proof_dir / "sarah_export_stdout.txt").write_text(completed.get("stdout", ""), encoding="utf-8")
+            (proof_dir / "sarah_export_stderr.txt").write_text(completed.get("stderr", ""), encoding="utf-8")
+            (proof_dir / "sarah_export_runtime.json").write_text(
+                json.dumps({"runtime": runtime.describe(), "execution": completed}, indent=2), encoding="utf-8")
+    if completed["returncode"] != 0:
+        raise SarahExportError(str(execution_error(completed, "SARAH export")))
 
     vin_candidates = sorted(input_dir.glob("*.vin"))
     map_path = input_dir / "ScaleAndBlock.xml"
@@ -163,7 +155,7 @@ def export_sarah_model(
         "companion_exporter": _record(companion),
         "software_versions": collect_software_versions(
             sarah_root=root, wolframscript=executable,
-            wolfram_version=_export_wolfram_version(completed.stdout),
+            wolfram_version=_export_wolfram_version(completed["stdout"]),
         ),
     }
     if source_directory.is_dir():
