@@ -42,6 +42,11 @@ Tc-only success is not a Tn result. Regenerate legacy models that do not support
 this control. The runner transports JSON separately from solver stdout/stderr,
 preserves both logs, and propagates numerical errors. Do not parse progress text
 as JSON or interpret solver failure as no transition.
+Use `run --timeout <seconds>` to set the CosmoTransitions phase-history time
+limit for either stage. It must be a positive integer; the default remains
+180 seconds. The runtime result records `timeout_seconds` separately from
+physical `inputs`, including on timeout or solver failure, and retains captured
+stdout/stderr. A legacy receipt without this field has no recorded time limit.
 Generated results retain native `phases` with every stored `T`, `X`, `dXdT`,
 phase ID and low/high transition link. `phase_diagnostics` separately retains
 symmetry-group histories, memberships, overlap associations and tunnelling
@@ -85,6 +90,35 @@ logs are retained verbatim. Generated runners record
 fit-related message alone does not diagnose failure of the subsequent direct
 action calculation. Check the final per-transition statuses and finite Tn values;
 the method marker never turns missing or failed results into success.
+
+Both `scripts/compile_template.py` (including `--compare-backends`) and
+`scripts/ptagent_cli.py compile` / `compare-backends` accept `--build-jobs
+<count>` and `--smoke-timeout <seconds>`. Both values must be positive integers.
+Omitting them preserves automatic build parallelism and a 180-second limit
+per PhaseTracer configure/build/run stage. The controls apply to native and WSL
+runs, including comparison runs that reuse hash-matched generated artifacts.
+They are PhaseTracer execution controls, not physical contract parameters;
+for CT-only compilation omit them and use `run --timeout` for execution.
+Inspect the per-attempt receipt and stage logs first. When another attempt is
+needed, rerun through these standard skill controls with the reviewed contract;
+never substitute a handwritten driver, patch generated code, hardcode model
+parameters, or change solver tolerances as a timeout workaround. Preserve
+`--no-smoke`, `--transition-smoke`, backend selection and approval gates.
+
+The generated standard PhaseTracer runner supplies the reviewed field-ordered
+zero-temperature vacuum through `set_guess_points`; these are search hints,
+not extra unreviewed minima or example-specific field values. Regenerate older
+artifacts through the skill to obtain this behavior. Phase points and critical
+transition results are flushed before the native nucleation search, so a later
+Tn error or timeout retains completed phase/Tc evidence without claiming a
+complete nucleation history. The v2 transition protocol records native action
+evidence (`S3_over_T`), nucleation endpoints and vacuum-energy ordering, while
+retaining raw native labels for audit. Inspect this evidence and the separate
+nucleation statuses; a reported temperature without valid evidence is not a
+verified Tn, and preserved Tc is not proof that nucleation completed.
+The action check is not an independent certification of every bounce-profile
+convergence criterion; retain the native solver logs. Legacy v1 output can be
+read with temperature-ordering checks but has `evidence_status=not_verified`.
 
 OS-like vacuum-mass exclusion uses the same criterion in Python, C++ and the
 reference evaluator: `abs(m2_vac) <= 1e-12*max(1,max(abs(m2_vac_group)))`.

@@ -30,6 +30,16 @@ from .user_guidance import write_user_guidance
 from .runner import import_check
 
 
+def _positive_int(value: str) -> int:
+    try:
+        number = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a positive integer") from exc
+    if number <= 0:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return number
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="General finite-temperature phase-transition agent.")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -159,6 +169,8 @@ def build_parser() -> argparse.ArgumentParser:
     compile_cmd.add_argument("--phasetracer-root", default=None, help="PhaseTracer source tree path in the Linux build environment.")
     compile_cmd.add_argument("--linux-runner", choices=["native", "wsl"], default=None, help="How to run PhaseTracer smoke checks. Default: native Linux shell.")
     compile_cmd.add_argument("--wsl-distro", default=None, help="WSL distribution used only with --linux-runner wsl.")
+    compile_cmd.add_argument("--build-jobs", type=_positive_int, default=None, help="PhaseTracer parallel build jobs; positive integer. Default: automatic.")
+    compile_cmd.add_argument("--smoke-timeout", type=_positive_int, default=None, help="PhaseTracer per-stage smoke timeout in seconds; positive integer. Default: 180.")
     compile_cmd.add_argument("--transition-smoke", action="store_true", help="For --backend phasetracer, run the PhaseTracer TransitionFinder smoke check required by the 4D skill delivery flow unless explicitly skipped.")
     compile_cmd.add_argument("--no-clang-format", action="store_true", help="For --backend phasetracer, skip optional clang-format cleanup even if clang-format is installed.")
 
@@ -169,6 +181,8 @@ def build_parser() -> argparse.ArgumentParser:
     compare.add_argument("--phasetracer-root", default=None, help="PhaseTracer source tree path in the Linux build environment.")
     compare.add_argument("--linux-runner", choices=["native", "wsl"], default=None, help="How to run PhaseTracer smoke checks. Default: native Linux shell.")
     compare.add_argument("--wsl-distro", default=None, help="WSL distribution used only with --linux-runner wsl.")
+    compare.add_argument("--build-jobs", type=_positive_int, default=None, help="PhaseTracer parallel build jobs; positive integer. Default: automatic.")
+    compare.add_argument("--smoke-timeout", type=_positive_int, default=None, help="PhaseTracer per-stage smoke timeout in seconds; positive integer. Default: 180.")
     compare.add_argument("--transition-smoke", action="store_true", help="Also run the PhaseTracer TransitionFinder smoke check.")
     compare.add_argument("--no-clang-format", action="store_true", help="Skip optional clang-format cleanup even if clang-format is installed.")
     compare.add_argument("--force-regenerate", action="store_true", help="Regenerate both backend artifacts before comparing instead of reusing hash-matched generated files.")
@@ -181,6 +195,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--model", required=True, help="Generated model Python file.")
     run.add_argument("--parameters", default="", help="Optional JSON object or JSON file with parameter overrides.")
     run.add_argument("--stage", choices=["critical", "nucleation"], default="critical", help="Calculation stage, separate from physical model parameters. Default: critical.")
+    run.add_argument("--timeout", type=_positive_int, default=180, help="CosmoTransitions phase-history timeout in seconds; positive integer. Default: 180.")
 
     return parser
 
@@ -467,6 +482,8 @@ def main(argv: list[str] | None = None) -> int:
                 run_transition_smoke=args.transition_smoke,
                 clang_format=not args.no_clang_format,
                 force_regenerate=args.force_regenerate,
+                build_jobs=args.build_jobs,
+                smoke_timeout=args.smoke_timeout if args.smoke_timeout is not None else 180,
             )
         except CompileBlocked as exc:
             raise SystemExit(str(exc)) from exc
@@ -488,7 +505,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "run":
         _runtime_python(settings)
         parameters = _load_parameters(args.parameters)
-        result = agent.run_phase_history(args.model, parameters=parameters, stage=args.stage)
+        result = agent.run_phase_history(args.model, parameters=parameters, stage=args.stage, timeout=args.timeout)
         print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
         return 0 if result.status == "success" else 3
 
@@ -561,11 +578,14 @@ def _compile_template(args, settings, template, output_dir, backend):
     """Shared dispatch for the CLI and the legacy JSON skill wrapper."""
     agent = PhaseTransitionAgent(settings)
     if backend == "phasetracer":
+        smoke_timeout = getattr(args, "smoke_timeout", None)
         return agent.compile_phasetracer_template(
             template, output_dir=output_dir, run_smoke=not args.no_smoke,
             run_transition_smoke=args.transition_smoke and not args.no_smoke,
             phasetracer_root=args.phasetracer_root or "", linux_runner=_linux_runner(args),
             wsl_distro=_wsl_distro(args), clang_format=not args.no_clang_format,
+            build_jobs=getattr(args, "build_jobs", None),
+            smoke_timeout=smoke_timeout if smoke_timeout is not None else 180,
         )
     return agent.compile_cosmotransitions_template(
         template, output_dir=output_dir, run_import_check=not args.no_smoke,
@@ -586,6 +606,10 @@ def _reject_phasetracer_only_options_for_cosmotransitions(args: argparse.Namespa
         supplied.append("--transition-smoke")
     if args.no_clang_format:
         supplied.append("--no-clang-format")
+    if getattr(args, "build_jobs", None) is not None:
+        supplied.append("--build-jobs")
+    if getattr(args, "smoke_timeout", None) is not None:
+        supplied.append("--smoke-timeout")
     if supplied:
         options = ", ".join(supplied)
         raise SystemExit(f"PhaseTracer-only option(s) {options} are only valid with --backend phasetracer. Remove them or choose `--backend phasetracer`.")

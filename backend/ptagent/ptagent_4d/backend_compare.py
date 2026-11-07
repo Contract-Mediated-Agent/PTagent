@@ -78,9 +78,16 @@ def compare_backends_template(
     run_transition_smoke: bool = False,
     clang_format: bool = True,
     force_regenerate: bool = False,
+    build_jobs: int | None = None,
+    smoke_timeout: int = 180,
 ) -> BackendCompareResult:
     from .phasetracer_backend import compare_phasetracer_smoke_output
     from .template_contract import validate_contract_template
+
+    if build_jobs is not None and (isinstance(build_jobs, bool) or not isinstance(build_jobs, int) or build_jobs <= 0):
+        raise ValueError("build_jobs must be a positive integer")
+    if isinstance(smoke_timeout, bool) or not isinstance(smoke_timeout, int) or smoke_timeout <= 0:
+        raise ValueError("smoke_timeout must be a positive integer")
 
     validation = validate_contract_template(markdown_text, review_required=True, compile_backend="compare-backends")
     if not validation.ok:
@@ -118,6 +125,8 @@ def compare_backends_template(
         force_regenerate=force_regenerate,
         clang_format=clang_format,
         phasetracer_root=resolved_phasetracer_root,
+        build_jobs=build_jobs,
+        smoke_timeout=smoke_timeout,
     )
     smoke_result = run_phasetracer_smoke(
         phasetracer_result.model_path.parent,
@@ -125,6 +134,8 @@ def compare_backends_template(
         linux_runner=linux_runner,
         wsl_distro=wsl_distro,
         run_transition_smoke=run_transition_smoke,
+        build_jobs=build_jobs,
+        timeout=smoke_timeout,
     )
     if not smoke_result.ok:
         raise CompileBlocked(f"Generated PhaseTracer project failed cross-backend smoke check: {smoke_result.status}\n{smoke_result.stderr or smoke_result.stdout}")
@@ -204,6 +215,8 @@ def _reuse_or_compile_phasetracer_artifact(
     force_regenerate: bool,
     clang_format: bool,
     phasetracer_root: str,
+    build_jobs: int | None = None,
+    smoke_timeout: int = 180,
 ) -> tuple[CompileResult, str]:
     from .phasetracer_backend import _render_cmake, compile_phasetracer_template
 
@@ -228,6 +241,8 @@ def _reuse_or_compile_phasetracer_artifact(
         clang_format=clang_format,
         phasetracer_root=phasetracer_root,
         for_comparison=True,
+        build_jobs=build_jobs,
+        smoke_timeout=smoke_timeout,
     )
     action = "regenerated_forced" if force_regenerate else ("regenerated_stale" if existed_before else "generated")
     return result, action

@@ -629,7 +629,7 @@ def _render_human_contract_template(
             "",
             "### Goldstone Species Handling",
             "",
-            "Fill one row per Goldstone mode or mode group whenever Goldstones exist. Keep short `replacement_expr` values in the table; put long `mass_sq` or replacement expressions in named code blocks below the table.",
+            "Fill one row per Goldstone mode or mode group whenever Goldstones exist. The table may stay empty for a reviewed complete exclusion: Model Card goldstone=excluded, CW and thermal policies=excluded, CT derivative policy and regulator=none/not_applicable, no replacement, and counterterm=none/implicit_in_V1 with no CT basis or conditions. Keep short `replacement_expr` values in the table; put long `mass_sq` or replacement expressions in named code blocks below the table.",
             "Status choices: `needs_review`, `agent_reviewed`, `human_modified`. Compilation requires `agent_reviewed`.",
             "",
             _render_table(["enabled", "name", "mass_sq", "mass_sq_status", "dof", "cw_policy", "ct_policy", "thermal_policy", "regulator", "replacement_expr", "notes"], []),
@@ -2286,7 +2286,20 @@ def _validate_model_card_and_implementation(
         and goldstone.get("regulator") == "none"
         and replacement in no_replacement_values
     )
-    if _goldstone_requires_species(goldstone) and not goldstone_species and not whole_source_spectrum:
+    # A fully reviewed omission is represented by the existing empty species
+    # list, not fabricated masses/d.o.f. or an implicit review of missing choices.
+    complete_exclusion = (
+        str(model_card.get("goldstone", "")).strip() == "excluded"
+        and goldstone.get("cw_policy") == goldstone.get("thermal_policy") == "excluded"
+        and goldstone.get("ct_derivative_policy") in {"none", "not_applicable"}
+        and goldstone.get("regulator") in {"none", "not_applicable"}
+        and replacement in {"0.0", "none", "not_applicable"}
+        and not _placeholder(goldstone.get("notes"))
+        and counterterm_mode in {"none", "implicit_in_V1"}
+        and not basis
+        and not conditions
+    )
+    if _goldstone_requires_species(goldstone) and not goldstone_species and not (whole_source_spectrum or complete_exclusion):
         issues.append(
             _error(
                 "implementation.goldstone.species",

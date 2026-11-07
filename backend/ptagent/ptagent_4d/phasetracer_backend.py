@@ -53,6 +53,8 @@ def compile_phasetracer_template(
     wsl_distro: str = "",
     clang_format: bool = True,
     for_comparison: bool = False,
+    smoke_timeout: int = 180,
+    build_jobs: int | None = None,
 ) -> CompileResult:
     validation = validate_contract_template(markdown_text, review_required=True, compile_backend="compare-backends" if for_comparison else "phasetracer")
     if not validation.ok:
@@ -96,6 +98,8 @@ def compile_phasetracer_template(
             linux_runner=linux_runner,
             wsl_distro=wsl_distro,
             run_transition_smoke=run_transition_smoke,
+            timeout=smoke_timeout,
+            build_jobs=build_jobs,
         )
         status = result.status
         execution_report_path = result.report_path
@@ -766,7 +770,7 @@ def _render_dof_methods(contract: dict[str, Any]) -> str:
         lines.append(f"std::vector<double> ptagent_scalar_c() const {{ return {_cpp_vector_literal(scalar_c)}; }}")
         lines.append(f"std::vector<double> ptagent_vector_c() const {{ return {_cpp_vector_literal(vector_c)}; }}")
     if zero_mode == "standard_CW_V1" or _counterterm_mode(contract) == "explicit_linear_system":
-        lines.append(f"double ptagent_renorm_scale_sq() const {{ return {_float_literal(_renorm_scale_sq(contract))}; }}")
+        lines.append(_render_renorm_scale_method(contract))
     return "\n\n".join(lines)
 
 
@@ -946,12 +950,14 @@ def _render_explicit_counterterm_goldstone_methods(
             "\n".join(mass_lines),
             "\n".join(replacement_lines),
             f"std::vector<double> ptagent_ct_goldstone_dofs() const {{ return {_cpp_vector_literal(dofs)}; }}",
+            "\n".join([
+                "double ptagent_ct_vcw(Eigen::VectorXd phi) const {",
+                "  const double T = 0.0;",
+                f"  return {_v1_component_expression(contract) or '0.0'};",
+                "}",
+            ]),
             textwrap.dedent(
                 """
-                double ptagent_ct_vcw(Eigen::VectorXd phi) const {
-                  return ptagent_V1_component(phi, 0.0);
-                }
-
                 double ptagent_ct_goldstone_cw_for_ct(Eigen::VectorXd phi) const {
                   const auto masses_sq = ptagent_ct_goldstone_masses_sq(phi);
                   const auto dofs = ptagent_ct_goldstone_dofs();
@@ -1532,8 +1538,10 @@ def _render_model_runner(contract: dict[str, Any], *, header_filename: str | Non
     )
     lines = [
         "#include <cmath>",
+        "#include <algorithm>",
         "#include <iomanip>",
         "#include <iostream>",
+        "#include <limits>",
         "#include <optional>",
         "#include <stdexcept>",
         "#include <string>",
@@ -1575,14 +1583,47 @@ def _render_model_runner(contract: dict[str, Any], *, header_filename: str | Non
         '  std::cout << "\\n";',
         "}",
         "",
-        "void print_nucleation_temperature(size_t index, const PhaseTracer::Transition& transition) {",
+        "void print_nucleation_temperature(size_t index, const PhaseTracer::Transition& transition,",
+        "    PTagentPhaseTracer::GeneratedPotential& model, const PhaseTracer::TransitionFinder& finder) {",
         "  // Native TN is uninitialized until nucleation populates both vacuum vectors.",
-        f"  if (transition.true_vacuum_TN.size() == {len(_list(contract.get('fields')))}",
+        "  if (transition.message == PhaseTracer::SUCCESS",
+        f"      && transition.true_vacuum_TN.size() == {len(_list(contract.get('fields')))}",
         f"      && transition.false_vacuum_TN.size() == {len(_list(contract.get('fields')))}",
         "      && transition.true_vacuum_TN.allFinite()",
         "      && transition.false_vacuum_TN.allFinite()",
-        "      && std::isfinite(transition.TN) && transition.TN > 0.0) {",
-        '    std::cout << "PTAGENT_TN " << index << " TN " << transition.TN << "\\n";',
+        "      && std::isfinite(transition.TN) && transition.TN > 0.0 && transition.TN <= transition.TC) {",
+        "    try {",
+        "      const auto& a = transition.true_vacuum_TN;",
+        "      const auto& b = transition.false_vacuum_TN;",
+        "      const double va = model.V(a, transition.TN), vb = model.V(b, transition.TN);",
+        "      // Orient by energy; retain raw native labels for dependency-version audits.",
+        "      const Eigen::VectorXd true_vev = va < vb ? a : b;",
+        "      const Eigen::VectorXd false_vev = va < vb ? b : a;",
+        "      const double separation = (a - b).norm();",
+        "      const double scale = std::max(1.0, std::max(a.norm(), b.norm()));",
+        "      if (!std::isfinite(va) || !std::isfinite(vb) || va == vb",
+        "          || separation <= std::numeric_limits<double>::epsilon() * scale) {",
+        '        std::cout << "PTAGENT_TN_STATUS " << index << " invalid coincident_or_nonfinite_vacua\\n";',
+        "        return;",
+        "      }",
+        "      // Re-evaluate the native action at its reported temperature, without a new search.",
+        "      const double action = finder.get_action(true_vev, false_vev, transition.TN);",
+        "      const double s3_over_t = action / transition.TN;",
+        "      if (!std::isfinite(s3_over_t) || action <= 0.0 || action >= std::numeric_limits<double>::max()) {",
+        '        std::cout << "PTAGENT_TN_STATUS " << index << " invalid nonfinite_or_sentinel_action\\n";',
+        "        return;",
+        "      }",
+        '      print_transition_vector(index, "native_true_vev_Tn", a);',
+        '      print_transition_vector(index, "native_false_vev_Tn", b);',
+        '      print_transition_vector(index, "true_vev_Tn", true_vev);',
+        '      print_transition_vector(index, "false_vev_Tn", false_vev);',
+        '      std::cout << "PTAGENT_TN_EVIDENCE " << index << " S3_over_T " << s3_over_t',
+        '                << " V_true " << std::min(va, vb) << " V_false " << std::max(va, vb)',
+        '                << " separation " << separation << "\\n";',
+        '      std::cout << "PTAGENT_TN " << index << " TN " << transition.TN << std::endl;',
+        "    } catch (const std::exception& exc) {",
+        '      std::cout << "PTAGENT_TN_STATUS " << index << " unavailable action_check_failed " << exc.what() << std::endl;',
+        "    }",
         "  } else {",
         '    std::cout << "PTAGENT_TN_STATUS " << index << " unavailable\\n";',
         "  }",
@@ -1625,6 +1666,7 @@ def _render_model_runner(contract: dict[str, Any], *, header_filename: str | Non
         "}",
         "",
         "int run_transition_check(const TransitionOptions& options) {",
+        "  bool critical_saved = false;",
         "  try {",
         *([] if numerical["Tmax_approved"] else [
             f'    std::cout << "PTAGENT_TC_STATUS waiting_for_Tmax_approval " << {json.dumps(scan_approval_message(numerical))} << "\\n";',
@@ -1632,7 +1674,10 @@ def _render_model_runner(contract: dict[str, Any], *, header_filename: str | Non
         ]),
         "    PTagentPhaseTracer::GeneratedPotential model;",
         "    std::cout << std::setprecision(17);",
+        '    std::cout << "PTAGENT_TRANSITION_PROTOCOL 2\\n";',
         "    PhaseTracer::PhaseFinder phase_finder(model);",
+        "    // An approved vacuum is a search hint, not a forced minimum or phase filter.",
+        "    phase_finder.set_guess_points({model.ptagent_zeroT_vacuum_point()});",
         *([
             f"    phase_finder.set_t_high({numerical['Tmax']!r});",
             f'    std::cout << "PTAGENT_SCAN Tmax " << {numerical["Tmax"]!r} << " approved true\\n";',
@@ -1647,14 +1692,22 @@ def _render_model_runner(contract: dict[str, Any], *, header_filename: str | Non
         "    }",
         "    phase_finder.find_phases();",
         "    if (options.print_phases) std::cout << phase_finder;",
-        "    PhaseTracer::ActionCalculator action_calculator(model);",
-        "    PhaseTracer::TransitionFinder transition_finder(phase_finder, action_calculator);",
-        "    // Use native direct action evaluation, avoiding an additional polynomial-fit approximation.",
-        "    // Keep the native nucleation criterion and tolerances; this may cost more action evaluations.",
-        "    transition_finder.set_fit_action_curve(false);",
-        '    std::cout << "PTAGENT_TN_METHOD direct_action\\n";',
-        "    transition_finder.find_transitions();",
-        "    const auto transitions = transition_finder.get_transitions();",
+        "    for (const auto& phase : phase_finder.get_phases()) {",
+        "      for (size_t i = 0; i < phase.T.size(); ++i) {",
+        '        std::cout << "PTAGENT_PHASE_POINT " << phase.key << " T " << phase.T[i] << " V " << phase.V[i] << " X";',
+        '        for (Eigen::Index j = 0; j < phase.X[i].size(); ++j) std::cout << " " << phase.X[i][j];',
+        '        std::cout << "\\n";',
+        "      }",
+        "    }",
+        "    std::cout << std::flush;",
+        "    PhaseTracer::TransitionFinder critical_finder(phase_finder);",
+        "    critical_finder.find_transitions();",
+        "    const auto transitions = critical_finder.get_transitions();",
+        "    for (const auto& transition : transitions) {",
+        "      if (transition.message != PhaseTracer::SUCCESS || !std::isfinite(transition.TC)",
+        "          || transition.TC < 0.0 || transition.TC > phase_finder.get_t_high())",
+        '        throw std::runtime_error("invalid critical temperature returned by native solver");',
+        "    }",
         '    std::cout << "PTAGENT_TRANSITION transitions " << transitions.size() << "\\n";',
         '    std::cout << "PTAGENT_TC_COUNT " << transitions.size() << "\\n";',
         "    if (transitions.empty()) {",
@@ -1672,13 +1725,47 @@ def _render_model_runner(contract: dict[str, Any], *, header_filename: str | Non
         '                << "\\n";',
         '      print_transition_vector(index, "low_vev", transition.true_vacuum);',
         '      print_transition_vector(index, "high_vev", transition.false_vacuum);',
-        "      print_nucleation_temperature(index, transition);",
         "    }",
+        "    std::cout << std::flush;",
+        "    critical_saved = true;",
+        "    if (transitions.empty()) return 0;",
+        "    PhaseTracer::ActionCalculator action_calculator(model);",
+        "    PhaseTracer::TransitionFinder transition_finder(phase_finder, action_calculator);",
+        "    // Native direct action search; no fitted action curve or altered solver tolerances.",
+        "    transition_finder.set_fit_action_curve(false);",
+        '    std::cout << "PTAGENT_TN_METHOD direct_action\\nPTAGENT_TN_STAGE started" << std::endl;',
+        "    transition_finder.find_transitions();",
+        "    const auto nucleated = transition_finder.get_transitions();",
+        "    std::vector<bool> matched(nucleated.size(), false);",
+        "    for (size_t index = 0; index < transitions.size(); ++index) {",
+        "      const auto& critical = transitions[index];",
+        "      bool found = false;",
+        "      bool alternative_selected = false;",
+        "      for (size_t j = 0; j < nucleated.size(); ++j) {",
+        "        const auto& candidate = nucleated[j];",
+        "        const bool same_pair = critical.true_phase.key == candidate.true_phase.key",
+        "            && critical.false_phase.key == candidate.false_phase.key",
+        "            && std::abs(critical.TC - candidate.TC) <= critical_finder.get_TC_tol_rel() * std::max(1.0, std::abs(critical.TC));",
+        "        if (same_pair && critical.key != candidate.key) alternative_selected = true;",
+        "        if (!matched[j] && same_pair && critical.key == candidate.key) {",
+        "          print_nucleation_temperature(index, candidate, model, transition_finder);",
+        "          matched[j] = true; found = true; break;",
+        "        }",
+        "      }",
+        "      if (!found) {",
+        '        std::cout << "PTAGENT_TN_STATUS " << index << (alternative_selected',
+        '            ? " not_selected native_selected_alternative_partner\\n" : " unavailable native_channel_missing\\n");',
+        "      }",
+        "    }",
+        "    for (const bool value : matched) {",
+        '      if (!value) throw std::runtime_error("nucleation channel has no matching saved critical transition");',
+        "    }",
+        '    std::cout << "PTAGENT_TN_STAGE complete" << std::endl;',
         "  } catch (const std::exception& exc) {",
-        '    std::cout << "PTAGENT_TC_STATUS error " << exc.what() << "\\n";',
+        '    std::cout << (critical_saved ? "PTAGENT_TN_STAGE error " : "PTAGENT_TC_STATUS error ") << exc.what() << std::endl;',
         "    return 1;",
         "  } catch (...) {",
-        '    std::cout << "PTAGENT_TC_STATUS error unknown exception\\n";',
+        '    std::cout << (critical_saved ? "PTAGENT_TN_STAGE error " : "PTAGENT_TC_STATUS error ") << "unknown exception" << std::endl;',
         "    return 1;",
         "  }",
         "  return 0;",
@@ -2023,6 +2110,28 @@ def _ct_apply_operator_vector(func: Any, point: np.ndarray, axes: tuple[int, ...
         mm = np.asarray(func(point - step_a - step_b), dtype=float)
         return ((pp - pm - mp + mm) / (4.0 * eps * eps)).tolist()
     raise CompileBlocked("Unsupported CT operator order.")
+
+
+def _render_renorm_scale_method(contract: dict[str, Any]) -> str:
+    name = reviewed_renormalization_scale_name(contract)
+    scale_sq = _renorm_scale_sq(contract)
+    params = _dict(contract.get("parameters"))
+    constants = _list(params.get("constants"))
+    if any(row.get("name") == name for row in constants):
+        return f"double ptagent_renorm_scale_sq() const {{ return {_float_literal(scale_sq)}; }}"
+    normalized = re.sub(r"[^a-z0-9]", "", name.lower())
+    expression = name if normalized == "renormscalesq" else f"{name} * {name}"
+    return "\n".join([
+        "double ptagent_renorm_scale_sq() const {",
+        *_render_parameter_bindings(
+            _list(params.get("public_inputs")), constants, _list(params.get("derived")), indent="  ",
+        ),
+        f"  const double ptagent_scale_sq = {expression};",
+        "  if (!std::isfinite(ptagent_scale_sq) || ptagent_scale_sq <= 0.0)",
+        '    throw std::invalid_argument("Renormalization scale squared must be finite and positive");',
+        "  return ptagent_scale_sq;",
+        "}",
+    ])
 
 
 def _renorm_scale_sq(contract: dict[str, Any]) -> float:

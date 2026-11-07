@@ -241,6 +241,10 @@ def get_wolfram_runtime(executable: str | None = None) -> WolframRuntime:
     temp = env.get("PTAGENT_WOLFRAM_TMPDIR") or next(
         (env[n] for n in ("TMPDIR", "TMP", "TEMP") if env.get(n)), tempfile.gettempdir())
     temp = os.path.abspath(os.path.expanduser(temp))
+    try:
+        Path(temp).mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise WolframRuntimeError("inaccessible", f"Wolfram temporary directory is inaccessible: {temp}: {exc}") from exc
     env.update(TMPDIR=temp, TMP=temp, TEMP=temp)
     probe = _timeout(env.get("PTAGENT_WOLFRAM_PROBE_TIMEOUT", "15"), "PTAGENT_WOLFRAM_PROBE_TIMEOUT")
     limit = _timeout(env.get("PTAGENT_WOLFRAM_TIMEOUT", "600"), "PTAGENT_WOLFRAM_TIMEOUT")

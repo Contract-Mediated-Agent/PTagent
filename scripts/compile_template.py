@@ -5,6 +5,16 @@ import json
 from pathlib import Path
 
 
+def _positive_int(value: str) -> int:
+    try:
+        number = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a positive integer") from exc
+    if number <= 0:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return number
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Compile a PTagent contract template to a backend model.")
     parser.add_argument("--template", required=True, help="contract_template.md path.")
@@ -26,6 +36,8 @@ def main() -> int:
     )
     parser.add_argument("--linux-runner", choices=["native", "wsl"], default=None, help="How to run PhaseTracer smoke checks. Default: native Linux shell.")
     parser.add_argument("--wsl-distro", default=None, help="WSL distribution used only with --linux-runner wsl.")
+    parser.add_argument("--build-jobs", type=_positive_int, default=None, help="PhaseTracer parallel build jobs; positive integer. Default: automatic.")
+    parser.add_argument("--smoke-timeout", type=_positive_int, default=None, help="PhaseTracer per-stage smoke timeout in seconds; positive integer. Default: 180.")
     parser.add_argument("--transition-smoke", action="store_true", help="For --backend phasetracer, run the PhaseTracer TransitionFinder smoke check required by the 4D skill delivery flow unless explicitly skipped.")
     parser.add_argument("--no-clang-format", action="store_true", help="For PhaseTracer generation, skip optional clang-format cleanup even if clang-format is installed.")
     parser.add_argument("--force-regenerate", action="store_true", help="For --compare-backends, regenerate both backend artifacts instead of reusing hash-matched generated files.")
@@ -123,6 +135,8 @@ def main() -> int:
                 run_transition_smoke=args.transition_smoke,
                 clang_format=not args.no_clang_format,
                 force_regenerate=args.force_regenerate,
+                build_jobs=args.build_jobs,
+                smoke_timeout=args.smoke_timeout if args.smoke_timeout is not None else 180,
             )
         except CompileBlocked as exc:
             raise SystemExit(str(exc)) from exc

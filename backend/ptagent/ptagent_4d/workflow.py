@@ -297,6 +297,8 @@ class PhaseTransitionAgent:
         linux_runner: str = "native",
         wsl_distro: str = "",
         clang_format: bool = True,
+        build_jobs: int | None = None,
+        smoke_timeout: int = 180,
     ) -> CompileResult:
         from .phasetracer_backend import compile_phasetracer_template
 
@@ -315,6 +317,8 @@ class PhaseTransitionAgent:
             linux_runner=linux_runner,
             wsl_distro=wsl_distro,
             clang_format=clang_format,
+            build_jobs=build_jobs,
+            smoke_timeout=smoke_timeout,
         )
 
     def compare_backends_template(
@@ -330,6 +334,8 @@ class PhaseTransitionAgent:
         run_transition_smoke: bool = False,
         clang_format: bool = True,
         force_regenerate: bool = False,
+        build_jobs: int | None = None,
+        smoke_timeout: int = 180,
     ):
         from .backend_compare import compare_backends_template
 
@@ -345,6 +351,8 @@ class PhaseTransitionAgent:
             run_transition_smoke=run_transition_smoke,
             clang_format=clang_format,
             force_regenerate=force_regenerate,
+            build_jobs=build_jobs,
+            smoke_timeout=smoke_timeout,
         )
 
     def run_phase_history(
@@ -353,8 +361,9 @@ class PhaseTransitionAgent:
         *,
         parameters: dict[str, Any] | None = None,
         stage: str = "critical",
+        timeout: int = 180,
     ) -> PhaseHistoryResult:
-        return run_phase_history(Path(model_path), self.settings, parameters=parameters, stage=stage)
+        return run_phase_history(Path(model_path), self.settings, parameters=parameters, stage=stage, timeout=timeout)
 
     def persist_runtime(
         self,

@@ -564,6 +564,7 @@ class PhaseHistoryResult:
     symmetry_diagnostics: list[dict[str, Any]] = field(default_factory=list)
     phases: list[dict[str, Any]] | None = None
     phase_diagnostics: dict[str, Any] | None = None
+    timeout_seconds: int | None = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "PhaseHistoryResult":
@@ -585,6 +586,7 @@ class PhaseHistoryResult:
             symmetry_diagnostics=[dict(item) for item in _as_list(data.get("symmetry_diagnostics"))],
             phases=([dict(item) for item in data["phases"]] if data.get("phases") is not None else None),
             phase_diagnostics=(dict(data["phase_diagnostics"]) if data.get("phase_diagnostics") is not None else None),
+            timeout_seconds=data.get("timeout_seconds"),
         )
 
     def to_dict(self) -> dict[str, Any]:

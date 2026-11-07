@@ -452,20 +452,27 @@ def run_phase_history(
     *,
     parameters: dict[str, Any] | None = None,
     stage: str = "critical",
+    timeout: int = 180,
 ) -> PhaseHistoryResult:
-    if stage not in ("critical", "nucleation"):
+    if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout <= 0:
         return PhaseHistoryResult(
             status="error", model_path=str(model_path), inputs=parameters or {}, stage=stage,
+            summary="timeout must be a positive integer in seconds; use --timeout or the timeout keyword argument.",
+        )
+    controls = {"stage": stage, "timeout_seconds": timeout}
+    if stage not in ("critical", "nucleation"):
+        return PhaseHistoryResult(
+            status="error", model_path=str(model_path), inputs=parameters or {}, **controls,
             summary="Runtime stage must be critical or nucleation.",
         )
     if parameters and "stage" in parameters:
         return PhaseHistoryResult(
-            status="error", model_path=str(model_path), inputs=parameters, stage=stage,
+            status="error", model_path=str(model_path), inputs=parameters, **controls,
             summary="stage is a runtime control, not a model parameter; use --stage or the stage keyword argument.",
         )
     ok, message = check_runtime(settings)
     if not ok:
-        return PhaseHistoryResult(status="runtime_unavailable", model_path=str(model_path), summary=message, stage=stage)
+        return PhaseHistoryResult(status="runtime_unavailable", model_path=str(model_path), summary=message, **controls)
 
     with tempfile.TemporaryDirectory(prefix="ptagent-runtime-") as directory:
         params_path = Path(directory) / "parameters.json"
@@ -529,7 +536,7 @@ with open(result_path, 'w', encoding='utf-8') as handle:
                 [str(settings.runtime_python), "-u", "-c", code],
                 capture_output=True,
                 text=True,
-                timeout=180,
+                timeout=timeout,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             summary = (
@@ -542,11 +549,11 @@ with open(result_path, 'w', encoding='utf-8') as handle:
                 model_path=str(model_path),
                 inputs=parameters or {},
                 summary=summary,
-                stage=stage,
+                **controls,
                 solver_stdout=_runtime_log_text(getattr(exc, "stdout", None)),
                 solver_stderr=_runtime_log_text(getattr(exc, "stderr", None)),
             )
-        logs = {"solver_stdout": result.stdout, "solver_stderr": result.stderr, "stage": stage}
+        logs = {"solver_stdout": result.stdout, "solver_stderr": result.stderr, **controls}
         if result.returncode != 0:
             return PhaseHistoryResult(
                 status="error",

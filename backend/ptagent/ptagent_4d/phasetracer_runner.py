@@ -39,7 +39,12 @@ def run_phasetracer_smoke(
     wsl_distro: str = "",
     run_transition_smoke: bool = False,
     timeout: int = 180,
+    build_jobs: int | None = None,
 ) -> PhaseTracerSmokeResult:
+    if isinstance(timeout, bool) or not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError("timeout must be finite and positive")
+    if build_jobs is not None and (isinstance(build_jobs, bool) or not isinstance(build_jobs, int) or build_jobs <= 0):
+        raise ValueError("build_jobs must be a positive integer")
     runner = (linux_runner or "native").strip().lower()
     if runner not in {"native", "wsl"}:
         return PhaseTracerSmokeResult(False, f"unsupported PhaseTracer Linux runner: {linux_runner!r}")
@@ -55,7 +60,7 @@ def run_phasetracer_smoke(
     build_linux = project_linux + "/build"
     commands = [
         ("configure", ["cmake", "-S", project_linux, "-B", build_linux, f"-DPHASETRACER_ROOT={root}"]),
-        ("build", ["cmake", "--build", build_linux, "--target", "run_model", "--parallel", str(min(os.cpu_count() or 2, 8))]),
+        ("build", ["cmake", "--build", build_linux, "--target", "run_model", "--parallel", str(build_jobs or min(os.cpu_count() or 2, 8))]),
         ("run", [build_linux + "/run_model"] + (["--transition"] if run_transition_smoke else [])),
     ]
     project = Path(project_dir).expanduser().absolute()
@@ -65,7 +70,8 @@ def run_phasetracer_smoke(
     report_path = project / "phasetracer_run.json"
     report = {"schema": "ptagent.phasetracer.run.v1", "status": "running", "ok": False,
               "phasetracer_root": root, "project_dir": str(project), "log_dir": str(attempt),
-              "transition_requested": run_transition_smoke, "stages": [], "transition_results": {}}
+              "transition_requested": run_transition_smoke, "timeout_seconds": timeout,
+              "build_jobs": build_jobs or min(os.cpu_count() or 2, 8), "stages": [], "transition_results": {}}
     report["generated_file_sha256"] = {
         path.name: hashlib.sha256(path.read_bytes()).hexdigest()
         for path in sorted(project.iterdir()) if path.is_file()
@@ -89,16 +95,21 @@ def run_phasetracer_smoke(
         stderr = Path(receipt["stderr_path"]).read_text(encoding="utf-8", errors="replace")
         stdout_parts.append(stdout)
         stderr_parts.append(stderr)
+        if stage == "run":
+            # A timeout or bounce failure must not discard already flushed Tc records.
+            report["transition_results"] = parse_transition_output(stdout, requested=run_transition_smoke)
         if receipt["status"] != "success":
             report["status"] = f"{stage}_{receipt['status']}"
             break
         if stage == "run":
-            report["transition_results"] = parse_transition_output(stdout, requested=run_transition_smoke)
-            report["ok"] = report["transition_results"]["critical_status"] not in {"error", "invalid_output"}
+            report["ok"] = (report["transition_results"]["critical_status"] not in {"error", "invalid_output"}
+                            and report["transition_results"]["nucleation_status"] not in {"error", "interrupted"})
             report["status"] = "success" if report["ok"] else "invalid_transition_output"
         save()
     save()
     ok_status = "phasetracer smoke+transition ok" if run_transition_smoke else "phasetracer smoke ok"
+    if run_transition_smoke and report["transition_results"].get("nucleation_status") in {"partial", "unavailable"}:
+        ok_status = "phasetracer smoke+critical ok; nucleation " + report["transition_results"]["nucleation_status"]
     status = ok_status if report["ok"] else f"phasetracer smoke failed: {report['status']}"
     status += f"; report: {report_path}"
     return PhaseTracerSmokeResult(report["ok"], status, "\n".join(stdout_parts), "\n".join(stderr_parts),
@@ -143,16 +154,37 @@ def _run_stage(command: list[str], *, stage: str, log_dir: Path, timeout: int) -
 def parse_transition_output(stdout: str, *, requested: bool) -> dict:
     """Read the generated runner's protocol, never estimate a missing Tn."""
     result = {"critical_status": "not_requested", "nucleation_status": "not_requested",
-              "nucleation_method": "unspecified", "transitions": []}
+              "nucleation_method": "unspecified", "transitions": [], "phases": {}}
     if not requested:
         return result
     rows, count, status = {}, None, ""
+    protocol, nucleation_stage = 1, ""
     try:
         for line in stdout.splitlines():
             tokens = line.split()
             if not tokens:
                 continue
-            if tokens[0] == "PTAGENT_TN_METHOD":
+            if tokens[0] == "PTAGENT_TRANSITION_PROTOCOL":
+                if tokens[1:] != ["2"] or protocol != 1:
+                    raise ValueError("unknown/duplicate transition protocol")
+                protocol = 2
+            elif tokens[0] == "PTAGENT_PHASE_POINT":
+                if tokens[2] != "T" or tokens[4] != "V" or tokens[6] != "X":
+                    raise ValueError("invalid phase point")
+                values = list(map(float, [tokens[3], tokens[5], *tokens[7:]]))
+                if len(values) < 3 or not all(math.isfinite(v) for v in values):
+                    raise ValueError("non-finite/empty phase point")
+                result["phases"].setdefault(str(int(tokens[1])), []).append(
+                    {"T": values[0], "V": values[1], "phi": values[2:]})
+            elif tokens[0] == "PTAGENT_TN_STAGE":
+                if tokens[1] not in {"started", "complete", "error"}:
+                    raise ValueError("unknown nucleation stage")
+                if nucleation_stage in {"complete", "error"} or (tokens[1] == "started" and nucleation_stage):
+                    raise ValueError("duplicate/out-of-order nucleation stage")
+                nucleation_stage = tokens[1]
+                if nucleation_stage == "error":
+                    result["nucleation_error"] = " ".join(tokens[2:])
+            elif tokens[0] == "PTAGENT_TN_METHOD":
                 if tokens[1:] != ["direct_action"] or result["nucleation_method"] != "unspecified":
                     raise ValueError("unknown/duplicate nucleation method")
                 result["nucleation_method"] = tokens[1]
@@ -164,7 +196,7 @@ def parse_transition_output(stdout: str, *, requested: bool) -> dict:
                 if status:
                     raise ValueError("duplicate critical status")
                 status = tokens[1]
-            elif tokens[0] in {"PTAGENT_TC", "PTAGENT_TN", "PTAGENT_TN_STATUS"}:
+            elif tokens[0] in {"PTAGENT_TC", "PTAGENT_TN", "PTAGENT_TN_STATUS", "PTAGENT_TN_EVIDENCE", "PTAGENT_TRANSITION_VECTOR"}:
                 index = int(tokens[1])
                 row = rows.setdefault(index, {"index": index, "Tc": None, "Tn": None, "nucleation_status": "missing"})
                 if tokens[0] == "PTAGENT_TC":
@@ -174,16 +206,34 @@ def parse_transition_output(stdout: str, *, requested: bool) -> dict:
                     if not math.isfinite(value) or value < 0:
                         raise ValueError("non-finite/negative Tc")
                     row["Tc"] = value
+                elif tokens[0] == "PTAGENT_TN_EVIDENCE":
+                    keys = ["S3_over_T", "V_true", "V_false", "separation"]
+                    if tokens[2::2] != keys or "evidence" in row:
+                        raise ValueError("invalid/duplicate nucleation evidence")
+                    row["evidence"] = dict(zip(keys, map(float, tokens[3::2])))
+                elif tokens[0] == "PTAGENT_TRANSITION_VECTOR":
+                    name = tokens[2]
+                    vectors = row.setdefault("vectors", {})
+                    if name in vectors:
+                        raise ValueError("duplicate transition vector")
+                    vector = list(map(float, tokens[3:]))
+                    if not vector or not all(math.isfinite(value) for value in vector):
+                        raise ValueError("non-finite/empty transition vector")
+                    vectors[name] = vector
                 else:
                     if row["nucleation_status"] != "missing":
                         raise ValueError("duplicate Tn record")
                     if tokens[0] == "PTAGENT_TN":
                         value = float(tokens[3])
                         if tokens[2] != "TN" or not math.isfinite(value) or value <= 0:
-                            raise ValueError("invalid Tn")
+                            if protocol == 1:
+                                raise ValueError("invalid Tn")
+                            row.update(Tn=None, raw_Tn=tokens[3], nucleation_status="invalid", reason="invalid Tn")
+                            continue
                         row.update(Tn=value, nucleation_status="available")
-                    elif tokens[2] == "unavailable":
-                        row["nucleation_status"] = "unavailable"
+                    elif tokens[2] in {"unavailable", "invalid", "not_selected"}:
+                        row["nucleation_status"] = tokens[2]
+                        row["reason"] = " ".join(tokens[3:])
                     else:
                         raise ValueError("unknown Tn status")
         if status == "error":
@@ -193,13 +243,43 @@ def parse_transition_output(stdout: str, *, requested: bool) -> dict:
             raise ValueError("missing/inconsistent critical count")
         if status != ("success" if count else "no_transitions") or any(row["Tc"] is None for row in rows.values()):
             raise ValueError("missing/inconsistent critical output")
-        if any(row["nucleation_status"] == "missing" for row in rows.values()):
+        if protocol == 1 and any(row["nucleation_status"] == "missing" for row in rows.values()):
             raise ValueError("missing nucleation result status")
         transitions = [rows[index] for index in sorted(rows)]
+        for row in transitions:
+            if row["nucleation_status"] == "missing":
+                row["nucleation_status"] = "error" if nucleation_stage == "error" else "interrupted"
+            reason = ""
+            if row["Tn"] is not None and row["Tn"] > row["Tc"]:
+                reason = "Tn exceeds Tc"
+            evidence = row.get("evidence", {})
+            if row["Tn"] is not None and protocol == 2:
+                if not evidence or not all(math.isfinite(v) for v in evidence.values()):
+                    reason = "missing or non-finite native action evidence"
+                elif not (0 < evidence["S3_over_T"] < float.fromhex('0x1.fffffffffffffp+1023')
+                          and evidence["V_false"] > evidence["V_true"] and evidence["separation"] > 0):
+                    reason = "invalid action or vacuum ordering"
+                vectors = row.get("vectors", {})
+                true, false = vectors.get("true_vev_Tn", []), vectors.get("false_vev_Tn", [])
+                if not true or len(true) != len(false) or true == false:
+                    reason = "missing or coincident nucleation endpoints"
+            if reason:
+                row.update(raw_Tn=row["Tn"], Tn=None, nucleation_status="invalid", reason=reason)
+            row["evidence_status"] = "native_action_checked" if row["Tn"] is not None and protocol == 2 else "not_verified"
+            # Non-finite evidence remains in raw logs, never in a JSON numeric field.
+            if evidence:
+                row["evidence"] = {key: value if math.isfinite(value) else None for key, value in evidence.items()}
         available = sum(row["Tn"] is not None for row in transitions)
+        selected = sum(row["nucleation_status"] != "not_selected" for row in transitions)
         result.update(critical_status=status, transitions=transitions,
-                      nucleation_status=("not_applicable" if not count else "complete" if available == count
+                      nucleation_status=("not_applicable" if not count else "complete" if available and available == selected
                                          else "partial" if available else "unavailable"))
+        if protocol == 2 and count and nucleation_stage != "complete":
+            result["nucleation_status"] = "partial" if available else "error" if nucleation_stage == "error" else "interrupted"
+        elif protocol == 2 and any(row["nucleation_status"] == "interrupted" for row in transitions):
+            result["nucleation_status"] = "error"
+            result["nucleation_error"] = "completed stage omitted per-transition results"
+        result["protocol_version"] = protocol
     except (IndexError, ValueError) as exc:
         result.update(critical_status="invalid_output", nucleation_status="unavailable", error=str(exc))
     return result

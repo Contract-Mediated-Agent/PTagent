@@ -53,6 +53,28 @@ or system Python override is needed.
 
 Additional software depends on the workflow. SARAH and Wolfram/Mathematica are needed to export a SARAH model, while existing Vevacious++ exports can be imported without SARAH. The DRalgo route requires Wolfram/Mathematica and DRalgo; PhaseTracer is needed to build and run PhaseTracer-style outputs. PTagent checks the environment and reports missing dependencies.
 
+## Release Status and Provenance
+
+The bundled version is **1.0.0rc1**, an **unreleased candidate**, not a published
+release or Git tag. [`backend/ptagent/version.py`](backend/ptagent/version.py)
+provides the skill version even for archive installations without Git.
+
+Software metadata includes `software_versions.ptagent`: the candidate version,
+the product checkout's actual commit when available, and a SHA-256 digest of
+staged and unstaged tracked changes when dirty. Parent repositories are not
+used as product provenance. No remotes, credentials, raw diffs, or untracked
+file contents are recorded. The digest excludes untracked files and submodule
+contents; it is not a complete source archive. Missing Git or failed probes
+leave revision/change information explicitly unknown, not clean. Collection
+is best-effort and not an atomic snapshot of concurrent edits.
+
+The separate regression repository's manual CI accepts a `product_ref`; use a
+full commit SHA for a reproducible product checkout. Automatic CI follows the
+product's default branch. Dependency versions are observed, not locked, so
+reproducing a checkout alone does not reproduce the full runtime environment.
+Provenance and passing tests do not establish universal backend compatibility,
+physics validity, or reproduction of a paper's results.
+
 ## Documentation
 
 Detailed workflows, supported approximations, and command-line options are documented in the [SARAH workflow](references/ptagent_sarah_workflow.md), [4D model workflow](references/ptagent_4d_workflow.md), and [DRalgo/3DEFT workflow](references/ptagent_3deft_workflow.md). See [contract review](references/contract_review.md) for the approval process and [`SKILL.md`](SKILL.md) for the agent instructions.

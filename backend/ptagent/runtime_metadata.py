@@ -1,6 +1,7 @@
 """Read-only software provenance; discovery is not a compatibility guarantee."""
 from __future__ import annotations
 
+import hashlib
 import importlib.metadata
 import json
 import os
@@ -52,14 +53,80 @@ def python_versions(executable: str | Path | None = None) -> dict[str, Any]:
                 "distributions": {}, "diagnostic": f"{type(exc).__name__}: {exc}"}
 
 
-def _git_output(root: Path, *args: str) -> str | None:
+def _git_bytes(root: Path, *args: str) -> bytes | None:
+    # An enclosing agent/test checkout must not redirect this read-only probe.
+    environment = {key: value for key, value in os.environ.items()
+                   if not key.upper().startswith("GIT_")}
+    environment.update(GIT_OPTIONAL_LOCKS="0", GIT_CONFIG_NOSYSTEM="1",
+                       GIT_CONFIG_GLOBAL=os.devnull)
     try:
-        result = subprocess.run(["git", "-C", str(root), *args], capture_output=True,
-                                text=True, timeout=5, check=False,
-                                env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"})
-        return result.stdout.strip() if result.returncode == 0 else None
+        result = subprocess.run(["git", "--no-pager", "--no-replace-objects",
+                                 "-c", "core.fsmonitor=false", "-C", str(root), *args],
+                                capture_output=True, timeout=5, check=False, env=environment)
+        if result.returncode != 0:
+            return None
+        return result.stdout.encode("utf-8") if isinstance(result.stdout, str) else result.stdout
     except (OSError, subprocess.SubprocessError):
         return None
+
+
+def _git_output(root: Path, *args: str) -> str | None:
+    output = _git_bytes(root, *args)
+    if output is None:
+        return None
+    try:
+        return output.decode("utf-8").strip()
+    except UnicodeError:
+        return None
+
+
+def _ptagent_version() -> dict[str, Any]:
+    # Keep this import out of the standalone selected-Python version probe.
+    from .version import RELEASE_STATUS, __version__
+
+    root = Path(__file__).resolve().parents[2]
+    record: dict[str, Any] = {
+        "version": __version__, "release_status": RELEASE_STATUS,
+        "version_source": "backend/ptagent/version.py", "path": str(root),
+        "status": "recorded", "git_status": "no_checkout", "commit": None,
+        "tracked_changes": None, "dirty_diff_sha256": None,
+        "dirty_digest_scope": "staged and unstaged tracked diffs; excludes untracked files and submodule contents",
+    }
+    # Archives installed inside another repository must not inherit its HEAD.
+    # A .git file is valid for a linked worktree or a submodule checkout.
+    if not (root / ".git").exists():
+        return record
+    record["git_status"] = "unavailable"
+    top = _git_output(root, "rev-parse", "--show-toplevel")
+    if not top:
+        return record
+    try:
+        matches_root = Path(top).is_absolute() and Path(top).resolve() == root
+    except (OSError, ValueError):
+        return record
+    if not matches_root:
+        record["git_status"] = "root_mismatch"
+        return record
+    commit = _git_output(root, "rev-parse", "--verify", "HEAD")
+    if not commit or not re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", commit):
+        return record
+    record.update(commit=commit, git_status="revision_only")
+    options = ("--binary", "--no-ext-diff", "--no-textconv", "--no-color",
+               "--no-renames", "--ignore-submodules=none", "--full-index",
+               "--src-prefix=a/", "--dst-prefix=b/", "--diff-algorithm=myers",
+               "--no-indent-heuristic", "--unified=0")
+    staged = _git_bytes(root, "diff", *options, "--cached", commit, "--")
+    unstaged = _git_bytes(root, "diff", *options, "--")
+    if staged is None or unstaged is None:
+        return record
+    dirty = bool(staged or unstaged)
+    digest = hashlib.sha256(b"ptagent.tracked-diff.v1\0")
+    for diff in (staged, unstaged):
+        digest.update(len(diff).to_bytes(8, "big"))
+        digest.update(diff)
+    record.update(git_status="recorded", tracked_changes=dirty,
+                  dirty_diff_sha256=digest.hexdigest() if dirty else None)
+    return record
 
 
 def _source_tool(path: str | Path | None) -> dict[str, Any]:
@@ -124,6 +191,7 @@ def collect_software_versions(
         wolfram.update(version=wolfram_version, version_source="runtime", status="recorded")
     return {
         "schema": "ptagent.software_versions.v1",
+        "ptagent": _ptagent_version(),
         "python": {"current": python_versions(), "runtime": python_versions(runtime_python)
                    if runtime_python else {"status": "not_selected", "version": None,
                                            "executable": None, "distributions": {}}},

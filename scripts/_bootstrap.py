@@ -93,7 +93,9 @@ def _require_project_root(value: str | Path, source: str) -> Path:
     root = _valid_project_root(value)
     if root is None:
         raise FileNotFoundError(
-            f"{source} does not point to a PTagent repository or backend root: {Path(value).expanduser()}"
+            f"{source} does not point to a PTagent repository or backend root: {Path(value).expanduser()}. "
+            "Select the product directory containing backend/ptagent (not the task workspace), "
+            "or omit the override to use this skill's bundled backend."
         )
     return root
 

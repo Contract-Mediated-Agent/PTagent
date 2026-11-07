@@ -56,8 +56,11 @@ preflight does not start Wolfram or search SARAH package paths. Unchecked
 operations remain blocked until their own preflight is run; omitted workflow
 retains the full environment check.
 
-Use the installed skill directory as `<skill-dir>`. If the user provides a
-repository checkout, pass `--project-root <PTagent-repo-root>`. If the user
+Use the installed skill directory as `<skill-dir>`. Scripts inside a product
+checkout also find their own bundled backend, so normally omit `--project-root`.
+Use that override only to select another product/backend checkout containing
+`backend/ptagent` or `ptagent`; it is not the task directory or workspace parent.
+If the user
 provides an existing PhaseTracer source path, pass
 `--phasetracer-root <PhaseTracer-source-root>`.
 For a SARAH model request, also pass `--sarah-model <model-name-or-directory>`;
@@ -152,6 +155,10 @@ For PhaseTracer delivery, retain `phasetracer_run.json` and its per-attempt
 configure/build/run logs. Read `execution_results` for Tc/Tn and their separate
 statuses; do not rerun the model solely to recover successful output. An
 unavailable Tn is not a numerical value or proof of no physical transition.
+Use the normal compile/run entrypoints for numerical delivery. Set their
+documented runtime/resource options when needed; do not write a separate
+driver or patch generated code to fill a missing workflow step. A missing
+standard operation is a reported limitation, not permission to bypass review.
 
 ## Routing
 
