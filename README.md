@@ -55,11 +55,12 @@ Additional software depends on the workflow. SARAH and Wolfram/Mathematica are n
 
 ## Release Status and Provenance
 
-The bundled version is **1.0.0rc1**, an **unreleased candidate**, not a published
-release or Git tag. [`backend/ptagent/version.py`](backend/ptagent/version.py)
+The bundled version is **1.0.0**, published as Git tag
+[`v1.0`](https://github.com/Contract-Mediated-Agent/PTagent/tree/v1.0).
+[`backend/ptagent/version.py`](backend/ptagent/version.py)
 provides the skill version even for archive installations without Git.
 
-Software metadata includes `software_versions.ptagent`: the candidate version,
+Software metadata includes `software_versions.ptagent`: the bundled version,
 the product checkout's actual commit when available, and a SHA-256 digest of
 staged and unstaged tracked changes when dirty. Parent repositories are not
 used as product provenance. No remotes, credentials, raw diffs, or untracked
